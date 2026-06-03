@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -47,3 +50,16 @@ def status():
             "odoo_integration": False
         }
     }
+@app.get("/logs")
+def get_logs():
+    log_path = Path("logs/audit_log.jsonl")
+
+    if not log_path.exists():
+        return []
+
+    with open(log_path, "r") as file:
+        return [
+            json.loads(line)
+            for line in file
+            if line.strip()
+        ]

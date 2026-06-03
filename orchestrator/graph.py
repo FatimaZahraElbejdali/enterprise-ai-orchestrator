@@ -76,13 +76,12 @@ Provide a concise response.
     # Audit log
 
     log_request({
-        "user_message": message,
-        "intent": intent,
-        "selected_agent": selected_agent,
-        "selected_model": selected_model,
-        "agent_result": agent_result,
-        "response": response
-    })
+    "user_message": message,
+    "intent": intent,
+    "selected_agent": selected_agent,
+    "selected_model": selected_model,
+    "agent_result": agent_result
+})
 
     return {
         "intent": intent,
