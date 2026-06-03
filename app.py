@@ -25,3 +25,25 @@ def home():
     return {
         "message": "AI Orchestrator API is running"
     }
+@app.get("/")
+def home():
+    return {
+        "message": "AI Orchestrator API is running"
+    }
+
+
+@app.get("/status")
+def status():
+    return {
+        "status": "online",
+        "service": "AI Orchestrator",
+        "version": "0.1.0",
+        "features": {
+            "intent_classification": True,
+            "agent_routing": True,
+            "model_routing": True,
+            "audit_logging": True,
+            "real_model_apis": False,
+            "odoo_integration": False
+        }
+    }
