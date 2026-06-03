@@ -41,3 +41,15 @@ def select_model(intent: str):
         return "gemini"
 
     return "gpt"
+
+def select_agent(intent: str):
+    if intent == "odoo":
+        return "odoo_agent"
+
+    if intent == "support":
+        return "support_agent"
+
+    if intent == "knowledge":
+        return "knowledge_agent"
+
+    return "general_agent"

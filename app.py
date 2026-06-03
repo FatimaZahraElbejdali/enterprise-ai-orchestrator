@@ -20,3 +20,8 @@ def chat(request: ChatRequest):
     return process_request(
         request.message
     )
+@app.get("/")
+def home():
+    return {
+        "message": "AI Orchestrator API is running"
+    }
