@@ -7,7 +7,11 @@ def classify_intent(message: str):
         "inventory",
         "odoo",
         "supplier",
-        "customer"
+        "suppliers",
+        "customer", 
+        "base de données",
+        "produit",
+        "produits"
     ]):
         return "odoo"
 
