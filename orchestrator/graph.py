@@ -1,3 +1,5 @@
+from orchestrator.approval import requires_approval
+
 from orchestrator.router import (
     classify_intent,
     select_model,
@@ -36,6 +38,8 @@ def process_request(message: str):
     selected_agent = select_agent(intent)
 
     selected_model = select_model(intent)
+
+    approval_required = requires_approval(message)
 
     # Execute agent
 
@@ -80,13 +84,17 @@ Provide a concise response.
     "intent": intent,
     "selected_agent": selected_agent,
     "selected_model": selected_model,
+    "approval_required": approval_required,
+    "approval_status": "pending" if approval_required else "not_required",
     "agent_result": agent_result
 })
 
     return {
-        "intent": intent,
-        "selected_agent": selected_agent,
-        "selected_model": selected_model,
-        "agent_result": agent_result,
-        "response": response
-    }
+    "intent": intent,
+    "selected_agent": selected_agent,
+    "selected_model": selected_model,
+    "approval_required": approval_required,
+    "approval_status": "pending" if approval_required else "not_required",
+    "agent_result": agent_result,
+    "response": response
+}
