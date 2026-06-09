@@ -1,8 +1,9 @@
 from orchestrator.router import (
-    classify_intent,
     select_model,
     select_agent
 )
+
+from orchestrator.intent_classifier import classify_with_confidence
 
 from orchestrator.audit import log_request
 from orchestrator.approval import requires_approval
@@ -33,9 +34,19 @@ def call_model(model: str, prompt: str):
 
 def process_request(message: str):
 
-    intent = classify_intent(message)
+    # Intent Classification
+
+    classification = classify_with_confidence(message)
+
+    intent = classification["intent"]
+    confidence = classification["confidence"]
+
+    # Routing
+
     selected_agent = select_agent(intent)
     selected_model = select_model(intent)
+
+    # Approval Detection
 
     approval_required = requires_approval(message)
     approval = None
@@ -47,6 +58,8 @@ def process_request(message: str):
             selected_agent=selected_agent,
             selected_model=selected_model
         )
+
+    # Agent Execution
 
     if selected_agent == "odoo_agent":
         agent_result = run_odoo_agent(message)
@@ -63,8 +76,16 @@ def process_request(message: str):
             "result": message
         }
 
+    # Build Prompt
+
     prompt = f"""
 You are the selected model: {selected_model}.
+
+Intent:
+{intent}
+
+Confidence:
+{confidence}
 
 Selected agent:
 {selected_agent}
@@ -81,25 +102,45 @@ Approval required:
 Provide a concise response.
 """
 
+    # Model Execution
+
     response = call_model(selected_model, prompt)
+
+    # Audit Logging
 
     log_request({
         "user_message": message,
         "intent": intent,
+        "classification_confidence": confidence,
         "selected_agent": selected_agent,
         "selected_model": selected_model,
         "approval_required": approval_required,
-        "approval_status": "pending" if approval_required else "not_required",
-        "approval_id": approval["id"] if approval else None,
+        "approval_status": (
+            "pending"
+            if approval_required
+            else "not_required"
+        ),
+        "approval_id": (
+            approval["id"]
+            if approval
+            else None
+        ),
         "agent_result": agent_result
     })
 
+    # Final Response
+
     return {
         "intent": intent,
+        "classification_confidence": confidence,
         "selected_agent": selected_agent,
         "selected_model": selected_model,
         "approval_required": approval_required,
-        "approval_status": "pending" if approval_required else "not_required",
+        "approval_status": (
+            "pending"
+            if approval_required
+            else "not_required"
+        ),
         "approval": approval,
         "agent_result": agent_result,
         "response": response

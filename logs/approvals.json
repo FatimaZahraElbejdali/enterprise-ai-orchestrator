@@ -1,0 +1,29 @@
+[
+  {
+    "id": "6e56ab63-7f4e-49f6-9882-82dc691dcf32",
+    "timestamp": "2026-06-09T08:21:43.453905",
+    "status": "pending",
+    "user_message": "Create purchase request for 10 laptops",
+    "intent": "odoo",
+    "selected_agent": "odoo_agent",
+    "selected_model": "gpt"
+  },
+  {
+    "id": "686a6e2f-cf52-4d8f-a983-9e55c930622e",
+    "timestamp": "2026-06-09T08:21:45.089884",
+    "status": "pending",
+    "user_message": "Create purchase request for 10 laptops",
+    "intent": "odoo",
+    "selected_agent": "odoo_agent",
+    "selected_model": "gpt"
+  },
+  {
+    "id": "f311e64b-52e7-4193-bf9f-2e574b6a90ed",
+    "timestamp": "2026-06-09T11:04:34.957654",
+    "status": "pending",
+    "user_message": "Create purchase request for 10 laptops",
+    "intent": "odoo",
+    "selected_agent": "odoo_agent",
+    "selected_model": "gpt"
+  }
+]
