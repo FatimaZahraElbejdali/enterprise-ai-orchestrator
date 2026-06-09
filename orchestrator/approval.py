@@ -1,4 +1,5 @@
 ACTION_KEYWORDS = [
+
     # English
     "create",
     "delete",
@@ -6,8 +7,8 @@ ACTION_KEYWORDS = [
     "modify",
     "approve",
     "reject",
-    "schedule",
     "assign",
+    "schedule",
     "send",
     "cancel",
     "purchase order",
@@ -22,13 +23,19 @@ ACTION_KEYWORDS = [
     "mettre a jour",
     "approuver",
     "rejeter",
-    "planifier",
     "assigner",
+    "planifier",
     "envoyer",
     "annuler",
     "commande achat",
     "demande achat",
 ]
+
+
 def requires_approval(message: str) -> bool:
     text = message.lower()
-    return any(keyword in text for keyword in ACTION_KEYWORDS)
+
+    return any(
+        keyword in text
+        for keyword in ACTION_KEYWORDS
+    )

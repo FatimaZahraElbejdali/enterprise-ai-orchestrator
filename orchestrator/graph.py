@@ -1,5 +1,3 @@
-from orchestrator.approval import requires_approval
-
 from orchestrator.router import (
     classify_intent,
     select_model,
@@ -7,6 +5,8 @@ from orchestrator.router import (
 )
 
 from orchestrator.audit import log_request
+from orchestrator.approval import requires_approval
+from orchestrator.approval_store import create_approval
 
 from models.openai_adapter import ask_gpt
 from models.claude_adapter import ask_claude
@@ -34,14 +34,19 @@ def call_model(model: str, prompt: str):
 def process_request(message: str):
 
     intent = classify_intent(message)
-
     selected_agent = select_agent(intent)
-
     selected_model = select_model(intent)
 
     approval_required = requires_approval(message)
+    approval = None
 
-    # Execute agent
+    if approval_required:
+        approval = create_approval(
+            user_message=message,
+            intent=intent,
+            selected_agent=selected_agent,
+            selected_model=selected_model
+        )
 
     if selected_agent == "odoo_agent":
         agent_result = run_odoo_agent(message)
@@ -58,8 +63,6 @@ def process_request(message: str):
             "result": message
         }
 
-    # Build prompt for model
-
     prompt = f"""
 You are the selected model: {selected_model}.
 
@@ -72,29 +75,32 @@ User request:
 Agent result:
 {agent_result}
 
+Approval required:
+{approval_required}
+
 Provide a concise response.
 """
 
     response = call_model(selected_model, prompt)
 
-    # Audit log
-
     log_request({
-    "user_message": message,
-    "intent": intent,
-    "selected_agent": selected_agent,
-    "selected_model": selected_model,
-    "approval_required": approval_required,
-    "approval_status": "pending" if approval_required else "not_required",
-    "agent_result": agent_result
-})
+        "user_message": message,
+        "intent": intent,
+        "selected_agent": selected_agent,
+        "selected_model": selected_model,
+        "approval_required": approval_required,
+        "approval_status": "pending" if approval_required else "not_required",
+        "approval_id": approval["id"] if approval else None,
+        "agent_result": agent_result
+    })
 
     return {
-    "intent": intent,
-    "selected_agent": selected_agent,
-    "selected_model": selected_model,
-    "approval_required": approval_required,
-    "approval_status": "pending" if approval_required else "not_required",
-    "agent_result": agent_result,
-    "response": response
-}
+        "intent": intent,
+        "selected_agent": selected_agent,
+        "selected_model": selected_model,
+        "approval_required": approval_required,
+        "approval_status": "pending" if approval_required else "not_required",
+        "approval": approval,
+        "agent_result": agent_result,
+        "response": response
+    }
