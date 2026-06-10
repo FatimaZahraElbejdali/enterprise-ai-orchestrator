@@ -114,6 +114,15 @@ def select_agent(intent: str):
     if intent == "knowledge":
         return "knowledge_agent"
 
+    if intent == "development":
+        return "development_agent"
+
+    if intent == "security":
+        return "security_agent"
+
+    if intent == "server":
+        return "server_agent"
+
     return "general_agent"
 
 
@@ -130,5 +139,14 @@ def select_model(intent: str):
 
     if intent == "knowledge":
         return "claude"
+
+    if intent == "development":
+        return "gpt"
+
+    if intent == "security":
+        return "claude"
+
+    if intent == "server":
+        return "gemini"
 
     return "gpt"

@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI
+from fastapi import HTTPException
 from pydantic import BaseModel
 
 from orchestrator.graph import process_request
@@ -64,11 +65,20 @@ def get_logs():
         return []
 
     with open(log_path, "r") as file:
-        return [
-            json.loads(line)
-            for line in file
-            if line.strip()
-        ]
+        logs = []
+        for line_number, line in enumerate(file, start=1):
+            if not line.strip():
+                continue
+
+            try:
+                logs.append(json.loads(line))
+            except json.JSONDecodeError:
+                logs.append({
+                    "line": line_number,
+                    "error": "Invalid audit log entry"
+                })
+
+        return logs
 
 
 @app.get("/approvals")
@@ -81,9 +91,7 @@ def approve_approval(approval_id: str):
     approval = update_approval_status(approval_id, "approved")
 
     if approval is None:
-        return {
-            "error": "Approval not found"
-        }
+        raise HTTPException(status_code=404, detail="Approval not found")
 
     return approval
 
@@ -93,8 +101,6 @@ def reject_approval(approval_id: str):
     approval = update_approval_status(approval_id, "rejected")
 
     if approval is None:
-        return {
-            "error": "Approval not found"
-        }
+        raise HTTPException(status_code=404, detail="Approval not found")
 
     return approval

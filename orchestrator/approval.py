@@ -13,6 +13,12 @@ ACTION_KEYWORDS = [
     "cancel",
     "purchase order",
     "purchase request",
+    "access request",
+    "access change",
+    "grant access",
+    "revoke access",
+    "permission change",
+    "role change",
 
     # French
     "créer",
@@ -29,6 +35,14 @@ ACTION_KEYWORDS = [
     "annuler",
     "commande achat",
     "demande achat",
+    "demande accès",
+    "demande acces",
+    "changement accès",
+    "changement acces",
+    "accorder accès",
+    "accorder acces",
+    "révoquer accès",
+    "revoquer acces",
 ]
 
 

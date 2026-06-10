@@ -1,25 +1,27 @@
+from integrations.odoo_connector import OdooConnector
+
+odoo = OdooConnector()
+
+
 def check_stock(product_name: str):
-    return {
-        "product": product_name,
-        "stock_quantity": 42,
-        "status": "available"
-    }
+    return odoo.check_stock(product_name)
+
+
+def search_product(product_name: str):
+    return odoo.search_product(product_name)
 
 
 def search_customer(customer_name: str):
     return {
+        "source": "mock_odoo",
         "customer": customer_name,
         "status": "found",
         "account_type": "business"
     }
 
 
-def create_purchase_request(product_name: str):
-    return {
-        "action": "create_purchase_request",
-        "product": product_name,
-        "status": "waiting_for_approval"
-    }
+def create_purchase_request(description: str):
+    return odoo.create_purchase_request(description)
 
 
 def run(message: str):
@@ -30,6 +32,13 @@ def run(message: str):
             "agent": "odoo",
             "tool_used": "check_stock",
             "result": check_stock(message)
+        }
+
+    if "product" in text or "produit" in text:
+        return {
+            "agent": "odoo",
+            "tool_used": "search_product",
+            "result": search_product(message)
         }
 
     if "customer" in text or "client" in text:
@@ -48,6 +57,6 @@ def run(message: str):
 
     return {
         "agent": "odoo",
-        "tool_used": "none",
-        "result": "Odoo Agent received the request but no specific tool matched."
+        "tool_used": "test_connection",
+        "result": odoo.test_connection()
     }

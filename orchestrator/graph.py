@@ -1,10 +1,6 @@
-from orchestrator.router import (
-    select_model,
-    select_agent
-)
+from orchestrator.classifier_router import classify_message
 
-from orchestrator.intent_classifier import classify_with_confidence
-
+from orchestrator.router import select_model
 from orchestrator.audit import log_request
 from orchestrator.approval import requires_approval
 from orchestrator.approval_store import create_approval
@@ -16,6 +12,9 @@ from models.gemini_adapter import ask_gemini
 from agents.odoo_agent import run as run_odoo_agent
 from agents.support_agent import run as run_support_agent
 from agents.knowledge_agent import run as run_knowledge_agent
+from agents.development_agent import run as run_development_agent
+from agents.security_agent import run as run_security_agent
+from agents.server_agent import run as run_server_agent
 
 
 def call_model(model: str, prompt: str):
@@ -32,23 +31,52 @@ def call_model(model: str, prompt: str):
     return ask_gpt(prompt)
 
 
+AGENT_RUNNERS = {
+    "odoo_agent": run_odoo_agent,
+    "support_agent": run_support_agent,
+    "knowledge_agent": run_knowledge_agent,
+    "development_agent": run_development_agent,
+    "security_agent": run_security_agent,
+    "server_agent": run_server_agent,
+}
+
+
+def run_selected_agent(selected_agent: str, message: str):
+
+    runner = AGENT_RUNNERS.get(selected_agent)
+    if runner:
+        return runner(message)
+
+    return {
+        "agent": "general",
+        "tool_used": "none",
+        "result": message
+    }
+
+
 def process_request(message: str):
+    if not message or not message.strip():
+        return {
+            "error": "Message cannot be empty"
+        }
 
-    # Intent Classification
+    classification = classify_message(message)
 
-    classification = classify_with_confidence(message)
+    intent = classification.get("intent", "general")
+    selected_agent = classification.get("selected_agent", "general_agent")
+    confidence = classification.get("confidence", 0.0)
+    classifier_source = classification.get("classifier_source")
+    classifier_error = classification.get("classifier_error")
 
-    intent = classification["intent"]
-    confidence = classification["confidence"]
+    classification_failed = classifier_source == "gemini_failed"
+    approval_required = False if classification_failed else requires_approval(message)
 
-    # Routing
+    # If Gemini explicitly detects approval need, also respect that.
+    if not classification_failed and classification.get("requires_approval") is True:
+        approval_required = True
 
-    selected_agent = select_agent(intent)
     selected_model = select_model(intent)
 
-    # Approval Detection
-
-    approval_required = requires_approval(message)
     approval = None
 
     if approval_required:
@@ -59,24 +87,10 @@ def process_request(message: str):
             selected_model=selected_model
         )
 
-    # Agent Execution
-
-    if selected_agent == "odoo_agent":
-        agent_result = run_odoo_agent(message)
-
-    elif selected_agent == "support_agent":
-        agent_result = run_support_agent(message)
-
-    elif selected_agent == "knowledge_agent":
-        agent_result = run_knowledge_agent(message)
-
-    else:
-        agent_result = {
-            "agent": "general",
-            "result": message
-        }
-
-    # Build Prompt
+    agent_result = run_selected_agent(
+        selected_agent=selected_agent,
+        message=message
+    )
 
     prompt = f"""
 You are the selected model: {selected_model}.
@@ -84,11 +98,17 @@ You are the selected model: {selected_model}.
 Intent:
 {intent}
 
-Confidence:
+Classification confidence:
 {confidence}
 
 Selected agent:
 {selected_agent}
+
+Classifier source:
+{classifier_source}
+
+Classifier error:
+{classifier_error}
 
 User request:
 {message}
@@ -99,14 +119,10 @@ Agent result:
 Approval required:
 {approval_required}
 
-Provide a concise response.
+Provide a concise final response for the user.
 """
 
-    # Model Execution
-
     response = call_model(selected_model, prompt)
-
-    # Audit Logging
 
     log_request({
         "user_message": message,
@@ -114,21 +130,13 @@ Provide a concise response.
         "classification_confidence": confidence,
         "selected_agent": selected_agent,
         "selected_model": selected_model,
+        "classifier_source": classifier_source,
+        "classifier_error": classifier_error,
         "approval_required": approval_required,
-        "approval_status": (
-            "pending"
-            if approval_required
-            else "not_required"
-        ),
-        "approval_id": (
-            approval["id"]
-            if approval
-            else None
-        ),
+        "approval_status": "pending" if approval_required else "not_required",
+        "approval_id": approval["id"] if approval else None,
         "agent_result": agent_result
     })
-
-    # Final Response
 
     return {
         "intent": intent,
@@ -136,12 +144,10 @@ Provide a concise response.
         "selected_agent": selected_agent,
         "selected_model": selected_model,
         "approval_required": approval_required,
-        "approval_status": (
-            "pending"
-            if approval_required
-            else "not_required"
-        ),
+        "approval_status": "pending" if approval_required else "not_required",
         "approval": approval,
         "agent_result": agent_result,
-        "response": response
+        "response": response,
+        "classifier_source": classifier_source,
+        "classifier_error": classifier_error
     }
