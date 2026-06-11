@@ -1,6 +1,7 @@
 from orchestrator.classifier_router import classify_message
 
-from orchestrator.router import select_model
+from orchestrator.model_router import select_model
+from orchestrator.risk import classify_risk, requires_approval_for_risk
 from orchestrator.audit import log_request
 from orchestrator.approval import requires_approval
 from orchestrator.approval_store import create_approval
@@ -18,8 +19,7 @@ from agents.server_agent import run as run_server_agent
 
 
 def call_model(model: str, prompt: str):
-
-    if model == "gpt":
+    if model in ["gpt", "openai"]:
         return ask_gpt(prompt)
 
     if model == "claude":
@@ -42,8 +42,8 @@ AGENT_RUNNERS = {
 
 
 def run_selected_agent(selected_agent: str, message: str):
-
     runner = AGENT_RUNNERS.get(selected_agent)
+
     if runner:
         return runner(message)
 
@@ -69,13 +69,19 @@ def process_request(message: str):
     classifier_error = classification.get("classifier_error")
 
     classification_failed = classifier_source == "gemini_failed"
-    approval_required = False if classification_failed else requires_approval(message)
 
-    # If Gemini explicitly detects approval need, also respect that.
-    if not classification_failed and classification.get("requires_approval") is True:
-        approval_required = True
+    risk_level = classify_risk(message)
 
-    selected_model = select_model(intent)
+    approval_required = False
+
+    if not classification_failed:
+        approval_required = (
+            requires_approval_for_risk(risk_level)
+            or requires_approval(message)
+            or classification.get("requires_approval") is True
+        )
+
+    selected_model = select_model(intent, risk_level)
 
     approval = None
 
@@ -97,6 +103,9 @@ You are the selected model: {selected_model}.
 
 Intent:
 {intent}
+
+Risk level:
+{risk_level}
 
 Classification confidence:
 {confidence}
@@ -127,6 +136,7 @@ Provide a concise final response for the user.
     log_request({
         "user_message": message,
         "intent": intent,
+        "risk_level": risk_level,
         "classification_confidence": confidence,
         "selected_agent": selected_agent,
         "selected_model": selected_model,
@@ -140,6 +150,7 @@ Provide a concise final response for the user.
 
     return {
         "intent": intent,
+        "risk_level": risk_level,
         "classification_confidence": confidence,
         "selected_agent": selected_agent,
         "selected_model": selected_model,
