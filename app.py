@@ -2,24 +2,24 @@ import json
 from pathlib import Path
 
 from dotenv import load_dotenv
-
-load_dotenv()
-
-from fastapi import FastAPI
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from integrations.odoo_connector import OdooConnector
 from orchestrator.graph import process_request
 from orchestrator.approval_store import (
     get_approvals,
     update_approval_status
 )
 
+load_dotenv()
 
 app = FastAPI(
     title="AI Orchestrator API",
     version="0.1.0"
 )
+
+odoo = OdooConnector()
 
 
 class ChatRequest(BaseModel):
@@ -47,7 +47,8 @@ def status():
             "approval_detection": True,
             "approval_storage": True,
             "real_model_apis": False,
-            "odoo_integration": False
+            "odoo_connector": True,
+            "odoo_real_integration": False
         }
     }
 
@@ -66,12 +67,14 @@ def get_logs():
 
     with open(log_path, "r") as file:
         logs = []
+
         for line_number, line in enumerate(file, start=1):
             if not line.strip():
                 continue
 
             try:
                 logs.append(json.loads(line))
+
             except json.JSONDecodeError:
                 logs.append({
                     "line": line_number,
@@ -91,7 +94,10 @@ def approve_approval(approval_id: str):
     approval = update_approval_status(approval_id, "approved")
 
     if approval is None:
-        raise HTTPException(status_code=404, detail="Approval not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Approval not found"
+        )
 
     return approval
 
@@ -101,6 +107,19 @@ def reject_approval(approval_id: str):
     approval = update_approval_status(approval_id, "rejected")
 
     if approval is None:
-        raise HTTPException(status_code=404, detail="Approval not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Approval not found"
+        )
 
     return approval
+
+
+@app.get("/odoo/status")
+def odoo_status():
+    return odoo.test_connection()
+
+
+@app.get("/odoo/stock/{product_name}")
+def odoo_stock(product_name: str):
+    return odoo.check_stock(product_name)
