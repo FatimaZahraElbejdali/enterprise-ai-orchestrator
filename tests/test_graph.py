@@ -5,6 +5,7 @@ from orchestrator.graph import process_request
 
 
 class GraphTests(unittest.TestCase):
+
     def test_chat_does_not_crash_when_gemini_classifier_fails(self):
         failed_classification = {
             "intent": "classification_failed",
@@ -27,7 +28,82 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(result["classifier_source"], "gemini_failed")
         self.assertEqual(result["classifier_error"], "quota exceeded")
         self.assertFalse(result["approval_required"])
+        self.assertIn("risk_level", result)
         self.assertIn("response", result)
+
+    def test_graph_returns_low_risk_level(self):
+        classification = {
+            "intent": "server",
+            "selected_agent": "server_agent",
+            "confidence": 0.9,
+            "requires_approval": False,
+            "classifier_source": "mock",
+            "classifier_error": None,
+        }
+
+        with patch("orchestrator.graph.classify_message", return_value=classification):
+            with patch("orchestrator.graph.log_request"):
+                result = process_request("What is the server status?")
+
+        self.assertEqual(result["risk_level"], "low")
+        self.assertFalse(result["approval_required"])
+        self.assertEqual(result["approval_status"], "not_required")
+
+    def test_graph_medium_risk_requires_approval(self):
+        classification = {
+            "intent": "odoo",
+            "selected_agent": "odoo_agent",
+            "confidence": 0.9,
+            "requires_approval": False,
+            "classifier_source": "mock",
+            "classifier_error": None,
+        }
+
+        with patch("orchestrator.graph.classify_message", return_value=classification):
+            with patch("orchestrator.graph.log_request"):
+                result = process_request("Update the stock quantity")
+
+        self.assertEqual(result["risk_level"], "medium")
+        self.assertTrue(result["approval_required"])
+        self.assertEqual(result["approval_status"], "pending")
+
+    def test_graph_high_risk_uses_openai_and_requires_approval(self):
+        classification = {
+            "intent": "odoo",
+            "selected_agent": "odoo_agent",
+            "confidence": 0.9,
+            "requires_approval": False,
+            "classifier_source": "mock",
+            "classifier_error": None,
+        }
+
+        with patch("orchestrator.graph.classify_message", return_value=classification):
+            with patch("orchestrator.graph.log_request"):
+                result = process_request("Delete this invoice")
+
+        self.assertEqual(result["risk_level"], "high")
+        self.assertEqual(result["selected_model"], "openai")
+        self.assertTrue(result["approval_required"])
+        self.assertEqual(result["approval_status"], "pending")
+
+    def test_graph_low_risk_does_not_require_approval(self):
+        classification = {
+            "intent": "knowledge",
+            "selected_agent": "knowledge_agent",
+            "confidence": 0.9,
+            "requires_approval": False,
+            "classifier_source": "mock",
+            "classifier_error": None,
+        }
+
+        with patch("orchestrator.graph.classify_message", return_value=classification):
+            with patch("orchestrator.graph.log_request"):
+                result = process_request("Show me product information")
+
+        self.assertEqual(result["risk_level"], "low")
+        self.assertFalse(result["approval_required"])
+        self.assertEqual(result["approval_status"], "not_required")
+        self.assertEqual(result["selected_model"], "gemini")
 
 
 if __name__ == "__main__":
