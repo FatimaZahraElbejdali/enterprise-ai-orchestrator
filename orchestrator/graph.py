@@ -5,6 +5,7 @@ from orchestrator.risk import classify_risk, requires_approval_for_risk
 from orchestrator.audit import log_request
 from orchestrator.approval import requires_approval
 from orchestrator.approval_store import create_approval
+from orchestrator.planner import create_plan
 
 from models.openai_adapter import ask_gpt
 from models.claude_adapter import ask_claude
@@ -71,6 +72,8 @@ def process_request(message: str):
     classification_failed = classifier_source == "gemini_failed"
 
     risk_level = classify_risk(message)
+    selected_model = select_model(intent, risk_level)
+    execution_plan = create_plan(intent, message, risk_level)
 
     approval_required = False
 
@@ -80,8 +83,6 @@ def process_request(message: str):
             or requires_approval(message)
             or classification.get("requires_approval") is True
         )
-
-    selected_model = select_model(intent, risk_level)
 
     approval = None
 
@@ -113,6 +114,9 @@ Classification confidence:
 Selected agent:
 {selected_agent}
 
+Execution plan:
+{execution_plan}
+
 Classifier source:
 {classifier_source}
 
@@ -140,6 +144,7 @@ Provide a concise final response for the user.
         "classification_confidence": confidence,
         "selected_agent": selected_agent,
         "selected_model": selected_model,
+        "execution_plan": execution_plan,
         "classifier_source": classifier_source,
         "classifier_error": classifier_error,
         "approval_required": approval_required,
@@ -154,6 +159,7 @@ Provide a concise final response for the user.
         "classification_confidence": confidence,
         "selected_agent": selected_agent,
         "selected_model": selected_model,
+        "execution_plan": execution_plan,
         "approval_required": approval_required,
         "approval_status": "pending" if approval_required else "not_required",
         "approval": approval,
