@@ -6,18 +6,34 @@ import { FormEvent, useMemo, useState } from "react";
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+type LooseRecord = Record<string, unknown>;
+
 type ChatResponse = {
   intent?: string;
   agent?: string;
+  selected_agent?: string;
   risk?: string;
+  risk_level?: string;
   requires_approval?: boolean;
   approval_required?: boolean;
   status?: string;
   message?: string;
   approval_id?: string;
   tool_used?: string | null;
-  data?: any;
-  result?: any;
+  data?: LooseRecord;
+  result?: unknown;
+  agent_result?: {
+    agent?: string;
+    tool_used?: string | null;
+    result?: unknown;
+  };
+  response?: {
+    provider?: string;
+    model?: string;
+    success?: boolean;
+    content?: string;
+    error?: string | null;
+  };
 };
 
 export default function ChatPage() {
@@ -66,6 +82,13 @@ export default function ChatPage() {
   }
 
   const odooData = response?.data;
+  const selectedAgent =
+    response?.agent ||
+    response?.selected_agent ||
+    response?.agent_result?.agent;
+  const selectedRisk = response?.risk || response?.risk_level;
+  const selectedTool = response?.tool_used || response?.agent_result?.tool_used;
+  const localAgentResult = response?.agent_result?.result || response?.result;
   const isApprovalRequired =
     response?.requires_approval === true ||
     response?.approval_required === true;
@@ -163,15 +186,7 @@ export default function ChatPage() {
                   setMessage("Change price of BACO CLEAN to 25 DH")
                 }
               >
-                Tester action sensible
-              </button>
-
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setMessage("Check stock for BACO CLEAN")}
-              >
-                Tester lecture Odoo
+                Tester validation Odoo
               </button>
             </div>
           </form>
@@ -188,11 +203,11 @@ export default function ChatPage() {
               />
               <InfoCard
                 label="Agent"
-                value={response.agent || "Non sélectionné"}
+                value={formatAgentName(selectedAgent)}
               />
               <InfoCard
                 label="Risque"
-                value={translateRisk(response.risk)}
+                value={translateRisk(selectedRisk)}
               />
               <InfoCard
                 label="Validation"
@@ -314,6 +329,23 @@ export default function ChatPage() {
                 <p className="genericMessage">
                   {response.message || "Réponse traitée par l’orchestrateur."}
                 </p>
+
+                {localAgentResult && (
+                  <div className="detailsTable">
+                    <Detail
+                      label="Agent"
+                      value={formatAgentName(selectedAgent)}
+                    />
+                    <Detail
+                      label="Outil utilisé"
+                      value={selectedTool || "Aucun"}
+                    />
+                    <Detail
+                      label="Diagnostic"
+                      value={formatAgentResult(localAgentResult)}
+                    />
+                  </div>
+                )}
               </section>
             )}
 
@@ -854,14 +886,62 @@ function Detail({ label, value }: { label: string; value: string }) {
   );
 }
 
-function formatValue(value: any) {
+function formatValue(value: unknown) {
   if (value === undefined || value === null || value === "") return "-";
   return String(value);
 }
 
-function formatPrice(value: any) {
+function formatPrice(value: unknown) {
   if (value === undefined || value === null || value === "") return "-";
   return `${value} DH`;
+}
+
+function formatAgentName(value?: string) {
+  if (!value) return "Non sélectionné";
+
+  const labels: Record<string, string> = {
+    support: "Support",
+    support_agent: "Support",
+    knowledge: "Connaissance",
+    knowledge_agent: "Connaissance",
+    development: "Développement",
+    development_agent: "Développement",
+    security: "Sécurité",
+    security_agent: "Sécurité",
+    server: "Serveur",
+    server_agent: "Serveur",
+    odoo: "Odoo",
+    odoo_agent: "Odoo",
+    general: "Général",
+    general_agent: "Général",
+  };
+
+  return labels[value] || value;
+}
+
+function formatAgentResult(value: unknown) {
+  if (value === undefined || value === null || value === "") return "-";
+
+  if (typeof value === "string") return value;
+
+  if (typeof value !== "object") return String(value);
+
+  const record = value as LooseRecord;
+  const diagnosis = record.diagnosis;
+  const suggestedSteps = record.suggested_steps;
+
+  if (typeof diagnosis === "string" && Array.isArray(suggestedSteps)) {
+    return `${diagnosis}. Actions recommandées: ${suggestedSteps.join("; ")}.`;
+  }
+
+  const summary = record.summary;
+  const nextSteps = record.next_steps || record.recommended_actions;
+
+  if (typeof summary === "string" && Array.isArray(nextSteps)) {
+    return `${summary} Actions recommandées: ${nextSteps.join("; ")}.`;
+  }
+
+  return JSON.stringify(value);
 }
 
 function translateRisk(value?: string) {

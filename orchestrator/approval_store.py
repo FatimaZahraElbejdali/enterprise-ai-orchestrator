@@ -99,3 +99,34 @@ def update_approval_status(approval_id, status):
             return approval
 
     return None
+
+
+def attach_execution_result(approval_id: str, execution_result: dict):
+    approvals = _load_approvals()
+
+    for approval in approvals:
+        if approval.get("id") == approval_id:
+            result = execution_result if isinstance(execution_result, dict) else {}
+            approval["execution_result"] = result
+            approval["executed"] = bool(
+                result.get("success") is True
+                and result.get("executed") is True
+                and result.get("verified") is True
+            )
+            approval["execution_status"] = (
+                "completed" if approval["executed"] else "failed"
+            )
+            approval["updated_at"] = _utc_timestamp()
+
+            metadata = approval.get("metadata")
+
+            if not isinstance(metadata, dict):
+                metadata = {}
+
+            metadata["executed"] = approval["executed"]
+            approval["metadata"] = metadata
+
+            _save_approvals(approvals)
+            return approval
+
+    return None

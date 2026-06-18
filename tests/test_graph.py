@@ -51,6 +51,30 @@ class GraphTests(unittest.TestCase):
         self.assertFalse(result["approval_required"])
         self.assertEqual(result["approval_status"], "not_required")
 
+    def test_support_agent_returns_local_diagnosis_without_openai(self):
+        classification = {
+            "intent": "support",
+            "selected_agent": "support_agent",
+            "confidence": 0.9,
+            "requires_approval": False,
+            "classifier_source": "mock",
+            "classifier_error": None,
+        }
+
+        with patch("orchestrator.graph.classify_message", return_value=classification):
+            with patch("orchestrator.model_router.is_openai_configured", return_value=False):
+                with patch("orchestrator.graph.log_request"):
+                    result = process_request("my printer is not working")
+
+        self.assertEqual(result["intent"], "support")
+        self.assertEqual(result["agent"], "support_agent")
+        self.assertEqual(result["selected_agent"], "support_agent")
+        self.assertEqual(result["risk"], "low")
+        self.assertEqual(result["risk_level"], "low")
+        self.assertEqual(result["tool_used"], "diagnose_printer_issue")
+        self.assertIn("Printer issue detected", result["message"])
+        self.assertIn("Check printer power", result["message"])
+
     def test_graph_medium_risk_requires_approval(self):
         classification = {
             "intent": "odoo",

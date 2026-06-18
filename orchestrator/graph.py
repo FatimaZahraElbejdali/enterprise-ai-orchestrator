@@ -17,6 +17,45 @@ from agents.security_agent import run as run_security_agent
 from agents.server_agent import run as run_server_agent
 
 
+def _format_agent_content(agent_result):
+    if not isinstance(agent_result, dict):
+        return str(agent_result)
+
+    result = agent_result.get("result")
+
+    if isinstance(result, str):
+        return result
+
+    if not isinstance(result, dict):
+        return (
+            "The local Enterprise AI Orchestrator policy handled the request "
+            "without executing sensitive actions."
+        )
+
+    diagnosis = result.get("diagnosis")
+    suggested_steps = result.get("suggested_steps")
+
+    if diagnosis and isinstance(suggested_steps, list):
+        steps = "; ".join(str(step) for step in suggested_steps)
+        return f"Diagnostic: {diagnosis}. Actions recommandées: {steps}."
+
+    summary = result.get("summary")
+    next_steps = result.get("next_steps") or result.get("recommended_actions")
+
+    if summary and isinstance(next_steps, list):
+        steps = "; ".join(str(step) for step in next_steps)
+        return f"{summary} Actions recommandées: {steps}."
+
+    status = result.get("status")
+
+    if status:
+        return f"Demande traitée par l’agent local. Statut: {status}."
+
+    return (
+        "Demande traitée par l’agent local. Consultez la réponse brute pour les détails."
+    )
+
+
 AGENT_RUNNERS = {
     "odoo_agent": run_odoo_agent,
     "support_agent": run_support_agent,
@@ -34,10 +73,7 @@ def _fallback_response(model_route: dict, agent_result: dict | str):
         "provider": "local_fallback",
         "model": model_route.get("model", "local"),
         "success": False,
-        "content": (
-            "OpenAI is not configured or unavailable. "
-            "The local Enterprise AI Orchestrator policy handled the request without executing sensitive actions."
-        ),
+        "content": _format_agent_content(agent_result),
         "error": reason,
         "agent_result": agent_result,
     }
@@ -203,7 +239,9 @@ Provide a concise final response for the user.
 
     return {
         "intent": intent,
+        "agent": selected_agent,
         "risk_level": risk_level,
+        "risk": risk_level,
         "classification_confidence": confidence,
         "selected_agent": selected_agent,
         "selected_model": selected_model,
@@ -212,6 +250,8 @@ Provide a concise final response for the user.
         "approval_status": "pending" if approval_required else "not_required",
         "approval": approval,
         "agent_result": agent_result,
+        "tool_used": agent_result.get("tool_used") if isinstance(agent_result, dict) else None,
+        "result": agent_result.get("result") if isinstance(agent_result, dict) else agent_result,
         "response": response,
         "message": response.get("content") if isinstance(response, dict) else response,
         "classifier_source": classifier_source,

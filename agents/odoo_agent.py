@@ -1,5 +1,8 @@
+import os
 import re
+import unicodedata
 
+from models.openai_adapter import generate_structured_response
 from orchestrator.tool_executor import execute_tool
 from orchestrator.risk import classify_risk
 from orchestrator.approval import requires_approval
@@ -23,6 +26,94 @@ CHANGE_KEYWORDS = [
     "augmenter",
     "diminuer",
 ]
+
+
+ODOO_ACTION_SCHEMA = {
+    "type": "json_schema",
+    "name": "odoo_action_parse",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "intent": {"type": "string", "enum": ["odoo"]},
+            "action": {
+                "type": "string",
+                "enum": [
+                    "check_stock",
+                    "change_price",
+                    "toggle_boolean_field",
+                    "update_document_line",
+                    "update_document_partner",
+                    "update_document_date",
+                    "search_document",
+                    "unknown",
+                ],
+            },
+            "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+            "requires_approval": {"type": "boolean"},
+            "target_model": {
+                "type": ["string", "null"],
+                "enum": [
+                    "product.template",
+                    "account.analytic.account",
+                    "sale.order",
+                    "purchase.order",
+                    "stock.picking",
+                    "account.move",
+                    None,
+                ],
+            },
+            "record_query": {"type": ["string", "null"]},
+            "document_query": {"type": ["string", "null"]},
+            "product_query": {"type": ["string", "null"]},
+            "field_label": {"type": ["string", "null"]},
+            "field_name": {
+                "type": ["string", "null"],
+                "enum": [
+                    "list_price",
+                    "price_unit",
+                    "quantity",
+                    "product_uom_qty",
+                    "product_qty",
+                    "partner_id",
+                    "date_order",
+                    "invoice_date",
+                    "scheduled_date",
+                    None,
+                ],
+            },
+            "new_value": {
+                "type": ["string", "number", "boolean", "null"],
+            },
+            "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+            },
+        },
+        "required": [
+            "intent",
+            "action",
+            "risk",
+            "requires_approval",
+            "target_model",
+            "record_query",
+            "document_query",
+            "product_query",
+            "field_label",
+            "field_name",
+            "new_value",
+            "confidence",
+        ],
+        "additionalProperties": False,
+    },
+}
+
+
+def normalize_label(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "")
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    return " ".join(ascii_value.lower().split())
 
 
 def clean_product_name(value: str) -> str:
@@ -123,6 +214,23 @@ def extract_requested_value(message: str):
     return None
 
 
+def extract_requested_price(message: str):
+    requested_value = extract_requested_value(message)
+
+    if not requested_value:
+        return None
+
+    price_match = re.search(r"\d+(?:[.,]\d+)?", requested_value)
+
+    if not price_match:
+        return None
+
+    try:
+        return float(price_match.group(0).replace(",", "."))
+    except ValueError:
+        return None
+
+
 def detect_odoo_action(message: str) -> str:
     text = message.lower()
 
@@ -151,6 +259,302 @@ def detect_odoo_action(message: str) -> str:
         return "check_product_details"
 
     return "odoo_status"
+
+
+def _empty_parse() -> dict:
+    return {
+        "intent": "odoo",
+        "action": "unknown",
+        "risk": "low",
+        "requires_approval": False,
+        "target_model": None,
+        "record_query": None,
+        "document_query": None,
+        "product_query": None,
+        "field_label": None,
+        "field_name": None,
+        "new_value": None,
+        "confidence": 0.0,
+        "parser_source": "local_rules",
+        "parser_error": None,
+    }
+
+
+def _parse_toggle_boolean_fallback(message: str):
+    patterns = [
+        (
+            r"^(?:cocher|activer|enable|check|tick)\s+(.+?)\s+(?:pour|for)\s+(.+)$",
+            True,
+        ),
+        (
+            r"^(?:décocher|decocher|désactiver|desactiver|disable|uncheck|untick)\s+(.+?)\s+(?:pour|for)\s+(.+)$",
+            False,
+        ),
+    ]
+
+    for pattern, new_value in patterns:
+        match = re.search(pattern, message.strip(), re.IGNORECASE)
+
+        if not match:
+            continue
+
+        return {
+            "intent": "odoo",
+            "action": "toggle_boolean_field",
+            "risk": "medium",
+            "requires_approval": True,
+            "target_model": "account.analytic.account",
+            "record_query": match.group(2).strip(),
+            "field_label": match.group(1).strip(),
+            "field_name": None,
+            "new_value": new_value,
+            "confidence": 0.85,
+            "parser_source": "local_rules",
+            "parser_error": None,
+        }
+
+    return None
+
+
+def parse_odoo_action_deterministic(message: str) -> dict:
+    toggle_parse = _parse_toggle_boolean_fallback(message)
+
+    if toggle_parse:
+        return toggle_parse
+
+    action = detect_odoo_action(message)
+
+    if action == "change_price":
+        return {
+            "intent": "odoo",
+            "action": "change_price",
+            "risk": "medium",
+            "requires_approval": True,
+            "target_model": "product.template",
+            "record_query": extract_product_name(message),
+            "field_label": "Prix de vente",
+            "field_name": "list_price",
+            "new_value": extract_requested_price(message),
+            "confidence": 0.8,
+            "parser_source": "local_rules",
+            "parser_error": None,
+        }
+
+    if action in ["check_stock", "check_price", "check_unit", "check_product_details"]:
+        return {
+            "intent": "odoo",
+            "action": "check_stock",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "product.template",
+            "record_query": extract_product_name(message),
+            "field_label": None,
+            "field_name": None,
+            "new_value": None,
+            "confidence": 0.75,
+            "parser_source": "local_rules",
+            "parser_error": None,
+        }
+
+    fallback = _empty_parse()
+    fallback["action"] = action if action != "odoo_status" else "unknown"
+    return fallback
+
+
+def normalize_openai_parse(parsed: dict, parser_source: str, parser_error=None) -> dict | None:
+    if not isinstance(parsed, dict):
+        return None
+
+    action = parsed.get("action")
+
+    if action not in {
+        "check_stock",
+        "change_price",
+        "toggle_boolean_field",
+        "update_document_line",
+        "update_document_partner",
+        "update_document_date",
+        "search_document",
+        "unknown",
+    }:
+        return None
+
+    result = {
+        "intent": "odoo",
+        "action": action,
+        "risk": parsed.get("risk") if parsed.get("risk") in {"low", "medium", "high"} else "low",
+        "requires_approval": bool(parsed.get("requires_approval")),
+        "target_model": parsed.get("target_model"),
+        "record_query": parsed.get("record_query"),
+        "document_query": parsed.get("document_query"),
+        "product_query": parsed.get("product_query"),
+        "field_label": parsed.get("field_label"),
+        "field_name": parsed.get("field_name"),
+        "new_value": parsed.get("new_value"),
+        "confidence": parsed.get("confidence") if isinstance(parsed.get("confidence"), (int, float)) else 0.0,
+        "parser_source": parser_source,
+        "parser_error": parser_error,
+    }
+
+    if action == "check_stock":
+        result.update({
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "product.template",
+        })
+
+    if action == "change_price":
+        result.update({
+            "risk": "medium",
+            "requires_approval": True,
+            "target_model": "product.template",
+            "field_label": result.get("field_label") or "Prix de vente",
+            "field_name": "list_price",
+        })
+
+        try:
+            result["new_value"] = float(result["new_value"])
+        except (TypeError, ValueError):
+            return None
+
+    if action == "toggle_boolean_field":
+        result.update({
+            "risk": "medium",
+            "requires_approval": True,
+            "target_model": "account.analytic.account",
+            "new_value": result.get("new_value") is True,
+        })
+
+    if action in {
+        "update_document_line",
+        "update_document_partner",
+        "update_document_date",
+    }:
+        target_model = result.get("target_model")
+
+        if target_model not in {
+            "sale.order",
+            "purchase.order",
+            "stock.picking",
+            "account.move",
+        }:
+            return None
+
+        result.update({
+            "risk": "high",
+            "requires_approval": True,
+        })
+
+        field_name = result.get("field_name")
+
+        if action == "update_document_line":
+            if field_name == "quantity":
+                field_name = {
+                    "sale.order": "product_uom_qty",
+                    "purchase.order": "product_qty",
+                    "stock.picking": "product_uom_qty",
+                    "account.move": "quantity",
+                }.get(target_model)
+
+            if (
+                target_model == "stock.picking"
+                and field_name not in {"product_uom_qty", "quantity"}
+            ):
+                return None
+
+            allowed_fields = {
+                "sale.order": {"price_unit", "product_uom_qty"},
+                "purchase.order": {"price_unit", "product_qty"},
+                "stock.picking": {"product_uom_qty"},
+                "account.move": {"price_unit", "quantity"},
+            }
+
+            if field_name not in allowed_fields[target_model]:
+                return None
+
+            try:
+                result["new_value"] = float(result["new_value"])
+            except (TypeError, ValueError):
+                result["new_value"] = None
+
+        if action == "update_document_partner":
+            field_name = "partner_id"
+
+        if action == "update_document_date":
+            allowed_date_fields = {
+                "sale.order": "date_order",
+                "purchase.order": "date_order",
+                "account.move": "invoice_date",
+                "stock.picking": "scheduled_date",
+            }
+            expected_field = allowed_date_fields[target_model]
+
+            if field_name not in {expected_field, None}:
+                return None
+
+            field_name = expected_field
+
+        result["field_name"] = field_name
+
+    if action == "search_document":
+        if result.get("target_model") not in {
+            "sale.order",
+            "purchase.order",
+            "stock.picking",
+            "account.move",
+        }:
+            return None
+
+        result.update({
+            "risk": "low",
+            "requires_approval": False,
+        })
+
+    return result
+
+
+def parse_odoo_action_with_openai(message: str) -> dict:
+    prompt = f"""
+Parse this Odoo request into the required JSON object.
+
+Examples:
+- "Change price for BACOTOP to 3 DH" -> action change_price, target_model product.template, record_query BACOTOP, field_name list_price, new_value 3, requires_approval true.
+- "Check stock for BACO CLEAN" -> action check_stock, target_model product.template, record_query BACO CLEAN, requires_approval false.
+- "Cocher Dotation pour ABDOU LIGHT & SOUNDS" -> action toggle_boolean_field, target_model account.analytic.account, field_label Dotation, new_value true, requires_approval true.
+- "Décocher Pointage pour 21ABLS0008" -> action toggle_boolean_field, target_model account.analytic.account, field_label Pointage, new_value false, requires_approval true.
+- "Change the price of product BACO CLEAN in invoice INV/2026/001 to 7 DH" -> action update_document_line, target_model account.move, document_query INV/2026/001, product_query BACO CLEAN, field_name price_unit, new_value 7, requires_approval true.
+- "Change quantity of BACO CLEAN in purchase order P00015 to 20" -> action update_document_line, target_model purchase.order, document_query P00015, product_query BACO CLEAN, field_name product_qty, new_value 20, requires_approval true.
+- "Change client of quotation S00045 to ABDOU LIGHT & SOUNDS" -> action update_document_partner, target_model sale.order, document_query S00045, field_name partner_id, new_value ABDOU LIGHT & SOUNDS, requires_approval true.
+- "Change invoice date of INV/2026/001 to 2026-06-20" -> action update_document_date, target_model account.move, document_query INV/2026/001, field_name invoice_date, new_value 2026-06-20, requires_approval true.
+- "Change delivery date of WH/OUT/00012 to 2026-06-20" -> action update_document_date, target_model stock.picking, document_query WH/OUT/00012, field_name scheduled_date, new_value 2026-06-20, requires_approval true.
+- For delivery orders, do not emit price_unit. Only quantity changes are supported.
+
+User request:
+{message}
+"""
+
+    response = generate_structured_response(
+        prompt=prompt,
+        schema=ODOO_ACTION_SCHEMA,
+        system_prompt=(
+            "You parse Odoo user requests. You never approve or execute actions. "
+            "Return only structured data for local backend policy to enforce."
+        ),
+        model=os.getenv("OPENAI_ODOO_ASSIST_MODEL"),
+    )
+
+    if response.get("success"):
+        normalized = normalize_openai_parse(
+            response.get("parsed"),
+            parser_source="openai",
+        )
+
+        if normalized:
+            return normalized
+
+    fallback = parse_odoo_action_deterministic(message)
+    fallback["parser_error"] = response.get("error")
+    return fallback
 
 
 def unwrap_tool_response(tool_response):
@@ -216,10 +620,165 @@ def search_customer(customer_name: str):
     )
 
 
-def build_sensitive_approval_response(message: str, action: str):
-    risk = classify_risk(message)
-    product_name = extract_product_name(message)
+def resolve_analytic_field_name(field_label: str):
+    raw_result = unwrap_tool_response(
+        execute_tool("odoo_list_analytic_boolean_fields")
+    )
+
+    if not isinstance(raw_result, dict):
+        return None
+
+    normalized_label = normalize_label(field_label)
+
+    for field in raw_result.get("fields", []):
+        if normalize_label(field.get("label", "")) == normalized_label:
+            return field
+
+    for field in raw_result.get("fields", []):
+        if normalize_label(field.get("name", "")) == normalized_label:
+            return field
+
+    return None
+
+
+def document_tool_name(parsed_action: dict):
+    action = parsed_action.get("action")
+    target_model = parsed_action.get("target_model")
+
+    if action == "update_document_line":
+        return {
+            "sale.order": "odoo_update_sale_order_line",
+            "purchase.order": "odoo_update_purchase_order_line",
+            "account.move": "odoo_update_invoice_line",
+            "stock.picking": "odoo_update_delivery_quantity",
+        }.get(target_model)
+
+    if action == "update_document_partner":
+        return "odoo_update_document_partner"
+
+    if action == "update_document_date":
+        return "odoo_update_document_date"
+
+    return None
+
+
+def search_document_tool_name(target_model: str | None):
+    return {
+        "sale.order": "odoo_search_sale_order",
+        "purchase.order": "odoo_search_purchase_order",
+        "account.move": "odoo_search_invoice",
+        "stock.picking": "odoo_search_delivery_order",
+    }.get(target_model or "")
+
+
+def document_type_label(model_name: str | None):
+    return {
+        "sale.order": "Bon de commande client",
+        "purchase.order": "Bon de commande fournisseur",
+        "account.move": "Facture",
+        "stock.picking": "Bon de livraison",
+    }.get(model_name or "", "Document Odoo")
+
+
+def _missing_document_fields(parsed_action: dict):
+    action = parsed_action.get("action")
+    missing = []
+
+    if not parsed_action.get("target_model"):
+        missing.append("type de document")
+
+    if not parsed_action.get("document_query"):
+        missing.append("référence du document")
+
+    if action == "update_document_line" and not parsed_action.get("product_query"):
+        missing.append("produit")
+
+    if action in {"update_document_line", "update_document_date"} and not parsed_action.get("field_name"):
+        missing.append("champ à modifier")
+
+    if parsed_action.get("new_value") in {None, ""}:
+        missing.append("nouvelle valeur")
+
+    return missing
+
+
+def build_needs_clarification_response(message: str, parsed_action: dict, missing_fields: list[str]):
+    return {
+        "intent": "odoo",
+        "agent": "odoo_agent",
+        "risk": "low",
+        "requires_approval": False,
+        "approval_required": False,
+        "status": "needs_clarification",
+        "message": "Informations manquantes: " + ", ".join(missing_fields) + ".",
+        "tool_used": None,
+        "data": {
+            "action": parsed_action.get("action"),
+            "target_model": parsed_action.get("target_model"),
+            "document_query": parsed_action.get("document_query"),
+            "product_query": parsed_action.get("product_query"),
+            "field_name": parsed_action.get("field_name"),
+            "executed": False,
+        },
+        "result": {
+            "user_message": message,
+            "missing_fields": missing_fields,
+        },
+    }
+
+
+def build_document_metadata(parsed_action: dict):
+    action = parsed_action.get("action")
+    target_model = parsed_action.get("target_model")
+    tool_name = document_tool_name(parsed_action)
+    field_name = parsed_action.get("field_name")
+    new_value = parsed_action.get("new_value")
+    document_query = parsed_action.get("document_query")
+    product_query = parsed_action.get("product_query")
+
+    metadata = {
+        "tool_name": tool_name,
+        "target_model": target_model,
+        "document_query": document_query,
+        "product_query": product_query,
+        "field_name": field_name,
+        "new_value": new_value,
+        "executed": False,
+    }
+
+    if action == "update_document_partner":
+        metadata["partner_query"] = str(new_value)
+
+    if action == "update_document_date":
+        metadata["date_field"] = field_name
+        metadata["new_date"] = str(new_value)
+
+    return metadata
+
+
+def build_sensitive_approval_response(message: str, action: str, parsed_action: dict | None = None):
+    parsed_action = parsed_action or {}
+    risk = parsed_action.get("risk")
+
+    if risk not in {"low", "medium", "high"}:
+        risk = classify_risk(message)
+
+    if action in {
+        "change_price",
+        "toggle_boolean_field",
+        "update_document_line",
+        "update_document_partner",
+        "update_document_date",
+    } and risk == "low":
+        risk = "medium"
+
+    product_name = parsed_action.get("record_query") or extract_product_name(message)
     requested_value = extract_requested_value(message)
+    requested_price = (
+        parsed_action.get("new_value")
+        if action == "change_price" and parsed_action.get("new_value") is not None
+        else extract_requested_price(message)
+    )
 
     action_labels = {
         "change_price": "Modification du prix produit",
@@ -227,9 +786,67 @@ def build_sensitive_approval_response(message: str, action: str):
         "change_unit": "Modification de l’unité produit",
         "modify_invoice": "Action sensible sur facture",
         "create_purchase_request": "Création d’une demande d’achat",
+        "toggle_boolean_field": "Modification d’un champ analytique",
+        "update_document_line": "Modification d’une ligne de document",
+        "update_document_partner": "Modification du client/fournisseur",
+        "update_document_date": "Modification de date document",
     }
 
     title = action_labels.get(action, "Action Odoo sensible")
+    metadata = {
+        "product": product_name,
+        "requested_value": requested_value,
+        "executed": False,
+        "simulation": True,
+    }
+
+    if action == "change_price":
+        requested_value = requested_value or str(requested_price)
+        metadata.update({
+            "tool_name": "odoo_update_product_price",
+            "product_name": product_name,
+            "new_price": requested_price,
+        })
+
+    if action == "toggle_boolean_field":
+        field_label = parsed_action.get("field_label")
+        resolved_field = resolve_analytic_field_name(field_label or "")
+        field_name = (
+            parsed_action.get("field_name")
+            or (resolved_field or {}).get("name")
+        )
+        field_label = (
+            (resolved_field or {}).get("label")
+            or field_label
+        )
+        requested_value = "true" if parsed_action.get("new_value") is True else "false"
+        metadata.update({
+            "tool_name": "odoo_update_analytic_boolean_field",
+            "model": "account.analytic.account",
+            "record_query": product_name,
+            "field_label": field_label,
+            "field_name": field_name,
+            "new_value": parsed_action.get("new_value") is True,
+        })
+
+    if action in {
+        "update_document_line",
+        "update_document_partner",
+        "update_document_date",
+    }:
+        missing_fields = _missing_document_fields(parsed_action)
+
+        if missing_fields:
+            return build_needs_clarification_response(
+                message,
+                parsed_action,
+                missing_fields,
+            )
+
+        metadata = build_document_metadata(parsed_action)
+        product_name = parsed_action.get("document_query")
+        requested_value = parsed_action.get("new_value")
+        title = action_labels.get(action, "Modification document Odoo")
 
     approval = create_approval(
         user_message=message,
@@ -243,12 +860,7 @@ def build_sensitive_approval_response(message: str, action: str):
         source_system="odoo",
         entity_name=product_name,
         requested_change=requested_value,
-        metadata={
-            "product": product_name,
-            "requested_value": requested_value,
-            "executed": False,
-            "simulation": True,
-        },
+        metadata=metadata,
     )
 
     log_request({
@@ -264,6 +876,11 @@ def build_sensitive_approval_response(message: str, action: str):
         "action": action,
         "product": product_name,
         "requested_value": requested_value,
+        "target_model": parsed_action.get("target_model"),
+        "document_query": parsed_action.get("document_query"),
+        "product_query": parsed_action.get("product_query"),
+        "field_name": metadata.get("field_name"),
+        "parser_source": parsed_action.get("parser_source"),
         "executed": False,
         "message": "Action bloquée avant exécution. Validation humaine requise.",
     })
@@ -282,6 +899,12 @@ def build_sensitive_approval_response(message: str, action: str):
             "action": action,
             "product": product_name,
             "requested_value": requested_value,
+            "target_model": parsed_action.get("target_model"),
+            "document_type": document_type_label(parsed_action.get("target_model")),
+            "document_query": parsed_action.get("document_query"),
+            "product_query": parsed_action.get("product_query"),
+            "field_label": parsed_action.get("field_label"),
+            "field_name": metadata.get("field_name"),
             "source": "approval_simulation",
             "executed": False,
         },
@@ -292,7 +915,11 @@ def build_sensitive_approval_response(message: str, action: str):
 
 
 def run(message: str):
-    action = detect_odoo_action(message)
+    parsed_action = parse_odoo_action_with_openai(message)
+    action = parsed_action.get("action")
+
+    if action == "unknown":
+        action = detect_odoo_action(message)
 
     sensitive_actions = {
         "change_price",
@@ -300,13 +927,17 @@ def run(message: str):
         "change_unit",
         "modify_invoice",
         "create_purchase_request",
+        "toggle_boolean_field",
+        "update_document_line",
+        "update_document_partner",
+        "update_document_date",
     }
 
     if action in sensitive_actions or requires_approval(message):
-        return build_sensitive_approval_response(message, action)
+        return build_sensitive_approval_response(message, action, parsed_action)
 
     if action in ["check_stock", "check_price", "check_unit", "check_product_details"]:
-        product_name = extract_product_name(message)
+        product_name = parsed_action.get("record_query") or extract_product_name(message)
         raw_result = check_stock(product_name)
         data = normalize_stock_result(raw_result, action)
 
@@ -337,6 +968,57 @@ def run(message: str):
             "message": "Données produit consultées avec succès." if found else "Produit introuvable dans Odoo.",
             "tool_used": "odoo_check_stock",
             "data": data,
+            "result": raw_result,
+        }
+
+    if action == "search_document":
+        target_model = parsed_action.get("target_model")
+        document_query = (
+            parsed_action.get("document_query")
+            or parsed_action.get("record_query")
+            or message
+        )
+        tool_name = search_document_tool_name(target_model)
+
+        if not tool_name:
+            return build_needs_clarification_response(
+                message,
+                parsed_action,
+                ["type de document"],
+            )
+
+        raw_result = unwrap_tool_response(
+            execute_tool(tool_name, query=document_query)
+        )
+
+        found = bool(isinstance(raw_result, dict) and raw_result.get("found"))
+
+        log_request({
+            "event_type": "odoo_read",
+            "title": "Recherche document Odoo",
+            "system": "odoo",
+            "agent": "odoo_agent",
+            "status": "completed" if found else "not_found",
+            "risk": "low",
+            "approval_status": "not_required",
+            "user_message": message,
+            "action": action,
+            "target_model": target_model,
+            "document_query": document_query,
+            "message": "Recherche document consultative sans modification.",
+            "data": raw_result,
+        })
+
+        return {
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "risk": "low",
+            "requires_approval": False,
+            "approval_required": False,
+            "status": "completed" if found else "not_found",
+            "message": "Document consulté avec succès." if found else "Document introuvable dans Odoo.",
+            "tool_used": tool_name,
+            "data": raw_result,
             "result": raw_result,
         }
 

@@ -6,6 +6,52 @@ import { useEffect, useMemo, useState } from "react";
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+type ExecutionResult = {
+  success?: boolean;
+  source?: string;
+  action?: string;
+  model?: string;
+  document?: string;
+  record_id?: string | number | null;
+  line_id?: string | number | null;
+  field?: string;
+  product?: string;
+  product_id?: string | number | null;
+  old_price?: string | number | null;
+  new_price?: string | number | null;
+  old_value?: string | number | boolean | null;
+  requested_value?: string | number | boolean | null;
+  new_value?: string | number | boolean | null;
+  executed?: boolean;
+  found?: boolean;
+  message?: string;
+  candidates?: Candidate[];
+};
+
+type Candidate = {
+  id?: string | number | null;
+  line_id?: string | number | null;
+  record_id?: string | number | null;
+  name?: string;
+  product?: string;
+  product_name?: string;
+  default_code?: string;
+  list_price?: string | number | null;
+  price_unit?: string | number | null;
+  quantity?: string | number | null;
+  qty_available?: string | number | null;
+  virtual_available?: string | number | null;
+  partner?: string;
+  state?: string;
+  date?: string;
+  ref?: string;
+  email?: string;
+  phone?: string;
+  sale_ok?: boolean;
+  active?: boolean;
+  uom_id?: string;
+};
+
 type Approval = {
   id: string;
   timestamp?: string;
@@ -21,9 +67,10 @@ type Approval = {
   description?: string;
   source_system?: string;
   entity_name?: string;
-  requested_change?: string;
+  requested_change?: string | number;
   executed?: boolean;
-  metadata?: Record<string, any>;
+  execution_result?: ExecutionResult;
+  metadata?: Record<string, unknown>;
 };
 
 export default function ApprovalsPage() {
@@ -65,7 +112,11 @@ export default function ApprovalsPage() {
   }
 
   useEffect(() => {
-    loadApprovals();
+    const timer = window.setTimeout(() => {
+      void loadApprovals();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
   }, []);
 
   const pendingCount = useMemo(
@@ -189,12 +240,53 @@ export default function ApprovalsPage() {
                     <Detail label="Action" value={translateAction(approval.action)} />
                     <Detail label="Produit" value={approval.entity_name || "-"} />
                     <Detail
+                      label="Type document"
+                      value={documentTypeLabel(
+                        getMetadataString(approval.metadata, "target_model") ||
+                          approval.execution_result?.model
+                      )}
+                    />
+                    <Detail
+                      label="Document"
+                      value={formatValue(
+                        approval.execution_result?.document ||
+                          getMetadataString(approval.metadata, "document_query")
+                      )}
+                    />
+                    <Detail
+                      label="Ligne"
+                      value={formatValue(approval.execution_result?.line_id)}
+                    />
+                    <Detail
+                      label="Champ"
+                      value={fieldLabel(
+                        approval.execution_result?.field ||
+                          getMetadataString(approval.metadata, "field_name")
+                      )}
+                    />
+                    <Detail
                       label="Valeur demandée"
-                      value={approval.requested_change || "-"}
+                      value={formatValue(approval.requested_change)}
                     />
                     <Detail
                       label="Exécuté dans Odoo"
                       value={approval.executed ? "Oui" : "Non"}
+                    />
+                    <Detail
+                      label="Ancien prix"
+                      value={formatValue(approval.execution_result?.old_price)}
+                    />
+                    <Detail
+                      label="Nouveau prix"
+                      value={formatValue(approval.execution_result?.new_price)}
+                    />
+                    <Detail
+                      label="Ancienne valeur"
+                      value={formatValue(approval.execution_result?.old_value)}
+                    />
+                    <Detail
+                      label="Nouvelle valeur"
+                      value={formatValue(approval.execution_result?.new_value)}
                     />
                     <Detail
                       label="Date"
@@ -212,6 +304,86 @@ export default function ApprovalsPage() {
                       <p>{approval.user_message}</p>
                     </div>
                   )}
+
+                  {approval.execution_result && (
+                    <div className="requestBox">
+                      <span>Résultat d’exécution</span>
+                      <p>{formatExecutionResult(approval.execution_result)}</p>
+                    </div>
+                  )}
+
+                  {approval.execution_result?.candidates &&
+                    approval.execution_result.candidates.length > 0 && (
+                      <div className="candidateBox">
+                        <span>Candidats détectés</span>
+                        <div className="candidateList">
+                          {approval.execution_result.candidates.map((candidate) => (
+                            <div
+                              className="candidateItem"
+                              key={`${candidate.id || candidate.line_id}-${candidate.default_code || candidate.name || candidate.product}`}
+                            >
+                              <Detail
+                                label="ID"
+                                value={formatValue(candidate.id || candidate.record_id)}
+                              />
+                              <Detail
+                                label="Ligne"
+                                value={formatValue(candidate.line_id)}
+                              />
+                              <Detail
+                                label="Nom"
+                                value={formatValue(
+                                  candidate.name ||
+                                    candidate.product_name ||
+                                    candidate.product ||
+                                    candidate.partner
+                                )}
+                              />
+                              <Detail
+                                label="Référence"
+                                value={formatValue(candidate.default_code || candidate.ref)}
+                              />
+                              <Detail
+                                label="Prix"
+                                value={formatValue(candidate.list_price || candidate.price_unit)}
+                              />
+                              <Detail
+                                label="Quantité"
+                                value={formatValue(candidate.quantity)}
+                              />
+                              <Detail
+                                label="Partenaire"
+                                value={formatValue(candidate.partner)}
+                              />
+                              <Detail
+                                label="État"
+                                value={formatValue(candidate.state)}
+                              />
+                              <Detail
+                                label="Date"
+                                value={formatValue(candidate.date)}
+                              />
+                              <Detail
+                                label="Disponible"
+                                value={formatValue(candidate.qty_available)}
+                              />
+                              <Detail
+                                label="Prévu"
+                                value={formatValue(candidate.virtual_available)}
+                              />
+                              <Detail
+                                label="Vente"
+                                value={candidate.sale_ok ? "Oui" : "Non"}
+                              />
+                              <Detail
+                                label="Actif"
+                                value={candidate.active ? "Oui" : "Non"}
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
                   <div className="actions">
                     <button
@@ -546,7 +718,15 @@ export default function ApprovalsPage() {
           margin-bottom: 16px;
         }
 
-        .requestBox span {
+        .candidateBox {
+          background: #ffffff;
+          border: 1px solid #f2d38b;
+          padding: 14px;
+          margin-bottom: 16px;
+        }
+
+        .requestBox span,
+        .candidateBox > span {
           display: block;
           color: #647084;
           font-size: 12px;
@@ -560,6 +740,19 @@ export default function ApprovalsPage() {
           margin: 0;
           color: #172033;
           font-weight: 700;
+        }
+
+        .candidateList {
+          display: grid;
+          gap: 12px;
+        }
+
+        .candidateItem {
+          border-top: 1px solid #eef2f7;
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 0 18px;
+          padding-top: 10px;
         }
 
         .actions {
@@ -656,10 +849,71 @@ function translateAction(action?: string) {
     change_unit: "Modification de l’unité",
     modify_invoice: "Action sensible sur facture",
     create_purchase_request: "Création d’une demande d’achat",
+    toggle_boolean_field: "Modification champ analytique",
+    update_document_line: "Modification ligne document",
+    update_document_partner: "Modification client/fournisseur",
+    update_document_date: "Modification date document",
   };
 
   if (!action) return "-";
   return labels[action] || action;
+}
+
+function getMetadataString(metadata: Record<string, unknown> | undefined, key: string) {
+  const value = metadata?.[key];
+
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+
+  return "";
+}
+
+function documentTypeLabel(model?: string) {
+  const labels: Record<string, string> = {
+    "sale.order": "Bon de commande client",
+    "purchase.order": "Bon de commande fournisseur",
+    "account.move": "Facture",
+    "stock.picking": "Bon de livraison",
+  };
+
+  if (!model) return "-";
+  return labels[model] || model;
+}
+
+function fieldLabel(field?: string) {
+  const labels: Record<string, string> = {
+    list_price: "Prix de vente",
+    price_unit: "Prix unitaire",
+    product_uom_qty: "Quantité",
+    product_qty: "Quantité",
+    quantity: "Quantité",
+    partner_id: "Client/fournisseur",
+    date_order: "Date de commande",
+    invoice_date: "Date facture",
+    scheduled_date: "Date livraison",
+  };
+
+  if (!field) return "-";
+  return labels[field] || field;
+}
+
+function formatValue(value?: string | number | boolean | null) {
+  if (value === undefined || value === null || value === "") return "-";
+  if (typeof value === "boolean") return value ? "Oui" : "Non";
+  return String(value);
+}
+
+function formatExecutionResult(result: ExecutionResult) {
+  const status = result.success ? "succès" : "échec";
+  const message = result.message || "Aucun message retourné.";
+  const oldPrice = formatValue(result.old_price);
+  const newPrice = formatValue(result.new_price);
+  const oldValue = formatValue(result.old_value);
+  const newValue = formatValue(result.new_value);
+  const document = formatValue(result.document);
+  const field = fieldLabel(result.field);
+
+  return `Statut: ${status}. Document: ${document}. Champ: ${field}. Ancien prix: ${oldPrice}. Nouveau prix: ${newPrice}. Ancienne valeur: ${oldValue}. Nouvelle valeur: ${newValue}. ${message}`;
 }
 
 function formatDate(value?: string) {

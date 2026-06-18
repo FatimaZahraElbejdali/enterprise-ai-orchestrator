@@ -6,6 +6,14 @@ import { useEffect, useMemo, useState } from "react";
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+type ExecutionResult = {
+  success?: boolean;
+  old_price?: string | number | null;
+  new_price?: string | number | null;
+  executed?: boolean;
+  message?: string;
+};
+
 type LogEntry = {
   id?: string;
   timestamp?: string;
@@ -20,10 +28,11 @@ type LogEntry = {
   user_message?: string;
   action?: string;
   product?: string;
-  requested_value?: string;
+  requested_value?: string | number;
   executed?: boolean;
   message?: string;
-  data?: any;
+  data?: unknown;
+  execution_result?: ExecutionResult;
 };
 
 export default function LogsPage() {
@@ -59,7 +68,11 @@ export default function LogsPage() {
   }
 
   useEffect(() => {
-    loadLogs();
+    const timer = window.setTimeout(() => {
+      void loadLogs();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
   }, []);
 
   const odooReads = useMemo(
@@ -192,15 +205,30 @@ export default function LogsPage() {
                   />
                   <Detail
                     label="Valeur demandée"
-                    value={log.requested_value || "-"}
+                    value={formatValue(log.requested_value)}
                   />
                   <Detail label="Date" value={formatDate(log.timestamp)} />
+                  <Detail
+                    label="Ancien prix"
+                    value={formatValue(log.execution_result?.old_price)}
+                  />
+                  <Detail
+                    label="Nouveau prix"
+                    value={formatValue(log.execution_result?.new_price)}
+                  />
                 </div>
 
                 {log.user_message && (
                   <div className="requestBox">
                     <span>Demande utilisateur</span>
                     <p>{log.user_message}</p>
+                  </div>
+                )}
+
+                {log.execution_result && (
+                  <div className="requestBox">
+                    <span>Résultat Odoo</span>
+                    <p>{formatExecutionResult(log.execution_result)}</p>
                   </div>
                 )}
               </article>
@@ -569,6 +597,7 @@ function translateEvent(event?: string) {
     odoo_read: "Consultation Odoo",
     approval_required: "Validation requise",
     approval_decision: "Décision de validation",
+    odoo_write_executed: "Écriture Odoo exécutée",
     odoo_status: "Vérification Odoo",
   };
 
@@ -620,6 +649,20 @@ function translateAction(action?: string) {
 
   if (!action) return "-";
   return labels[action] || action;
+}
+
+function formatValue(value?: string | number | null) {
+  if (value === undefined || value === null || value === "") return "-";
+  return String(value);
+}
+
+function formatExecutionResult(result: ExecutionResult) {
+  const status = result.success ? "succès" : "échec";
+  const oldPrice = formatValue(result.old_price);
+  const newPrice = formatValue(result.new_price);
+  const message = result.message || "Aucun message retourné.";
+
+  return `Statut: ${status}. Ancien prix: ${oldPrice}. Nouveau prix: ${newPrice}. ${message}`;
 }
 
 function formatDate(value?: string) {

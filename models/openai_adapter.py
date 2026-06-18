@@ -1,3 +1,4 @@
+import json
 import os
 
 from dotenv import load_dotenv
@@ -123,6 +124,65 @@ def generate_response(
             "model": selected_model,
             "success": False,
             "content": "",
+            "error": error.__class__.__name__,
+        }
+
+
+def generate_structured_response(
+    prompt: str,
+    schema: dict,
+    system_prompt: str | None = None,
+    model: str | None = None,
+) -> dict:
+    selected_model = _get_model(model)
+
+    if not _get_api_key() or OpenAI is None:
+        return {
+            "provider": "openai",
+            "model": selected_model,
+            "success": False,
+            "content": "",
+            "parsed": None,
+            "error": "missing_api_key",
+        }
+
+    try:
+        client = OpenAI(
+            api_key=_get_api_key(),
+            timeout=_get_timeout(),
+        )
+
+        request = {
+            "model": selected_model,
+            "input": prompt,
+            "text": {
+                "format": schema,
+            },
+        }
+
+        if system_prompt:
+            request["instructions"] = system_prompt
+
+        response = client.responses.create(**request)
+        content = _extract_text(response)
+        parsed = json.loads(content) if content else None
+
+        return {
+            "provider": "openai",
+            "model": selected_model,
+            "success": isinstance(parsed, dict),
+            "content": content,
+            "parsed": parsed if isinstance(parsed, dict) else None,
+            "error": None if isinstance(parsed, dict) else "invalid_json",
+        }
+
+    except Exception as error:
+        return {
+            "provider": "openai",
+            "model": selected_model,
+            "success": False,
+            "content": "",
+            "parsed": None,
             "error": error.__class__.__name__,
         }
 
