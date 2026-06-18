@@ -11,6 +11,12 @@ TOOLS = {
         "risk_level": "low",
         "requires_approval": False,
     },
+    "odoo_inventory_summary": {
+        "description": "Read broad inventory product counts and stock totals from Odoo.",
+        "system": "odoo",
+        "risk_level": "low",
+        "requires_approval": False,
+    },
     "odoo_search_customer": {
         "description": "Search for a customer in Odoo.",
         "system": "odoo",
@@ -28,6 +34,12 @@ TOOLS = {
         "system": "odoo",
         "risk_level": "medium",
         "requires_approval": True,
+    },
+    "odoo_resolve_product_for_write": {
+        "description": "Resolve one product.template before an approved write.",
+        "system": "odoo",
+        "risk_level": "low",
+        "requires_approval": False,
     },
     "odoo_list_analytic_boolean_fields": {
         "description": "List boolean fields on Odoo analytic accounts.",

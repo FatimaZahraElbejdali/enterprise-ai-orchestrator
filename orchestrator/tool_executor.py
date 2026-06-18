@@ -28,6 +28,9 @@ def execute_tool(tool_name: str, **kwargs):
     elif tool_name == "odoo_search_product":
         result = odoo.search_product(kwargs.get("product_name", ""))
 
+    elif tool_name == "odoo_inventory_summary":
+        result = odoo.inventory_summary()
+
     elif tool_name == "odoo_search_customer":
         result = odoo.search_customer(kwargs.get("customer_name", ""))
 
@@ -38,6 +41,11 @@ def execute_tool(tool_name: str, **kwargs):
         result = odoo.update_product_price(
             product_name=kwargs.get("product_name", ""),
             new_price=kwargs.get("new_price"),
+        )
+
+    elif tool_name == "odoo_resolve_product_for_write":
+        result = odoo.resolve_product_template_for_write(
+            kwargs.get("product_name", ""),
         )
 
     elif tool_name == "odoo_list_analytic_boolean_fields":

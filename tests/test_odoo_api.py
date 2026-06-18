@@ -17,11 +17,14 @@ def test_odoo_status_endpoint():
 
 
 def test_odoo_stock_endpoint():
-    response = client.get("/odoo/stock/Product%20X")
+    response = client.get("/odoo/stock/BACO%20CLEAN")
 
     assert response.status_code == 200
 
     data = response.json()
 
-    assert "product" in data
+    assert data["found"] is True
+    assert data["product"] == "BACO CLEAN"
     assert "stock_quantity" in data
+    assert "forecast_quantity" in data
+    assert "sale_price" in data

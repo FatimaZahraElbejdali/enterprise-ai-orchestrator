@@ -527,6 +527,97 @@ class OdooConnector:
                 "message": str(error),
             }
 
+    def inventory_summary(self):
+        if self.mock_mode:
+            return {
+                "success": True,
+                "source": "mock_odoo",
+                "model": "product.template",
+                "product_count": 1,
+                "sale_product_count": 1,
+                "stockable_product_count": 1,
+                "products_with_stock_count": 1,
+                "products_without_stock_count": 0,
+                "total_qty_available": 42,
+                "total_virtual_available": 42,
+                "message": "Mock inventory summary.",
+            }
+
+        try:
+            models = self._models()
+            product_count = models.execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                "product.template",
+                "search_count",
+                [[["active", "=", True]]],
+            )
+            sale_product_count = models.execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                "product.template",
+                "search_count",
+                [[["active", "=", True], ["sale_ok", "=", True]]],
+            )
+            stockable_product_count = models.execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                "product.product",
+                "search_count",
+                [[["active", "=", True], ["type", "=", "product"]]],
+            )
+            products_with_stock_count = models.execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                "product.product",
+                "search_count",
+                [[["active", "=", True], ["qty_available", ">", 0]]],
+            )
+            products_without_stock_count = models.execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                "product.product",
+                "search_count",
+                [[["active", "=", True], ["qty_available", "<=", 0]]],
+            )
+            grouped = models.execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                "product.product",
+                "read_group",
+                [[["active", "=", True]], ["qty_available", "virtual_available"], []],
+            )
+            totals = grouped[0] if grouped else {}
+
+            return {
+                "success": True,
+                "source": "real_odoo",
+                "model": "product.template",
+                "product_count": product_count,
+                "sale_product_count": sale_product_count,
+                "stockable_product_count": stockable_product_count,
+                "products_with_stock_count": products_with_stock_count,
+                "products_without_stock_count": products_without_stock_count,
+                "total_qty_available": totals.get("qty_available", 0),
+                "total_virtual_available": totals.get("virtual_available", 0),
+                "message": "Inventory summary read from Odoo.",
+            }
+
+        except Exception as error:
+            return {
+                "success": False,
+                "source": "real_odoo_error",
+                "model": "product.template",
+                "found": False,
+                "message": str(error),
+            }
+
     def update_product_price(self, product_name: str, new_price: float) -> dict:
         try:
             parsed_price = float(new_price)

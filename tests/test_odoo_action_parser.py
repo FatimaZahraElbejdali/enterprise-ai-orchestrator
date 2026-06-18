@@ -313,3 +313,74 @@ def test_record_id_purchase_date_parse(monkeypatch):
     assert result["document_id"] == 793
     assert result["document_query"] is None
     assert result["field_name"] == "date_planned"
+
+
+def test_generic_inventory_summary_parse(monkeypatch):
+    _mock_structured_document_parse(
+        monkeypatch,
+        {
+            "intent": "odoo",
+            "action": "inventory_summary",
+            "language": "fr",
+            "requires_approval": False,
+            "needs_clarification": False,
+            "clarification_reason": None,
+            "entities": {
+                "product_name": None,
+                "document_type": None,
+                "document_reference": None,
+                "document_id": None,
+                "partner_name": None,
+                "line_product": None,
+                "field": None,
+                "new_value": None,
+                "filename": None,
+                "content": None,
+            },
+        },
+    )
+
+    result = odoo_agent.parse_odoo_action_with_openai(
+        "Combien de produits avons-nous en stock ?"
+    )
+
+    assert result["action"] == "inventory_summary"
+    assert result["business_action"] == "inventory_summary"
+    assert result["record_query"] is None
+    assert result["requires_approval"] is False
+
+
+def test_generic_update_product_price_parse(monkeypatch):
+    _mock_structured_document_parse(
+        monkeypatch,
+        {
+            "intent": "odoo",
+            "action": "update_product_price",
+            "language": "fr",
+            "requires_approval": True,
+            "needs_clarification": False,
+            "clarification_reason": None,
+            "entities": {
+                "product_name": "BACO CLEAN",
+                "document_type": None,
+                "document_reference": None,
+                "document_id": None,
+                "partner_name": None,
+                "line_product": None,
+                "field": "price_unit",
+                "new_value": 7,
+                "filename": None,
+                "content": None,
+            },
+        },
+    )
+
+    result = odoo_agent.parse_odoo_action_with_openai(
+        "Modifier le prix de BACO CLEAN à 7 DH"
+    )
+
+    assert result["action"] == "change_price"
+    assert result["business_action"] == "update_product_price"
+    assert result["record_query"] == "BACO CLEAN"
+    assert result["new_value"] == 7.0
+    assert result["requires_approval"] is True

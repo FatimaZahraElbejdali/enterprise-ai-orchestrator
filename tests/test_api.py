@@ -11,7 +11,7 @@ def test_status_endpoint():
     data = response.json()
 
     assert data["status"] == "online"
-    assert data["service"] == "AI Orchestrator"
+    assert data["service"] == "Enterprise AI Orchestrator"
 
 
 def test_chat_support_request():

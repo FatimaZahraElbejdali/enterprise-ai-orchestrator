@@ -17,9 +17,49 @@ from agents.security_agent import run as run_security_agent
 from agents.server_agent import run as run_server_agent
 
 
+UNSUPPORTED_MESSAGE = (
+    "Je comprends votre demande, mais cette action n’est pas encore disponible "
+    "dans les outils autorisés de l’orchestrateur. Vous pouvez me demander de "
+    "consulter Odoo, modifier des données Odoo avec validation, diagnostiquer "
+    "un problème IT ou accéder aux fichiers du serveur interne."
+)
+
+
+def _general_answer(message: str):
+    text = message.lower()
+
+    if "orchestrateur" in text or "orchestrator" in text:
+        return (
+            "L’orchestrateur IA sert à comprendre une demande métier, choisir le bon agent, "
+            "appliquer les règles de sécurité et tracer chaque décision. Il permet d’utiliser "
+            "l’IA sans lui donner un accès direct et incontrôlé aux systèmes sensibles."
+        )
+
+    if "validation humaine" in text or "human approval" in text:
+        return (
+            "La validation humaine protège les actions sensibles: l’orchestrateur prépare la "
+            "modification, crée une demande de validation, puis attend une décision humaine "
+            "avant toute exécution réelle."
+        )
+
+    if "traçabilité" in text or "tracabilite" in text or "traceability" in text:
+        return (
+            "La traçabilité permet de savoir qui a demandé quoi, quel agent a répondu, si une "
+            "validation était nécessaire et quel résultat a été obtenu. C’est essentiel pour "
+            "l’audit, la conformité et la confiance."
+        )
+
+    return UNSUPPORTED_MESSAGE
+
+
 def _format_agent_content(agent_result):
     if not isinstance(agent_result, dict):
         return str(agent_result)
+
+    direct_response = agent_result.get("response") or agent_result.get("message")
+
+    if isinstance(direct_response, str) and direct_response.strip():
+        return direct_response
 
     result = agent_result.get("result")
 
@@ -126,10 +166,18 @@ def run_selected_agent(selected_agent: str, message: str):
     if runner:
         return runner(message)
 
+    answer = _general_answer(message)
+
     return {
-        "agent": "general",
+        "agent": "general_agent",
+        "parser_source": "general_fallback",
+        "parsed_action": "answer_general_question" if answer != UNSUPPORTED_MESSAGE else "unknown",
         "tool_used": "none",
-        "result": message
+        "result": {
+            "answer": answer,
+        },
+        "response": answer,
+        "message": answer,
     }
 
 
@@ -175,6 +223,16 @@ def process_request(message: str):
     agent_result = run_selected_agent(
         selected_agent=selected_agent,
         message=message
+    )
+    agent_parser_source = (
+        agent_result.get("parser_source")
+        if isinstance(agent_result, dict)
+        else None
+    )
+    agent_parsed_action = (
+        agent_result.get("parsed_action")
+        if isinstance(agent_result, dict)
+        else None
     )
 
     prompt = f"""
@@ -254,6 +312,8 @@ Provide a concise final response for the user.
         "result": agent_result.get("result") if isinstance(agent_result, dict) else agent_result,
         "response": response,
         "message": response.get("content") if isinstance(response, dict) else response,
+        "parser_source": agent_parser_source,
+        "parsed_action": agent_parsed_action,
         "classifier_source": classifier_source,
         "classifier_error": classifier_error
     }

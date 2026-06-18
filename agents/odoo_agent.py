@@ -27,6 +27,53 @@ CHANGE_KEYWORDS = [
     "diminuer",
 ]
 
+SUPPORTED_ODOO_ACTIONS = {
+    "check_product_stock",
+    "product_search",
+    "product_details",
+    "inventory_summary",
+    "update_product_price",
+    "document_search",
+    "document_details",
+    "update_document_date",
+    "update_line_price",
+    "update_line_quantity",
+    "update_partner",
+    "unknown",
+    "needs_clarification",
+}
+
+BUSINESS_TO_INTERNAL_ACTION = {
+    "check_product_stock": "check_stock",
+    "product_search": "product_search",
+    "product_details": "product_details",
+    "inventory_summary": "inventory_summary",
+    "update_product_price": "change_price",
+    "document_search": "search_document",
+    "document_details": "document_details",
+    "update_document_date": "update_document_date",
+    "update_line_price": "update_document_line",
+    "update_line_quantity": "update_document_line",
+    "update_partner": "update_document_partner",
+    "unknown": "unknown",
+    "needs_clarification": "unknown",
+}
+
+INTERNAL_TO_BUSINESS_ACTION = {
+    "check_stock": "check_product_stock",
+    "check_price": "product_details",
+    "check_unit": "product_details",
+    "check_product_details": "product_details",
+    "change_price": "update_product_price",
+    "search_document": "document_search",
+    "document_details": "document_details",
+    "update_document_date": "update_document_date",
+    "update_document_partner": "update_partner",
+    "inventory_summary": "inventory_summary",
+    "product_search": "product_search",
+    "product_details": "product_details",
+}
+
 
 ODOO_ACTION_SCHEMA = {
     "type": "json_schema",
@@ -35,140 +82,97 @@ ODOO_ACTION_SCHEMA = {
     "schema": {
         "type": "object",
         "properties": {
-            "intent": {"type": "string", "enum": ["odoo", "odoo_document_action"]},
+            "intent": {
+                "type": "string",
+                "enum": ["odoo", "support", "server", "general", "unknown"],
+            },
             "action": {
                 "type": "string",
                 "enum": [
-                    "check_stock",
-                    "change_price",
-                    "toggle_boolean_field",
-                    "update_document_line",
-                    "update_document_partner",
+                    "check_product_stock",
+                    "product_search",
+                    "product_details",
+                    "inventory_summary",
+                    "update_product_price",
+                    "document_search",
+                    "document_details",
                     "update_document_date",
                     "update_line_price",
                     "update_line_quantity",
                     "update_partner",
-                    "read_document",
-                    "search_document",
                     "unknown",
-                ],
-            },
-            "risk": {"type": "string", "enum": ["low", "medium", "high"]},
-            "requires_approval": {"type": "boolean"},
-            "target_model": {
-                "type": ["string", "null"],
-                "enum": [
-                    "product.template",
-                    "account.analytic.account",
-                    "sale.order",
-                    "purchase.order",
-                    "stock.picking",
-                    "account.move",
-                    None,
-                ],
-            },
-            "record_query": {"type": ["string", "null"]},
-            "document_query": {"type": ["string", "null"]},
-            "product_query": {"type": ["string", "null"]},
-            "field_label": {"type": ["string", "null"]},
-            "field_name": {
-                "type": ["string", "null"],
-                "enum": [
-                    "list_price",
-                    "price_unit",
-                    "quantity",
-                    "product_uom_qty",
-                    "product_qty",
-                    "partner_id",
-                    "date_order",
-                    "date_planned",
-                    "invoice_date",
-                    "scheduled_date",
-                    None,
-                ],
-            },
-            "new_value": {
-                "type": ["string", "number", "boolean", "null"],
-            },
-            "confidence": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 1,
-            },
-            "document_type": {
-                "type": ["string", "null"],
-                "enum": [
-                    "sale_order",
-                    "purchase_order",
-                    "invoice",
-                    "delivery",
-                    "unknown",
-                    None,
-                ],
-            },
-            "document_reference": {"type": ["string", "null"]},
-            "document_id": {"type": ["integer", "null"]},
-            "partner_name": {"type": ["string", "null"]},
-            "line_product": {"type": ["string", "null"]},
-            "field": {
-                "type": ["string", "null"],
-                "enum": [
-                    "expected_arrival_date",
-                    "order_date",
-                    "invoice_date",
-                    "delivery_date",
-                    "price_unit",
-                    "quantity",
-                    "partner",
-                    "unknown",
-                    None,
-                ],
-            },
-            "technical_field": {
-                "type": ["string", "null"],
-                "enum": [
-                    "date_planned",
-                    "date_order",
-                    "invoice_date",
-                    "scheduled_date",
-                    "price_unit",
-                    "product_qty",
-                    "product_uom_qty",
-                    "quantity",
-                    "partner_id",
-                    None,
+                    "needs_clarification",
                 ],
             },
             "language": {
-                "type": ["string", "null"],
-                "enum": ["fr", "en", "mixed", None],
+                "type": "string",
+                "enum": ["fr", "en", "mixed"],
             },
-            "needs_clarification": {"type": ["boolean", "null"]},
+            "requires_approval": {"type": "boolean"},
+            "needs_clarification": {"type": "boolean"},
             "clarification_reason": {"type": ["string", "null"]},
+            "entities": {
+                "type": "object",
+                "properties": {
+                    "product_name": {"type": ["string", "null"]},
+                    "document_type": {
+                        "type": ["string", "null"],
+                        "enum": [
+                            "sale_order",
+                            "purchase_order",
+                            "invoice",
+                            "delivery",
+                            "unknown",
+                            None,
+                        ],
+                    },
+                    "document_reference": {"type": ["string", "null"]},
+                    "document_id": {"type": ["integer", "null"]},
+                    "partner_name": {"type": ["string", "null"]},
+                    "line_product": {"type": ["string", "null"]},
+                    "field": {
+                        "type": ["string", "null"],
+                        "enum": [
+                            "expected_arrival_date",
+                            "order_date",
+                            "invoice_date",
+                            "delivery_date",
+                            "price_unit",
+                            "quantity",
+                            "partner",
+                            "unknown",
+                            None,
+                        ],
+                    },
+                    "new_value": {
+                        "type": ["string", "number", "boolean", "null"],
+                    },
+                    "filename": {"type": ["string", "null"]},
+                    "content": {"type": ["string", "null"]},
+                },
+                "required": [
+                    "product_name",
+                    "document_type",
+                    "document_reference",
+                    "document_id",
+                    "partner_name",
+                    "line_product",
+                    "field",
+                    "new_value",
+                    "filename",
+                    "content",
+                ],
+                "additionalProperties": False,
+            },
         },
         "required": [
             "intent",
             "action",
-            "risk",
-            "requires_approval",
-            "target_model",
-            "record_query",
-            "document_query",
-            "product_query",
-            "field_label",
-            "field_name",
-            "new_value",
-            "confidence",
-            "document_type",
-            "document_reference",
-            "document_id",
-            "partner_name",
-            "line_product",
-            "field",
-            "technical_field",
             "language",
+            "requires_approval",
             "needs_clarification",
             "clarification_reason",
+            "entities",
         ],
         "additionalProperties": False,
     },
@@ -298,8 +302,22 @@ def extract_requested_price(message: str):
 
 def detect_odoo_action(message: str) -> str:
     text = message.lower()
+    normalized = normalize_label(message)
 
     has_change = any(keyword in text for keyword in CHANGE_KEYWORDS)
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "combien de produits",
+            "nombre de produits",
+            "how many products",
+            "inventory summary",
+            "resume inventaire",
+            "resume du stock",
+        ]
+    ):
+        return "inventory_summary"
 
     if "price" in text or "prix" in text:
         return "change_price" if has_change else "check_price"
@@ -330,6 +348,7 @@ def _empty_parse() -> dict:
     return {
         "intent": "odoo",
         "action": "unknown",
+        "business_action": "unknown",
         "risk": "low",
         "requires_approval": False,
         "target_model": None,
@@ -403,6 +422,7 @@ def parse_odoo_action_deterministic(message: str) -> dict:
         return {
             "intent": "odoo",
             "action": "change_price",
+            "business_action": "update_product_price",
             "risk": "medium",
             "requires_approval": True,
             "target_model": "product.template",
@@ -419,10 +439,28 @@ def parse_odoo_action_deterministic(message: str) -> dict:
         return {
             "intent": "odoo",
             "action": "check_stock",
+            "business_action": INTERNAL_TO_BUSINESS_ACTION.get(action, "check_product_stock"),
             "risk": "low",
             "requires_approval": False,
             "target_model": "product.template",
             "record_query": extract_product_name(message),
+            "field_label": None,
+            "field_name": None,
+            "new_value": None,
+            "confidence": 0.75,
+            "parser_source": "local_rules",
+            "parser_error": None,
+        }
+
+    if action == "inventory_summary":
+        return {
+            "intent": "odoo",
+            "action": "inventory_summary",
+            "business_action": "inventory_summary",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "product.template",
+            "record_query": None,
             "field_label": None,
             "field_name": None,
             "new_value": None,
@@ -471,6 +509,20 @@ DOCUMENT_ACTION_ALIASES = {
 }
 
 
+def generic_entities(parsed: dict):
+    entities = parsed.get("entities")
+    return entities if isinstance(entities, dict) else {}
+
+
+def parsed_value(parsed: dict, entities: dict, entity_key: str, legacy_key: str = ""):
+    value = entities.get(entity_key)
+
+    if value is not None:
+        return value
+
+    return parsed.get(legacy_key or entity_key)
+
+
 def technical_field_for_document_action(
     document_type: str | None,
     field: str | None,
@@ -509,6 +561,7 @@ def technical_field_for_document_action(
 
 
 def document_action_for_field(action: str, field: str | None):
+    action = BUSINESS_TO_INTERNAL_ACTION.get(action, action)
     action = DOCUMENT_ACTION_ALIASES.get(action, action)
 
     if action in {
@@ -516,6 +569,10 @@ def document_action_for_field(action: str, field: str | None):
         "update_document_line",
         "update_document_partner",
         "search_document",
+        "document_details",
+        "product_search",
+        "product_details",
+        "inventory_summary",
         "unknown",
     }:
         return action
@@ -537,6 +594,19 @@ def document_action_for_field(action: str, field: str | None):
     return action
 
 
+def business_action_for(parsed_action: str | None, internal_action: str | None):
+    if parsed_action in SUPPORTED_ODOO_ACTIONS:
+        return parsed_action
+
+    if parsed_action == "read_document":
+        return "document_search"
+
+    if parsed_action in {"update_document_line"}:
+        return "update_line_price"
+
+    return INTERNAL_TO_BUSINESS_ACTION.get(internal_action or "", parsed_action or "unknown")
+
+
 def normalize_openai_parse(
     parsed: dict,
     parser_source: str,
@@ -546,32 +616,58 @@ def normalize_openai_parse(
     if not isinstance(parsed, dict):
         return None
 
+    entities = generic_entities(parsed)
     raw_action = parsed.get("action")
-    document_type = parsed.get("document_type")
-    business_field = parsed.get("field")
+    document_type = parsed_value(parsed, entities, "document_type")
+    business_field = parsed_value(parsed, entities, "field")
     action = document_action_for_field(raw_action, business_field)
 
     if action not in {
         "check_stock",
         "change_price",
         "toggle_boolean_field",
+        "product_search",
+        "product_details",
+        "inventory_summary",
         "update_document_line",
         "update_document_partner",
         "update_document_date",
         "search_document",
+        "document_details",
         "unknown",
     }:
         return None
 
+    target_model = parsed.get("target_model") or DOCUMENT_TYPE_TO_MODEL.get(document_type or "")
+    record_query = parsed.get("record_query") or parsed_value(parsed, entities, "product_name")
+    document_query = (
+        parsed.get("document_query")
+        or parsed_value(parsed, entities, "document_reference")
+    )
+    product_query = (
+        parsed.get("product_query")
+        or parsed_value(parsed, entities, "line_product")
+        or (
+            parsed_value(parsed, entities, "product_name")
+            if action in {"update_document_line"}
+            else None
+        )
+    )
+    new_value = parsed.get("new_value")
+
+    if new_value is None:
+        new_value = parsed_value(parsed, entities, "new_value")
+
     result = {
         "intent": parsed.get("intent") or "odoo",
         "action": action,
+        "business_action": business_action_for(raw_action, action),
         "risk": parsed.get("risk") if parsed.get("risk") in {"low", "medium", "high"} else "low",
         "requires_approval": bool(parsed.get("requires_approval")),
-        "target_model": parsed.get("target_model") or DOCUMENT_TYPE_TO_MODEL.get(document_type or ""),
-        "record_query": parsed.get("record_query"),
-        "document_query": parsed.get("document_query") or parsed.get("document_reference"),
-        "product_query": parsed.get("product_query") or parsed.get("line_product"),
+        "target_model": target_model,
+        "record_query": record_query,
+        "document_query": document_query,
+        "product_query": product_query,
         "field_label": parsed.get("field_label"),
         "field_name": (
             parsed.get("field_name")
@@ -581,23 +677,38 @@ def normalize_openai_parse(
                 parsed.get("technical_field"),
             )
         ),
-        "new_value": parsed.get("new_value"),
+        "new_value": new_value,
         "confidence": parsed.get("confidence") if isinstance(parsed.get("confidence"), (int, float)) else 0.0,
         "parser_source": parser_source,
         "parser_error": parser_error,
         "document_type": document_type,
-        "document_reference": parsed.get("document_reference") or parsed.get("document_query"),
-        "document_id": parsed.get("document_id"),
-        "partner_name": parsed.get("partner_name"),
-        "line_product": parsed.get("line_product") or parsed.get("product_query"),
+        "document_reference": document_query,
+        "document_id": parsed_value(parsed, entities, "document_id"),
+        "partner_name": parsed_value(parsed, entities, "partner_name"),
+        "line_product": parsed_value(parsed, entities, "line_product") or parsed.get("product_query"),
         "field": business_field,
         "technical_field": parsed.get("technical_field"),
         "language": parsed.get("language"),
         "needs_clarification": bool(parsed.get("needs_clarification")),
         "clarification_reason": parsed.get("clarification_reason"),
+        "entities": entities,
     }
 
     if action == "check_stock":
+        result.update({
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "product.template",
+        })
+
+    if action in {"product_search", "product_details"}:
+        result.update({
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "product.template",
+        })
+
+    if action == "inventory_summary":
         result.update({
             "risk": "low",
             "requires_approval": False,
@@ -758,25 +869,62 @@ def normalize_openai_parse(
             or MODEL_TO_DOCUMENT_TYPE.get(result.get("target_model"))
         )
 
+    if action == "document_details":
+        if result.get("target_model") not in {
+            "sale.order",
+            "purchase.order",
+            "stock.picking",
+            "account.move",
+        }:
+            return None
+
+        result.update({
+            "risk": "low",
+            "requires_approval": False,
+        })
+        result["document_type"] = (
+            result.get("document_type")
+            or MODEL_TO_DOCUMENT_TYPE.get(result.get("target_model"))
+        )
+
     return result
 
 
 def parse_odoo_action_with_openai(message: str) -> dict:
     prompt = f"""
-Parse this Odoo request into the required JSON object.
+Parse this Odoo request into the required generic action schema.
 
-For document actions, extract these fields:
-- intent: odoo_document_action
-- action: update_document_date, update_line_price, update_line_quantity, update_partner, read_document, or unknown
-- document_type: sale_order, purchase_order, invoice, delivery, or unknown
-- document_reference: exact document reference such as BC-BPP2600313, FNP/2026/04016, OL-BPT2600682, or null
-- document_id: integer Odoo record ID when the user says "ID 793", otherwise null
-- partner_name: supplier/customer/vendor/client name when provided, otherwise null
-- line_product: product line name when a line is changed, otherwise null
-- field: expected_arrival_date, order_date, invoice_date, delivery_date, price_unit, quantity, partner, or unknown
-- technical_field: date_planned, date_order, invoice_date, scheduled_date, price_unit, product_qty, product_uom_qty, quantity, partner_id, or null
-- new_value: normalized target value. Convert French numeric dates like 15/06/2026 to 2026-06-15.
-- needs_clarification: true when a write request is missing document reference/ID, field, product line for line changes, or new value.
+Supported Odoo actions:
+- check_product_stock: read stock for one named product.
+- product_search: search one product or product family.
+- product_details: read product details for one named product.
+- inventory_summary: broad inventory count/summary questions such as "Combien de produits j’ai dans le stock ?" or "How many products do we have in inventory?". Do not treat these as product names.
+- update_product_price: change the sale price of one product. Sensitive, requires approval.
+- document_search: find a sale order, purchase order, invoice, or delivery.
+- document_details: read details/lines for a sale order, purchase order, invoice, or delivery.
+- update_document_date: change order/invoice/delivery/expected arrival dates. Sensitive, requires approval.
+- update_line_price: change a document line unit price. Sensitive, requires approval.
+- update_line_quantity: change a document line quantity. Sensitive, requires approval.
+- update_partner: change a customer/supplier on a document. Sensitive, requires approval.
+- unknown: request is Odoo-related but unsupported.
+- needs_clarification: required fields are missing.
+
+Return exactly the requested JSON structure:
+- intent must be odoo for Odoo/ERP requests.
+- action must be one supported Odoo action.
+- language is fr, en, or mixed.
+- requires_approval is true only for sensitive write actions.
+- needs_clarification is true when a supported action is missing required entities.
+- clarification_reason explains the missing data in the user's language.
+- entities.product_name is for product actions.
+- entities.document_type is sale_order, purchase_order, invoice, delivery, or unknown.
+- entities.document_reference is exact document reference such as BC-BPP2600313, FNP/2026/04016, OL-BPT2600682.
+- entities.document_id is the integer Odoo ID when the user says "ID 793".
+- entities.partner_name is supplier/customer/vendor/client name when provided.
+- entities.line_product is the line product for line price/quantity updates.
+- entities.field is expected_arrival_date, order_date, invoice_date, delivery_date, price_unit, quantity, partner, or unknown.
+- entities.new_value is the normalized target value. Convert French numeric dates like 15/06/2026 to 2026-06-15.
+- entities.filename and entities.content are null for Odoo actions.
 
 Document aliases:
 - purchase_order: bon de commande fournisseur, commande fournisseur, achat, purchase order, supplier order, vendor order.
@@ -785,30 +933,13 @@ Document aliases:
 - delivery: bon de livraison, livraison, transfert, delivery order, delivery, transfer.
 
 Field aliases:
-- expected_arrival_date: arrivée prévue, date d’arrivée prévue, date prévue, date de réception prévue, expected arrival date, planned arrival date, expected receipt date. For purchase_order use technical_field date_planned.
-- order_date: date de commande, order date. For sale_order/purchase_order use date_order.
-- invoice_date: date de facture, invoice date. For invoice use invoice_date.
-- delivery_date: date de livraison, date prévue, delivery date, scheduled date. For delivery use scheduled_date.
+- expected_arrival_date: arrivée prévue, date d’arrivée prévue, date prévue, date de réception prévue, expected arrival date, planned arrival date, expected receipt date.
+- order_date: date de commande, order date.
+- invoice_date: date de facture, invoice date.
+- delivery_date: date de livraison, date prévue, delivery date, scheduled date.
 - price_unit: prix, prix unitaire, prix de la ligne, price, unit price, line price.
 - quantity: quantité, qté, quantity, qty.
-- partner: client, fournisseur, customer, supplier, vendor. Use technical_field partner_id.
-
-Examples:
-- "Change price for BACOTOP to 3 DH" -> action change_price, target_model product.template, record_query BACOTOP, field_name list_price, new_value 3, requires_approval true.
-- "Check stock for BACO CLEAN" -> action check_stock, target_model product.template, record_query BACO CLEAN, requires_approval false.
-- "Cocher Dotation pour ABDOU LIGHT & SOUNDS" -> action toggle_boolean_field, target_model account.analytic.account, field_label Dotation, new_value true, requires_approval true.
-- "Décocher Pointage pour 21ABLS0008" -> action toggle_boolean_field, target_model account.analytic.account, field_label Pointage, new_value false, requires_approval true.
-- "Change the price of product BACO CLEAN in invoice INV/2026/001 to 7 DH" -> action update_document_line, target_model account.move, document_query INV/2026/001, product_query BACO CLEAN, field_name price_unit, new_value 7, requires_approval true.
-- "Change quantity of BACO CLEAN in purchase order P00015 to 20" -> action update_document_line, target_model purchase.order, document_query P00015, product_query BACO CLEAN, field_name product_qty, new_value 20, requires_approval true.
-- "Change the expected arrival date of purchase order BC-BPP2600313 to 2026-06-15" -> action update_document_date, target_model purchase.order, document_query BC-BPP2600313, field_name date_planned, new_value 2026-06-15, requires_approval true.
-- "Change the expected arrival date of purchase order BC-BPP2600313 for supplier P.A.N to 2026-06-15" -> action update_document_date, document_type purchase_order, target_model purchase.order, document_reference BC-BPP2600313, document_query BC-BPP2600313, partner_name P.A.N, field expected_arrival_date, technical_field date_planned, field_name date_planned, new_value 2026-06-15, requires_approval true.
-- "Change purchase order ID 793 expected arrival date to 2026-06-15" -> action update_document_date, document_type purchase_order, target_model purchase.order, document_id 793, field expected_arrival_date, technical_field date_planned, field_name date_planned, new_value 2026-06-15, requires_approval true.
-- "Modifier la date d’arrivée prévue du bon de commande fournisseur BC-BPP2600313 au 15/06/2026" -> action update_document_date, target_model purchase.order, document_query BC-BPP2600313, field_name date_planned, new_value 2026-06-15, requires_approval true.
-- "Modifier la date d’arrivée prévue du bon de commande fournisseur BC-BPP2600313 pour le fournisseur P.A.N au 15/06/2026" -> action update_document_date, document_type purchase_order, target_model purchase.order, document_reference BC-BPP2600313, document_query BC-BPP2600313, partner_name P.A.N, field expected_arrival_date, technical_field date_planned, field_name date_planned, new_value 2026-06-15, requires_approval true.
-- "Change client of quotation S00045 to ABDOU LIGHT & SOUNDS" -> action update_document_partner, target_model sale.order, document_query S00045, field_name partner_id, new_value ABDOU LIGHT & SOUNDS, requires_approval true.
-- "Change invoice date of INV/2026/001 to 2026-06-20" -> action update_document_date, target_model account.move, document_query INV/2026/001, field_name invoice_date, new_value 2026-06-20, requires_approval true.
-- "Change delivery date of WH/OUT/00012 to 2026-06-20" -> action update_document_date, target_model stock.picking, document_query WH/OUT/00012, field_name scheduled_date, new_value 2026-06-20, requires_approval true.
-- For delivery orders, do not emit price_unit. Only quantity changes are supported.
+- partner: client, fournisseur, customer, supplier, vendor.
 
 User request:
 {message}
@@ -846,7 +977,13 @@ User request:
             message=message,
         )
 
-        if normalized and normalized.get("action") != "unknown":
+        if (
+            normalized
+            and (
+                normalized.get("action") != "unknown"
+                or normalized.get("needs_clarification")
+            )
+        ):
             return normalized
 
     fallback = parse_odoo_action_deterministic(message)
@@ -1043,7 +1180,10 @@ def build_parser_debug(parsed_action: dict, action: str | None = None):
     return {
         "parser_source": parsed_action.get("parser_source") or "fallback",
         "language": parsed_action.get("language"),
-        "parsed_action": action or parsed_action.get("action"),
+        "parsed_action": (
+            parsed_action.get("business_action")
+            or business_action_for(parsed_action.get("action"), action)
+        ),
         "document_type": parsed_action.get("document_type"),
         "document_reference": (
             parsed_action.get("document_reference")
@@ -1081,6 +1221,11 @@ def with_parser_debug(response: dict, parsed_action: dict, action: str | None = 
 
 
 def build_needs_clarification_response(message: str, parsed_action: dict, missing_fields: list[str]):
+    clarification_message = "Informations manquantes: " + ", ".join(missing_fields) + "."
+
+    if missing_fields == ["nouveau prix"]:
+        clarification_message = "Veuillez préciser le nouveau prix."
+
     return with_parser_debug({
         "intent": "odoo",
         "agent": "odoo_agent",
@@ -1088,7 +1233,7 @@ def build_needs_clarification_response(message: str, parsed_action: dict, missin
         "requires_approval": False,
         "approval_required": False,
         "status": "needs_clarification",
-        "message": "Informations manquantes: " + ", ".join(missing_fields) + ".",
+        "message": clarification_message,
         "tool_used": None,
         "data": {
             "action": parsed_action.get("action"),
@@ -1119,7 +1264,12 @@ def build_safe_unsupported_document_response(message: str, parsed_action: dict):
         "status": "unsupported",
         "message": (
             parsed_action.get("clarification_reason")
-            or "Action document Odoo non supportée. Aucune modification n’a été exécutée."
+            or (
+                "Je comprends votre demande, mais cette action n’est pas encore disponible "
+                "dans les outils autorisés de l’orchestrateur. Vous pouvez me demander de "
+                "consulter Odoo, modifier des données Odoo avec validation, diagnostiquer "
+                "un problème IT ou accéder aux fichiers du serveur interne."
+            )
         ),
         "tool_used": None,
         "data": {
@@ -1133,6 +1283,32 @@ def build_safe_unsupported_document_response(message: str, parsed_action: dict):
         },
         "result": {
             "user_message": message,
+        },
+    }, parsed_action, parsed_action.get("action"))
+
+
+def build_ambiguous_response(message: str, parsed_action: dict, candidates: list, entity_label: str = "résultats"):
+    return with_parser_debug({
+        "intent": "odoo",
+        "agent": "odoo_agent",
+        "risk": "low",
+        "requires_approval": False,
+        "approval_required": False,
+        "status": "ambiguous",
+        "message": (
+            f"Plusieurs {entity_label} correspondent à votre demande. "
+            "Veuillez préciser lequel utiliser."
+        ),
+        "tool_used": None,
+        "candidates": candidates,
+        "data": {
+            "action": parsed_action.get("action"),
+            "candidates": candidates,
+            "executed": False,
+        },
+        "result": {
+            "user_message": message,
+            "candidates": candidates,
         },
     }, parsed_action, parsed_action.get("action"))
 
@@ -1224,6 +1400,35 @@ def build_sensitive_approval_response(message: str, action: str, parsed_action: 
 
     if action == "change_price":
         requested_value = requested_value or str(requested_price)
+        resolved_product = unwrap_tool_response(
+            execute_tool(
+                "odoo_resolve_product_for_write",
+                product_name=product_name,
+            )
+        )
+
+        if isinstance(resolved_product, dict) and resolved_product.get("ambiguous"):
+            return build_ambiguous_response(
+                message,
+                parsed_action,
+                resolved_product.get("candidates", []),
+                entity_label="produits",
+            )
+
+        if isinstance(resolved_product, dict) and resolved_product.get("found") is False:
+            return with_parser_debug({
+                "intent": "odoo",
+                "agent": "odoo_agent",
+                "risk": "low",
+                "requires_approval": False,
+                "approval_required": False,
+                "status": "not_found",
+                "message": "Produit introuvable dans Odoo. Aucune validation créée.",
+                "tool_used": "odoo_resolve_product_for_write",
+                "data": resolved_product,
+                "result": resolved_product,
+            }, parsed_action, action)
+
         metadata.update({
             "tool_name": "odoo_update_product_price",
             "product_name": product_name,
@@ -1354,6 +1559,7 @@ def build_sensitive_approval_response(message: str, action: str, parsed_action: 
 def run(message: str):
     parsed_action = parse_odoo_action_with_openai(message)
     action = parsed_action.get("action")
+    business_action = parsed_action.get("business_action") or business_action_for(action, action)
 
     if parsed_action.get("needs_clarification"):
         reason = parsed_action.get("clarification_reason")
@@ -1370,14 +1576,26 @@ def run(message: str):
             ["nouveau prix"],
         )
 
+    if action == "change_price" and not parsed_action.get("record_query"):
+        return build_needs_clarification_response(
+            message,
+            parsed_action,
+            ["nom du produit"],
+        )
+
     if (
         action == "unknown"
-        and parsed_action.get("intent") == "odoo_document_action"
+        and parsed_action.get("parser_source") in {"openai", "test"}
     ):
         return build_safe_unsupported_document_response(message, parsed_action)
 
     if action == "unknown":
         action = detect_odoo_action(message)
+
+    if action == "unknown":
+        parsed_action["action"] = "unknown"
+        parsed_action["business_action"] = "unknown"
+        return build_safe_unsupported_document_response(message, parsed_action)
 
     sensitive_actions = {
         "change_price",
@@ -1394,7 +1612,49 @@ def run(message: str):
     if action in sensitive_actions or requires_approval(message):
         return build_sensitive_approval_response(message, action, parsed_action)
 
-    if action in ["check_stock", "check_price", "check_unit", "check_product_details"]:
+    if (
+        action in {"check_stock", "product_search", "product_details"}
+        and not parsed_action.get("record_query")
+        and not parsed_action.get("product_query")
+    ):
+        return build_needs_clarification_response(
+            message,
+            parsed_action,
+            ["nom du produit"],
+        )
+
+    if action == "inventory_summary":
+        raw_result = unwrap_tool_response(execute_tool("odoo_inventory_summary"))
+        success = bool(isinstance(raw_result, dict) and raw_result.get("success"))
+
+        log_request({
+            "event_type": "odoo_read",
+            "title": "Résumé inventaire Odoo",
+            "system": "odoo",
+            "agent": "odoo_agent",
+            "status": "completed" if success else "failed",
+            "risk": "low",
+            "approval_status": "not_required",
+            "user_message": message,
+            "action": business_action,
+            "message": "Résumé inventaire consulté sans modification.",
+            "data": raw_result,
+        })
+
+        return with_parser_debug({
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "risk": "low",
+            "requires_approval": False,
+            "approval_required": False,
+            "status": "completed" if success else "failed",
+            "message": "Résumé inventaire consulté avec succès." if success else "Résumé inventaire indisponible.",
+            "tool_used": "odoo_inventory_summary",
+            "data": raw_result,
+            "result": raw_result,
+        }, parsed_action, action)
+
+    if action in ["check_stock", "check_price", "check_unit", "check_product_details", "product_details"]:
         product_name = parsed_action.get("record_query") or extract_product_name(message)
         raw_result = check_stock(product_name)
         data = normalize_stock_result(raw_result, action)
@@ -1429,7 +1689,40 @@ def run(message: str):
             "result": raw_result,
         }, parsed_action, action)
 
-    if action == "search_document":
+    if action == "product_search":
+        product_name = parsed_action.get("record_query") or extract_product_name(message)
+        raw_result = search_product(product_name)
+        found = bool(isinstance(raw_result, dict) and raw_result.get("found"))
+
+        log_request({
+            "event_type": "odoo_read",
+            "title": "Recherche produit Odoo",
+            "system": "odoo",
+            "agent": "odoo_agent",
+            "status": "completed" if found else "not_found",
+            "risk": "low",
+            "approval_status": "not_required",
+            "user_message": message,
+            "action": business_action,
+            "product": product_name,
+            "message": "Recherche produit consultative sans modification.",
+            "data": raw_result,
+        })
+
+        return with_parser_debug({
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "risk": "low",
+            "requires_approval": False,
+            "approval_required": False,
+            "status": "completed" if found else "not_found",
+            "message": "Recherche produit exécutée." if found else "Produit introuvable dans Odoo.",
+            "tool_used": "odoo_search_product",
+            "data": raw_result,
+            "result": raw_result,
+        }, parsed_action, action)
+
+    if action in {"search_document", "document_details"}:
         target_model = parsed_action.get("target_model")
         document_query = (
             parsed_action.get("document_query")
@@ -1445,7 +1738,7 @@ def run(message: str):
                 ["type de document"],
             )
 
-        if wants_document_details(message):
+        if action == "document_details" or wants_document_details(message):
             details_tool_name = document_details_tool_name(target_model)
             query_arg = document_details_query_arg(target_model)
 

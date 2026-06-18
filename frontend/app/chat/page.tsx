@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -17,6 +17,8 @@ type OdooStockResult = {
   unit?: unknown;
   source?: unknown;
 };
+
+type Candidate = Record<string, unknown>;
 
 type ChatResponse = {
   intent?: string;
@@ -45,6 +47,7 @@ type ChatResponse = {
   tool_used?: string | null;
   data?: LooseRecord;
   result?: unknown;
+  candidates?: Candidate[];
   agent_result?: {
     agent?: string;
     tool_used?: string | null;
@@ -64,6 +67,7 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<ChatResponse | null>(null);
   const [error, setError] = useState("");
+  const resultRef = useRef<HTMLElement | null>(null);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -105,6 +109,8 @@ export default function ChatPage() {
   }
 
   const odooStockResult = normalizeOdooStockResult(response);
+  const candidates = normalizeCandidates(response);
+  const responseData = response?.data || {};
   const selectedAgent =
     response?.agent ||
     response?.selected_agent ||
@@ -132,6 +138,17 @@ export default function ChatPage() {
     if (response.status === "failed") return "Échec";
 
     return response.status || "Traité";
+  }, [response]);
+
+  useEffect(() => {
+    if (!response) return;
+
+    window.requestAnimationFrame(() => {
+      resultRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
   }, [response]);
 
   return (
@@ -188,7 +205,7 @@ export default function ChatPage() {
               id="message"
               value={message}
               onChange={(event) => setMessage(event.target.value)}
-              placeholder="Exemple : Check stock for BACO CLEAN"
+              placeholder="De quoi avez-vous besoin ?"
               rows={4}
             />
 
@@ -214,9 +231,175 @@ export default function ChatPage() {
 
         {response && (
           <>
+            <section
+              ref={resultRef}
+              className={isSensitiveAction ? "approvalPanel resultAnchor" : "resultPanel resultAnchor"}
+            >
+              <div className="panelHeader">
+                <div>
+                  <p className="eyebrow">Réponse de l’orchestrateur</p>
+                  <h3>{mainResultTitle(response, odooStockResult, statusLabel)}</h3>
+                </div>
+
+                {isOdooProductResult && !isSensitiveAction && (
+                  <span className="sourceBadge">
+                    {formatValue(odooStockResult?.source || "real_odoo")}
+                  </span>
+                )}
+
+                {isSensitiveAction && <span className="warningBadge">Bloquée</span>}
+              </div>
+
+              {response.needs_clarification && (
+                <p className="genericMessage">
+                  {response.message || "Des informations sont nécessaires pour continuer."}
+                </p>
+              )}
+
+              {isOdooProductResult && !isSensitiveAction && (
+                <>
+                  <div className="productGrid">
+                    <Metric
+                      label="Stock disponible"
+                      value={formatNumber(odooStockResult?.available_stock)}
+                    />
+                    <Metric
+                      label="Stock prévisionnel"
+                      value={formatNumber(odooStockResult?.forecast_stock)}
+                    />
+                    <Metric
+                      label="Prix de vente"
+                      value={formatPrice(odooStockResult?.sale_price)}
+                    />
+                    <Metric
+                      label="Référence"
+                      value={formatValue(odooStockResult?.internal_reference)}
+                    />
+                  </div>
+
+                  <div className="detailsTable">
+                    <Detail
+                      label="Produit"
+                      value={formatValue(odooStockResult?.product)}
+                    />
+                    <Detail
+                      label="Référence interne"
+                      value={formatValue(odooStockResult?.internal_reference)}
+                    />
+                    <Detail
+                      label="Stock disponible"
+                      value={formatNumber(odooStockResult?.available_stock)}
+                    />
+                    <Detail
+                      label="Stock prévisionnel"
+                      value={formatNumber(odooStockResult?.forecast_stock)}
+                    />
+                    <Detail
+                      label="Prix de vente"
+                      value={formatPrice(odooStockResult?.sale_price)}
+                    />
+                    <Detail
+                      label="Unité"
+                      value={formatValue(odooStockResult?.unit)}
+                    />
+                    <Detail
+                      label="Source"
+                      value={formatValue(odooStockResult?.source || "real_odoo")}
+                    />
+                  </div>
+                </>
+              )}
+
+              {isSensitiveAction && (
+                <>
+                  <p className="approvalMessage">
+                    {response.message ||
+                      "Cette action nécessite une validation humaine avant exécution."}
+                  </p>
+
+                  <div className="detailsTable">
+                    <Detail
+                      label="Action"
+                      value={translateAction(
+                        response.parsed_action || formatValue(responseData.action)
+                      )}
+                    />
+                    <Detail
+                      label="Produit"
+                      value={formatValue(responseData.product || response.product_name)}
+                    />
+                    <Detail
+                      label="Valeur demandée"
+                      value={formatValue(responseData.requested_value || response.new_value)}
+                    />
+                    <Detail
+                      label="ID validation"
+                      value={response.approval_id || "-"}
+                    />
+                    <Detail label="Exécuté dans Odoo" value="Non" />
+                  </div>
+
+                  <div className="approvalActions">
+                    <Link href="/approvals">Voir les validations</Link>
+                    <Link href="/logs">Voir les logs d’audit</Link>
+                  </div>
+                </>
+              )}
+
+              {!isOdooProductResult && !isSensitiveAction && !response.needs_clarification && (
+                <>
+                  <p className="genericMessage">
+                    {response.message || "Réponse traitée par l’orchestrateur."}
+                  </p>
+
+                  {localAgentResult && (
+                    <AgentResultDetails
+                      agent={selectedAgent}
+                      result={localAgentResult}
+                    />
+                  )}
+                </>
+              )}
+
+              {candidates.length > 0 && (
+                <div className="candidateBlock">
+                  <p className="eyebrow">Candidats</p>
+                  <div className="candidateList">
+                    {candidates.map((candidate, index) => (
+                      <div
+                        className="candidateItem"
+                        key={`${formatValue(candidate.id || candidate.record_id || candidate.line_id)}-${index}`}
+                      >
+                        <Detail
+                          label="ID"
+                          value={formatValue(candidate.id || candidate.record_id || candidate.line_id)}
+                        />
+                        <Detail
+                          label="Nom"
+                          value={formatValue(candidate.name || candidate.product || candidate.product_name || candidate.partner)}
+                        />
+                        <Detail
+                          label="Référence"
+                          value={formatValue(candidate.default_code || candidate.ref)}
+                        />
+                        <Detail
+                          label="Prix"
+                          value={formatValue(candidate.list_price || candidate.price_unit)}
+                        />
+                        <Detail
+                          label="Stock"
+                          value={formatValue(candidate.qty_available || candidate.quantity)}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
+
             <section className="decisionGrid">
               <InfoCard
-                label="Intent"
+                label="Intention"
                 value={response.intent || "Non détecté"}
               />
               <InfoCard
@@ -238,6 +421,13 @@ export default function ChatPage() {
 
             {response.parser_source && (
               <section className="analysisPanel">
+                <div className="panelHeader">
+                  <div>
+                    <p className="eyebrow">Debug</p>
+                    <h3>Détails d’analyse</h3>
+                  </div>
+                </div>
+
                 <div className="detailsTable">
                   <Detail
                     label="Source d’analyse"
@@ -264,164 +454,18 @@ export default function ChatPage() {
                       response.product_name || response.line_product
                     )}
                   />
-                </div>
-              </section>
-            )}
-
-            {isOdooProductResult && !isSensitiveAction && (
-              <section className="resultPanel">
-                <div className="panelHeader">
-                  <div>
-                    <p className="eyebrow">Résultat Odoo</p>
-                    <h3>
-                      {odooStockResult?.product
-                        ? formatValue(odooStockResult.product)
-                        : "Produit Odoo"}
-                    </h3>
-                  </div>
-
-                  <span className="sourceBadge">
-                    {formatValue(odooStockResult?.source || "real_odoo")}
-                  </span>
-                </div>
-
-                <div className="productGrid">
-                  <Metric
-                    label="Stock disponible"
-                    value={formatNumber(odooStockResult?.available_stock)}
-                  />
-                  <Metric
-                    label="Stock prévisionnel"
-                    value={formatNumber(odooStockResult?.forecast_stock)}
-                  />
-                  <Metric
-                    label="Prix de vente"
-                    value={formatPrice(odooStockResult?.sale_price)}
-                  />
-                  <Metric
-                    label="Unité"
-                    value={formatValue(odooStockResult?.unit)}
-                  />
-                </div>
-
-                <div className="detailsTable">
-                  <Detail
-                    label="Produit"
-                    value={formatValue(odooStockResult?.product)}
-                  />
-                  <Detail
-                    label="Référence interne"
-                    value={formatValue(odooStockResult?.internal_reference)}
-                  />
-                  <Detail
-                    label="Stock disponible"
-                    value={formatNumber(odooStockResult?.available_stock)}
-                  />
-                  <Detail
-                    label="Stock prévisionnel"
-                    value={formatNumber(odooStockResult?.forecast_stock)}
-                  />
-                  <Detail
-                    label="Prix de vente"
-                    value={formatPrice(odooStockResult?.sale_price)}
-                  />
-                  <Detail
-                    label="Unité"
-                    value={formatValue(odooStockResult?.unit)}
-                  />
-                  <Detail
-                    label="Source"
-                    value={formatValue(odooStockResult?.source || "real_odoo")}
-                  />
                   <Detail
                     label="Outil utilisé"
-                    value={response.tool_used || "odoo_check_stock"}
+                    value={selectedTool || response.tool_used || "Aucun"}
                   />
                   <Detail label="Statut" value={statusLabel} />
-                  <Detail label="Validation" value="Non requise" />
                 </div>
-              </section>
-            )}
-
-            {isSensitiveAction && (
-              <section className="approvalPanel">
-                <div className="panelHeader">
-                  <div>
-                    <p className="eyebrow">Action sensible détectée</p>
-                    <h3>Validation humaine requise</h3>
-                  </div>
-
-                  <span className="warningBadge">Bloquée</span>
-                </div>
-
-                <p className="approvalMessage">
-                  {response.message ||
-                    "Cette action nécessite une validation humaine avant exécution."}
-                </p>
-
-                <div className="detailsTable">
-                  <Detail
-                    label="Action"
-                    value={translateAction(odooData?.action)}
-                  />
-                  <Detail
-                    label="Produit"
-                    value={formatValue(odooData?.product)}
-                  />
-                  <Detail
-                    label="Valeur demandée"
-                    value={formatValue(odooData?.requested_value)}
-                  />
-                  <Detail
-                    label="ID validation"
-                    value={response.approval_id || "-"}
-                  />
-                  <Detail label="Exécuté dans Odoo" value="Non" />
-                  <Detail label="Statut" value={statusLabel} />
-                </div>
-
-                <div className="approvalActions">
-                  <Link href="/approvals">Voir les validations</Link>
-                  <Link href="/logs">Voir les logs d’audit</Link>
-                </div>
-              </section>
-            )}
-
-            {!isOdooProductResult && !isSensitiveAction && (
-              <section className="resultPanel">
-                <div className="panelHeader">
-                  <div>
-                    <p className="eyebrow">Résultat Agent</p>
-                    <h3>{statusLabel}</h3>
-                  </div>
-                </div>
-
-                <p className="genericMessage">
-                  {response.message || "Réponse traitée par l’orchestrateur."}
-                </p>
-
-                {localAgentResult && (
-                  <div className="detailsTable">
-                    <Detail
-                      label="Agent"
-                      value={formatAgentName(selectedAgent)}
-                    />
-                    <Detail
-                      label="Outil utilisé"
-                      value={selectedTool || "Aucun"}
-                    />
-                    <Detail
-                      label="Diagnostic"
-                      value={formatAgentResult(localAgentResult)}
-                    />
-                  </div>
-                )}
               </section>
             )}
 
             <details className="rawPanel">
               <summary>Réponse brute</summary>
-              <pre>{JSON.stringify(response, null, 2)}</pre>
+              <pre>{JSON.stringify(sanitizeForDisplay(response), null, 2)}</pre>
             </details>
           </>
         )}
@@ -599,6 +643,10 @@ export default function ChatPage() {
           border: 1px solid #d9dee7;
           padding: 24px;
           margin-bottom: 18px;
+        }
+
+        .resultAnchor {
+          scroll-margin-top: 18px;
         }
 
         label {
@@ -826,6 +874,54 @@ export default function ChatPage() {
           font-weight: 800;
         }
 
+        .candidateList {
+          display: grid;
+          gap: 12px;
+        }
+
+        .candidateBlock {
+          margin-top: 18px;
+        }
+
+        .candidateItem {
+          border: 1px solid #e5e7eb;
+          padding: 14px;
+          background: #fbfcfe;
+        }
+
+        .stepList {
+          display: grid;
+          gap: 10px;
+          padding: 14px 0;
+          border-bottom: 1px solid #e5e7eb;
+        }
+
+        .stepItem {
+          display: grid;
+          grid-template-columns: 28px 1fr;
+          gap: 10px;
+          align-items: start;
+        }
+
+        .stepItem span {
+          width: 24px;
+          height: 24px;
+          display: grid;
+          place-items: center;
+          background: #172033;
+          color: #ffffff;
+          font-size: 12px;
+          font-weight: 900;
+        }
+
+        .stepItem p {
+          margin: 2px 0 0;
+          color: #172033;
+          font-size: 14px;
+          line-height: 1.45;
+          font-weight: 700;
+        }
+
         .rawPanel summary {
           cursor: pointer;
           color: #172033;
@@ -957,6 +1053,71 @@ function Detail({ label, value }: { label: string; value: string }) {
   );
 }
 
+function AgentResultDetails({
+  agent,
+  result,
+}: {
+  agent?: string;
+  result: unknown;
+}) {
+  const record = isLooseRecord(result) ? result : null;
+
+  if (agent === "support_agent" && record) {
+    const steps = Array.isArray(record.steps)
+      ? record.steps
+      : Array.isArray(record.suggested_steps)
+        ? record.suggested_steps
+        : [];
+
+    return (
+      <div className="detailsTable">
+        <Detail label="Titre" value={formatValue(record.title || record.diagnosis)} />
+        {steps.length > 0 && (
+          <div className="stepList">
+            {steps.map((step, index) => (
+              <div className="stepItem" key={`${index}-${String(step)}`}>
+                <span>{index + 1}</span>
+                <p>{formatValue(step)}</p>
+              </div>
+            ))}
+          </div>
+        )}
+        <Detail label="Escalade" value={formatValue(record.escalation)} />
+      </div>
+    );
+  }
+
+  if (agent === "server_agent" && record) {
+    return (
+      <div className="detailsTable">
+        {"files" in record && Array.isArray(record.files) && (
+          <Detail
+            label="Fichiers"
+            value={
+              record.files.length > 0
+                ? record.files.map((item) => String(item)).join(", ")
+                : "Aucun fichier"
+            }
+          />
+        )}
+        {"filename" in record && (
+          <Detail label="Fichier" value={formatValue(record.filename)} />
+        )}
+        {"content" in record && (
+          <Detail label="Contenu" value={formatValue(record.content)} />
+        )}
+        <Detail label="Message" value={formatValue(record.message)} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="detailsTable">
+      <Detail label="Résultat" value={formatAgentResult(result)} />
+    </div>
+  );
+}
+
 function isLooseRecord(value: unknown): value is LooseRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -993,6 +1154,123 @@ function normalizeOdooStockResult(response: ChatResponse | null): OdooStockResul
     unit: result?.unit ?? data?.unit,
     source: result?.source ?? data?.source,
   };
+}
+
+function normalizeCandidates(response: ChatResponse | null): Candidate[] {
+  const result = isLooseRecord(response?.result) ? response.result : null;
+  const data = isLooseRecord(response?.data) ? response.data : null;
+
+  if (Array.isArray(response?.candidates)) {
+    return response.candidates;
+  }
+
+  if (Array.isArray(result?.candidates)) {
+    return result.candidates as Candidate[];
+  }
+
+  if (Array.isArray(data?.candidates)) {
+    return data.candidates as Candidate[];
+  }
+
+  if (Array.isArray(result?.results)) {
+    return result.results as Candidate[];
+  }
+
+  if (Array.isArray(data?.results)) {
+    return data.results as Candidate[];
+  }
+
+  return [];
+}
+
+const SENSITIVE_DISPLAY_KEYS = new Set([
+  "url",
+  "database",
+  "username",
+  "uid",
+  "database_configured",
+  "username_configured",
+  "password_or_api_key_configured",
+  "api_key",
+  "password",
+  "token",
+  "secret",
+]);
+
+function isSensitiveDisplayKey(key: string) {
+  const normalized = key.toLowerCase();
+
+  return (
+    SENSITIVE_DISPLAY_KEYS.has(normalized) ||
+    normalized.includes("api_key") ||
+    normalized.includes("password") ||
+    normalized.includes("token") ||
+    normalized.includes("secret")
+  );
+}
+
+function sanitizeForDisplay(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeForDisplay(item));
+  }
+
+  if (!isLooseRecord(value)) {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !isSensitiveDisplayKey(key))
+      .map(([key, entry]) => [key, sanitizeForDisplay(entry)])
+  );
+}
+
+function formatSafeOdooStatus(record: LooseRecord) {
+  if (!("connected" in record) && !("mode" in record)) return "";
+
+  const connected = record.connected === true;
+  const mode = typeof record.mode === "string" ? record.mode : "-";
+  const message = connected
+    ? "Connexion réussie à Odoo"
+    : "Connexion Odoo indisponible";
+
+  return [
+    `Connexion Odoo: ${connected ? "OK" : "Indisponible"}`,
+    `Mode: ${mode}`,
+    `Message: ${message}`,
+  ].join(". ");
+}
+
+function mainResultTitle(
+  response: ChatResponse,
+  odooStockResult: OdooStockResult | null,
+  statusLabel: string
+) {
+  if (response.needs_clarification) return "Information requise";
+  if (response.status === "pending_approval") return "Validation humaine requise";
+
+  if (odooStockResult?.product) {
+    return formatValue(odooStockResult.product);
+  }
+
+  if (response.parsed_action === "inventory_summary") {
+    return "Résumé inventaire";
+  }
+
+  const result = isLooseRecord(response.result) ? response.result : null;
+
+  if (response.agent === "support_agent" && result?.title) {
+    return formatValue(result.title);
+  }
+
+  if (response.agent === "server_agent") {
+    if (response.parsed_action === "blocked_sensitive_path") return "Accès refusé";
+    if (response.parsed_action === "list_internal_files") return "Fichiers du serveur interne";
+    if (response.parsed_action === "create_internal_file") return "Fichier créé";
+    if (response.parsed_action === "read_internal_file") return "Contenu du fichier";
+  }
+
+  return statusLabel;
 }
 
 function formatValue(value: unknown) {
@@ -1043,7 +1321,13 @@ function formatAgentResult(value: unknown) {
 
   if (typeof value !== "object") return String(value);
 
-  const record = value as LooseRecord;
+  const rawRecord = value as LooseRecord;
+  const safeOdooStatus = formatSafeOdooStatus(rawRecord);
+
+  if (safeOdooStatus) return safeOdooStatus;
+
+  const sanitized = sanitizeForDisplay(value);
+  const record = sanitized as LooseRecord;
   const diagnosis = record.diagnosis;
   const suggestedSteps = record.suggested_steps;
 
@@ -1058,7 +1342,23 @@ function formatAgentResult(value: unknown) {
     return `${summary} Actions recommandées: ${nextSteps.join("; ")}.`;
   }
 
-  return JSON.stringify(value);
+  if ("product_count" in record || "stockable_product_count" in record) {
+    return [
+      `Produits: ${formatValue(record.product_count)}`,
+      `Produits vendables: ${formatValue(record.sale_product_count)}`,
+      `Produits stockables: ${formatValue(record.stockable_product_count)}`,
+      `Produits avec stock: ${formatValue(record.products_with_stock_count)}`,
+      `Produits sans stock: ${formatValue(record.products_without_stock_count)}`,
+      `Stock disponible total: ${formatValue(record.total_qty_available)}`,
+      `Stock prévisionnel total: ${formatValue(record.total_virtual_available)}`,
+    ].join(". ");
+  }
+
+  if (typeof record.answer === "string") {
+    return record.answer;
+  }
+
+  return JSON.stringify(sanitized);
 }
 
 function translateRisk(value?: string) {
@@ -1070,6 +1370,7 @@ function translateRisk(value?: string) {
 
 function formatParserSource(value?: string) {
   if (value === "openai") return "OpenAI";
+  if (value === "support_fallback") return "Support local";
   if (value === "fallback" || value === "local_rules") return "Fallback local";
   if (value === "test") return "Test";
   return value || "-";
@@ -1077,6 +1378,24 @@ function formatParserSource(value?: string) {
 
 function translateAction(value?: string) {
   const labels: Record<string, string> = {
+    check_product_stock: "Consultation stock",
+    product_search: "Recherche produit",
+    product_details: "Détails produit",
+    inventory_summary: "Résumé inventaire",
+    update_product_price: "Modification du prix",
+    document_search: "Recherche document",
+    document_details: "Détails document",
+    update_line_price: "Modification prix de ligne",
+    update_line_quantity: "Modification quantité de ligne",
+    update_partner: "Modification client/fournisseur",
+    answer_it_question: "Réponse IT",
+    troubleshoot_issue: "Diagnostic support",
+    explain_procedure: "Explication procédure",
+    list_internal_files: "Liste fichiers internes",
+    read_internal_file: "Lecture fichier interne",
+    create_internal_file: "Création fichier interne",
+    server_status: "Statut serveur",
+    blocked_sensitive_path: "Chemin sensible bloqué",
     change_price: "Modification du prix",
     change_stock: "Modification du stock",
     change_unit: "Modification de l’unité",

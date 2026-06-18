@@ -1,3 +1,29 @@
+def _project_answer(message: str):
+    text = message.lower()
+
+    if "orchestrateur" in text or "orchestrator" in text:
+        return (
+            "L’orchestrateur IA coordonne les demandes entre plusieurs agents spécialisés, "
+            "applique les règles de sécurité, choisit les bons outils et garde une trace "
+            "des actions pour que l’entreprise conserve le contrôle."
+        )
+
+    if "validation humaine" in text or "human approval" in text:
+        return (
+            "La validation humaine permet de bloquer les actions sensibles avant exécution. "
+            "L’IA prépare la demande, mais une personne autorisée décide si la modification "
+            "peut être appliquée."
+        )
+
+    if "traçabilité" in text or "tracabilite" in text or "traceability" in text:
+        return (
+            "La traçabilité consiste à enregistrer les demandes, les décisions, les validations "
+            "et les résultats d’exécution afin de pouvoir auditer le système après coup."
+        )
+
+    return None
+
+
 def search_procedure(query: str):
     return {
         "query": query,
@@ -22,6 +48,20 @@ def answer_policy_question(query: str):
 
 def run(message: str):
     text = message.lower()
+    project_answer = _project_answer(message)
+
+    if project_answer:
+        return {
+            "agent": "knowledge_agent",
+            "parser_source": "knowledge_fallback",
+            "parsed_action": "answer_knowledge_question",
+            "tool_used": "knowledge_project_answer",
+            "result": {
+                "answer": project_answer,
+            },
+            "response": project_answer,
+            "message": project_answer,
+        }
 
     if "procedure" in text or "procédure" in text:
         return {

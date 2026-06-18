@@ -9,6 +9,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from agents.odoo_agent import run as run_odoo_agent
+from agents.support_agent import (
+    is_odoo_access_issue,
+    is_support_request,
+    run as run_support_agent,
+)
+from agents.server_agent import (
+    is_server_request,
+    run as run_server_agent,
+)
 from integrations.odoo_connector import OdooConnector
 from models.openai_adapter import (
     generate_response,
@@ -309,6 +318,9 @@ def build_odoo_approval_tool_call(approval: dict):
 
 
 def is_odoo_related(message: str) -> bool:
+    if is_odoo_access_issue(message):
+        return False
+
     text = message.lower()
     normalized = (
         text.replace("é", "e")
@@ -330,7 +342,6 @@ def is_odoo_related(message: str) -> bool:
         return True
 
     keywords = [
-        "odoo",
         "baco",
         "stock",
         "inventory",
@@ -380,6 +391,103 @@ def is_odoo_related(message: str) -> bool:
     ]
 
     return any(keyword in text or keyword in normalized for keyword in keywords)
+
+
+def build_direct_support_response(message: str):
+    agent_result = run_support_agent(message)
+    result = agent_result.get("result") if isinstance(agent_result, dict) else None
+    support_message = agent_result.get("response") or agent_result.get("message")
+
+    if not support_message and isinstance(result, dict):
+        support_message = result.get("message")
+
+        if not support_message and isinstance(result.get("steps"), list):
+            support_message = "Étapes à vérifier : " + "; ".join(
+                str(step) for step in result["steps"]
+            )
+
+        if not support_message and isinstance(result.get("suggested_steps"), list):
+            support_message = "Étapes à vérifier : " + "; ".join(
+                str(step) for step in result["suggested_steps"]
+            )
+
+    if not support_message:
+        support_message = "Demande support traitée."
+
+    log_request({
+        "event_type": "support_request",
+        "system": "support",
+        "agent": "support_agent",
+        "status": "completed",
+        "risk": "low",
+        "approval_status": "not_required",
+        "user_message": message,
+        "action": agent_result.get("parsed_action") if isinstance(agent_result, dict) else "troubleshoot_issue",
+        "message": "Support troubleshooting response generated.",
+    })
+
+    return {
+        "intent": "support",
+        "agent": "support_agent",
+        "selected_agent": "support_agent",
+        "risk": "low",
+        "risk_level": "low",
+        "selected_model": {
+            "provider": "local_fallback",
+            "model": "support_fallback",
+            "reason": "Direct support route selected by local policy.",
+        },
+        "requires_approval": False,
+        "approval_required": False,
+        "approval_status": "not_required",
+        "status": "completed",
+        "message": support_message,
+        "parser_source": agent_result.get("parser_source", "support_fallback") if isinstance(agent_result, dict) else "support_fallback",
+        "parsed_action": agent_result.get("parsed_action", "troubleshoot_issue") if isinstance(agent_result, dict) else "troubleshoot_issue",
+        "tool_used": agent_result.get("tool_used") if isinstance(agent_result, dict) else None,
+        "agent_result": agent_result,
+        "result": result,
+    }
+
+
+def build_direct_server_response(message: str):
+    agent_result = run_server_agent(message)
+    result = agent_result.get("result") if isinstance(agent_result, dict) else None
+
+    log_request({
+        "event_type": "server_request",
+        "system": "internal_server",
+        "agent": "server_agent",
+        "status": agent_result.get("status", "completed") if isinstance(agent_result, dict) else "completed",
+        "risk": "low",
+        "approval_status": "not_required",
+        "user_message": message,
+        "action": agent_result.get("parsed_action") if isinstance(agent_result, dict) else "unknown",
+        "message": "Internal server demo action handled by local policy.",
+    })
+
+    return {
+        "intent": "server",
+        "agent": "server_agent",
+        "selected_agent": "server_agent",
+        "risk": "low",
+        "risk_level": "low",
+        "selected_model": {
+            "provider": "local_fallback",
+            "model": "server_fallback",
+            "reason": "Direct server route selected by local policy.",
+        },
+        "requires_approval": False,
+        "approval_required": False,
+        "approval_status": "not_required",
+        "status": agent_result.get("status", "completed") if isinstance(agent_result, dict) else "completed",
+        "message": agent_result.get("message") if isinstance(agent_result, dict) else str(agent_result),
+        "parser_source": agent_result.get("parser_source", "server_fallback") if isinstance(agent_result, dict) else "server_fallback",
+        "parsed_action": agent_result.get("parsed_action", "unknown") if isinstance(agent_result, dict) else "unknown",
+        "tool_used": agent_result.get("tool_used") if isinstance(agent_result, dict) else None,
+        "agent_result": agent_result,
+        "result": result,
+    }
 
 
 @app.get("/")
@@ -474,8 +582,30 @@ def chat(request: ChatRequest):
             detail="Message cannot be empty",
         )
 
+    if is_support_request(message):
+        return build_direct_support_response(message)
+
+    if is_server_request(message):
+        return build_direct_server_response(message)
+
     if is_odoo_related(message):
-        return run_odoo_agent(message)
+        odoo_result = run_odoo_agent(message)
+
+        if isinstance(odoo_result, dict):
+            odoo_result.setdefault("agent", "odoo_agent")
+            odoo_result.setdefault("selected_agent", odoo_result.get("agent", "odoo_agent"))
+            odoo_result.setdefault("selected_model", {
+                "provider": "mock",
+                "model": "policy_engine",
+                "reason": "Odoo actions are controlled by local policy and approval rules.",
+            })
+            odoo_result.setdefault("agent_result", {
+                "agent": odoo_result.get("agent", "odoo_agent"),
+                "tool_used": odoo_result.get("tool_used"),
+                "result": odoo_result.get("result") or odoo_result.get("data"),
+            })
+
+        return odoo_result
 
     return process_request(message)
 

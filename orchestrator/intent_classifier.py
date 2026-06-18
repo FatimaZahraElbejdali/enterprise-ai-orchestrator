@@ -35,6 +35,10 @@ KEYWORDS = {
 
     "server": [
         "server", "serveur", "infrastructure", "uptime", "downtime",
+        "serveur interne", "fichier serveur", "stockage interne",
+        "internal server", "server file", "internal file",
+        "liste les fichiers", "list files", "crée un fichier",
+        "cree un fichier", "create file", "lis le fichier", "read file",
         "cpu", "ram", "disk", "storage", "memory", "database",
         "postgres", "mysql", "mongodb", "latency", "performance",
         "slow", "timeout", "load balancer", "kubernetes", "cluster",
@@ -63,10 +67,14 @@ KEYWORDS = {
         "monitor", "keyboard", "mouse", "wifi", "wi-fi", "internet",
         "network", "réseau", "reseau", "password", "mot de passe",
         "cannot login", "can't login", "connexion", "connection issue",
+        "problème de connexion", "probleme de connexion",
+        "n'arrive pas", "ne s'ouvre pas", "not loading",
+        "cannot access", "can't access", "access problem",
+        "vpn", "vpn problem", "no internet", "slow internet",
         "email issue", "outlook", "gmail", "teams", "zoom", "slack",
         "software not working", "application not working", "install",
         "installation", "reset password", "forgot password", "blocked account",
-        "account locked", "vpn problem", "no internet", "slow internet"
+        "account locked"
     ],
 
     "knowledge": [

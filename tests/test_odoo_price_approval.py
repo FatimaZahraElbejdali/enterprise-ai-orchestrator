@@ -74,6 +74,42 @@ def parsed_purchase_expected_arrival_with_supplier():
     return action
 
 
+def resolved_product_for_write(name="BACO CLEAN"):
+    return {
+        "success": True,
+        "result": {
+            "success": True,
+            "found": True,
+            "ambiguous": False,
+            "product_id": 101,
+            "product": {
+                "id": 101,
+                "name": name,
+                "default_code": "PDSBACCLN0001",
+                "list_price": 9.0,
+                "qty_available": 59.0,
+                "virtual_available": 14054.0,
+                "sale_ok": True,
+                "active": True,
+                "uom_id": "Unité(s)",
+            },
+            "candidates": [
+                {
+                    "id": 101,
+                    "name": name,
+                    "default_code": "PDSBACCLN0001",
+                    "list_price": 9.0,
+                    "qty_available": 59.0,
+                    "virtual_available": 14054.0,
+                    "sale_ok": True,
+                    "active": True,
+                    "uom_id": "Unité(s)",
+                }
+            ],
+        },
+    }
+
+
 def test_change_price_request_creates_approval_without_execution(monkeypatch, tmp_path):
     approvals_file = tmp_path / "approvals.json"
     monkeypatch.setattr("orchestrator.approval_store.APPROVALS_FILE", approvals_file)
@@ -82,10 +118,12 @@ def test_change_price_request_creates_approval_without_execution(monkeypatch, tm
         lambda message: parsed_price_action(),
     )
 
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("Odoo write should not execute from chat")
+    def fake_execute_tool(tool_name, **kwargs):
+        assert tool_name == "odoo_resolve_product_for_write"
+        assert kwargs["product_name"] == "BACO CLEAN"
+        return resolved_product_for_write()
 
-    monkeypatch.setattr("agents.odoo_agent.execute_tool", fail_if_called)
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
     monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
 
     result = run_odoo_agent("Change price of BACO CLEAN to 25 DH")
@@ -102,6 +140,58 @@ def test_change_price_request_creates_approval_without_execution(monkeypatch, tm
     assert approval["metadata"]["product_name"] == "BACO CLEAN"
     assert approval["metadata"]["new_price"] == 25.0
     assert approval["executed"] is False
+
+
+def test_ambiguous_change_price_blocks_approval(monkeypatch, tmp_path):
+    approvals_file = tmp_path / "approvals.json"
+    monkeypatch.setattr("orchestrator.approval_store.APPROVALS_FILE", approvals_file)
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: parsed_price_action(record_query="BACODOR", new_value=7.0),
+    )
+
+    def fake_execute_tool(tool_name, **kwargs):
+        assert tool_name == "odoo_resolve_product_for_write"
+        return {
+            "success": True,
+            "result": {
+                "success": False,
+                "found": True,
+                "ambiguous": True,
+                "message": "Produit ambigu — aucune modification exécutée.",
+                "candidates": [
+                    {
+                        "id": 10,
+                        "name": "BACODOR",
+                        "default_code": "BACODOR-A",
+                        "list_price": 1.0,
+                        "qty_available": 44.0,
+                    },
+                    {
+                        "id": 11,
+                        "name": "BACODOR",
+                        "default_code": "BACODOR-B",
+                        "list_price": 0.0,
+                        "qty_available": 0.0,
+                    },
+                ],
+            },
+        }
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("Approval should not be created for ambiguous product")
+
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
+    monkeypatch.setattr("agents.odoo_agent.create_approval", fail_if_called)
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent("Modifier le prix de BACODOR à 7 DH")
+
+    assert result["status"] == "ambiguous"
+    assert result["approval_required"] is False
+    assert result["requires_approval"] is False
+    assert result["candidates"][0]["id"] == 10
+    assert get_approvals() == []
 
 
 def test_approve_change_price_executes_tool_and_stores_result(monkeypatch, tmp_path):
@@ -707,7 +797,7 @@ def test_check_stock_still_does_not_require_approval(monkeypatch):
     assert result["requires_approval"] is False
     assert result["tool_used"] == "odoo_check_stock"
     assert result["parser_source"] == "test"
-    assert result["parsed_action"] == "check_stock"
+    assert result["parsed_action"] == "check_product_stock"
     assert result["product_name"] == "BACO CLEAN"
     assert result["needs_clarification"] is False
 
@@ -735,7 +825,7 @@ def test_missing_product_price_returns_clarification_without_approval(monkeypatc
     assert result["approval_required"] is False
     assert result["requires_approval"] is False
     assert result["parser_source"] == "test"
-    assert result["parsed_action"] == "change_price"
+    assert result["parsed_action"] == "update_product_price"
     assert result["product_name"] == "BACO+"
 
 
