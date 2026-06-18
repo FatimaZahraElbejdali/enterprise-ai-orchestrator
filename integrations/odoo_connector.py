@@ -29,7 +29,7 @@ DOCUMENT_CONFIGS = {
         "date_field": "date_order",
         "reference_fields": ["name", "partner_ref", "origin"],
         "blocked_states": {"cancel"},
-        "line_fields": ["id", "product_id", "name", "product_qty", "price_unit"],
+        "line_fields": ["id", "product_id", "name", "product_qty", "price_unit", "date_planned"],
         "allowed_line_fields": {"price_unit", "product_qty"},
     },
     "account.move": {
@@ -54,7 +54,7 @@ DOCUMENT_CONFIGS = {
 
 DOCUMENT_DATE_FIELDS = {
     "sale.order": {"date_order"},
-    "purchase.order": {"date_order"},
+    "purchase.order": {"date_order", "date_planned"},
     "account.move": {"invoice_date"},
     "stock.picking": {"scheduled_date"},
 }
@@ -822,6 +822,11 @@ class OdooConnector:
         operator = "=ilike" if exact else "ilike"
         fields = self._existing_fields(model_name, config["reference_fields"])
         conditions = [[field, operator, query] for field in fields]
+        partner_ids = self._search_partner_ids_by_name(query, exact)
+
+        if partner_ids:
+            conditions.append(["partner_id", "in", partner_ids])
+
         domain = self._or_domain(conditions) if conditions else [["name", operator, query]]
         models = self._models()
 
@@ -842,7 +847,103 @@ class OdooConnector:
             },
         )
 
-    def _resolve_document(self, model_name: str, query: str):
+    def _search_document_by_exact_name(self, model_name: str, query: str):
+        models = self._models()
+
+        return models.execute_kw(
+            self.database,
+            self.uid,
+            self.auth_secret,
+            model_name,
+            "search_read",
+            [[["name", "=", query]]],
+            {
+                "fields": self._existing_fields(
+                    model_name,
+                    self._document_base_fields(model_name),
+                ),
+                "limit": 20,
+                "context": {"active_test": False},
+            },
+        )
+
+    def _read_document_by_id(self, model_name: str, document_id: int):
+        try:
+            parsed_id = int(document_id)
+        except (TypeError, ValueError):
+            return []
+
+        return self._read_records(
+            model_name,
+            [parsed_id],
+            self._document_base_fields(model_name),
+        )
+
+    def _search_document_by_exact_name_and_partner(
+        self,
+        model_name: str,
+        query: str,
+        partner_name: str,
+    ):
+        partner_ids = (
+            self._search_partner_ids_by_name(partner_name, exact=True)
+            or self._search_partner_ids_by_name(partner_name, exact=False)
+        )
+
+        if not partner_ids:
+            return []
+
+        models = self._models()
+
+        return models.execute_kw(
+            self.database,
+            self.uid,
+            self.auth_secret,
+            model_name,
+            "search_read",
+            [[
+                ["name", "=", query],
+                ["partner_id", "in", partner_ids],
+            ]],
+            {
+                "fields": self._existing_fields(
+                    model_name,
+                    self._document_base_fields(model_name),
+                ),
+                "limit": 20,
+                "context": {"active_test": False},
+            },
+        )
+
+    def _search_partner_ids_by_name(self, query: str, exact: bool):
+        operator = "=ilike" if exact else "ilike"
+        models = self._models()
+
+        try:
+            return models.execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                "res.partner",
+                "search",
+                [[["name", operator, query]]],
+                {
+                    "limit": 20,
+                    "context": {"active_test": False},
+                },
+            )
+        except Exception:
+            return []
+
+    def _resolve_document(
+        self,
+        model_name: str,
+        query: str | None = None,
+        document_id: int | None = None,
+        partner_name: str | None = None,
+    ):
+        query = query or ""
+
         if self.mock_mode:
             return self._empty_document_result(
                 model_name,
@@ -858,6 +959,58 @@ class OdooConnector:
             )
 
         try:
+            if document_id is not None:
+                id_records = self._read_document_by_id(model_name, document_id)
+                id_result = self._document_result_from_candidates(
+                    model_name,
+                    str(document_id),
+                    id_records,
+                )
+
+                if id_result:
+                    id_result["source"] = "real_odoo"
+                    return id_result
+
+                result = self._empty_document_result(
+                    model_name,
+                    str(document_id),
+                    "No matching Odoo document found for this ID.",
+                )
+                result["source"] = "real_odoo"
+                return result
+
+            if query and partner_name:
+                partner_records = self._search_document_by_exact_name_and_partner(
+                    model_name,
+                    query,
+                    partner_name,
+                )
+                partner_result = self._document_result_from_candidates(
+                    model_name,
+                    query,
+                    partner_records,
+                    ambiguous_message=(
+                        "Document ambigu pour cette référence et ce partenaire — "
+                        "aucune modification exécutée."
+                    ),
+                )
+
+                if partner_result:
+                    partner_result["source"] = "real_odoo"
+                    partner_result["partner_filter"] = partner_name
+                    return partner_result
+
+            exact_name_records = self._search_document_by_exact_name(model_name, query)
+            exact_name_result = self._document_result_from_candidates(
+                model_name,
+                query,
+                exact_name_records,
+            )
+
+            if exact_name_result:
+                exact_name_result["source"] = "real_odoo"
+                return exact_name_result
+
             exact_records = self._search_document_records(model_name, query, exact=True)
             exact_result = self._document_result_from_candidates(
                 model_name,
@@ -946,8 +1099,19 @@ class OdooConnector:
 
         return formatted
 
-    def _get_document_details(self, model_name: str, query: str):
-        resolved = self._resolve_document(model_name, query)
+    def _get_document_details(
+        self,
+        model_name: str,
+        query: str | None = None,
+        document_id: int | None = None,
+        partner_name: str | None = None,
+    ):
+        resolved = self._resolve_document(
+            model_name,
+            query,
+            document_id=document_id,
+            partner_name=partner_name,
+        )
 
         if not resolved.get("success"):
             resolved["lines"] = []
@@ -964,7 +1128,7 @@ class OdooConnector:
         if not document_records:
             result = self._empty_document_result(
                 model_name,
-                query,
+                query or str(document_id or ""),
                 "Document disappeared before detail read.",
             )
             result["source"] = "real_odoo"
@@ -1025,8 +1189,20 @@ class OdooConnector:
 
         return None
 
-    def _resolve_line_for_write(self, model_name: str, document_query: str, product_query: str):
-        details = self._get_document_details(model_name, document_query)
+    def _resolve_line_for_write(
+        self,
+        model_name: str,
+        document_query: str,
+        product_query: str,
+        document_id: int | None = None,
+        partner_name: str | None = None,
+    ):
+        details = self._get_document_details(
+            model_name,
+            document_query,
+            document_id=document_id,
+            partner_name=partner_name,
+        )
 
         if not details.get("success"):
             return {
@@ -1135,6 +1311,8 @@ class OdooConnector:
         product_query: str,
         field: str,
         new_value,
+        document_id: int | None = None,
+        partner_name: str | None = None,
     ):
         if self.mock_mode:
             return self._document_write_failure(
@@ -1172,6 +1350,8 @@ class OdooConnector:
                 model_name,
                 document_query,
                 product_query,
+                document_id=document_id,
+                partner_name=partner_name,
             )
             document = line_resolution.get("document") or {}
 
@@ -1255,40 +1435,79 @@ class OdooConnector:
                 str(error),
             )
 
-    def update_sale_order_line(self, order_query: str, product_query: str, field: str, new_value) -> dict:
+    def update_sale_order_line(
+        self,
+        order_query: str,
+        product_query: str,
+        field: str,
+        new_value,
+        document_id: int | None = None,
+        partner_name: str | None = None,
+    ) -> dict:
         return self._update_document_line(
             "sale.order",
             order_query,
             product_query,
             field,
             new_value,
+            document_id=document_id,
+            partner_name=partner_name,
         )
 
-    def update_purchase_order_line(self, order_query: str, product_query: str, field: str, new_value) -> dict:
+    def update_purchase_order_line(
+        self,
+        order_query: str,
+        product_query: str,
+        field: str,
+        new_value,
+        document_id: int | None = None,
+        partner_name: str | None = None,
+    ) -> dict:
         return self._update_document_line(
             "purchase.order",
             order_query,
             product_query,
             field,
             new_value,
+            document_id=document_id,
+            partner_name=partner_name,
         )
 
-    def update_invoice_line(self, invoice_query: str, product_query: str, field: str, new_value) -> dict:
+    def update_invoice_line(
+        self,
+        invoice_query: str,
+        product_query: str,
+        field: str,
+        new_value,
+        document_id: int | None = None,
+        partner_name: str | None = None,
+    ) -> dict:
         return self._update_document_line(
             "account.move",
             invoice_query,
             product_query,
             field,
             new_value,
+            document_id=document_id,
+            partner_name=partner_name,
         )
 
-    def update_delivery_quantity(self, picking_query: str, product_query: str, new_quantity: float) -> dict:
+    def update_delivery_quantity(
+        self,
+        picking_query: str,
+        product_query: str,
+        new_quantity: float,
+        document_id: int | None = None,
+        partner_name: str | None = None,
+    ) -> dict:
         return self._update_document_line(
             "stock.picking",
             picking_query,
             product_query,
             "product_uom_qty",
             new_quantity,
+            document_id=document_id,
+            partner_name=partner_name,
         )
 
     def _format_partner_candidate(self, partner: dict):
@@ -1359,7 +1578,14 @@ class OdooConnector:
             ),
         }
 
-    def update_document_partner(self, model_name: str, document_query: str, partner_query: str) -> dict:
+    def update_document_partner(
+        self,
+        model_name: str,
+        document_query: str,
+        partner_query: str,
+        document_id: int | None = None,
+        current_partner_name: str | None = None,
+    ) -> dict:
         if self.mock_mode:
             return self._document_write_failure(
                 model_name,
@@ -1379,7 +1605,12 @@ class OdooConnector:
             )
 
         try:
-            document = self._resolve_document(model_name, document_query)
+            document = self._resolve_document(
+                model_name,
+                document_query,
+                document_id=document_id,
+                partner_name=current_partner_name,
+            )
 
             if not document.get("success"):
                 return self._document_write_failure(
@@ -1469,7 +1700,15 @@ class OdooConnector:
                 str(error),
             )
 
-    def update_document_date(self, model_name: str, document_query: str, date_field: str, new_date: str) -> dict:
+    def update_document_date(
+        self,
+        model_name: str,
+        document_query: str,
+        date_field: str,
+        new_date: str,
+        document_id: int | None = None,
+        partner_name: str | None = None,
+    ) -> dict:
         if self.mock_mode:
             return self._document_write_failure(
                 model_name,
@@ -1489,7 +1728,12 @@ class OdooConnector:
             )
 
         try:
-            document = self._resolve_document(model_name, document_query)
+            document = self._resolve_document(
+                model_name,
+                document_query,
+                document_id=document_id,
+                partner_name=partner_name,
+            )
 
             if not document.get("success"):
                 return self._document_write_failure(
@@ -1499,6 +1743,13 @@ class OdooConnector:
                     new_date,
                     document.get("message", "Document was not resolved."),
                     candidates=document.get("candidates", []),
+                )
+
+            if model_name == "purchase.order" and date_field == "date_planned":
+                return self._update_purchase_order_expected_arrival_date(
+                    document,
+                    document_query,
+                    new_date,
                 )
 
             blocked_message = self._blocked_document_message(
@@ -1561,6 +1812,110 @@ class OdooConnector:
                 new_date,
                 str(error),
             )
+
+    def _update_purchase_order_expected_arrival_date(
+        self,
+        document: dict,
+        document_query: str,
+        new_date: str,
+    ) -> dict:
+        blocked_message = self._blocked_document_message(
+            "purchase.order",
+            document.get("state"),
+        )
+
+        if blocked_message:
+            return self._document_write_failure(
+                "purchase.order",
+                document_query,
+                "date_planned",
+                new_date,
+                blocked_message,
+                record_id=document.get("record_id"),
+                document=document.get("name"),
+            )
+
+        config = DOCUMENT_CONFIGS["purchase.order"]
+        order_records = self._read_records(
+            "purchase.order",
+            [document["record_id"]],
+            ["id", "name", "order_line"],
+        )
+        order = order_records[0] if order_records else {}
+        line_ids = order.get("order_line") or []
+
+        if not line_ids:
+            return self._document_write_failure(
+                "purchase.order",
+                document_query,
+                "date_planned",
+                new_date,
+                "Purchase order has no lines to update. No modification executed.",
+                record_id=document.get("record_id"),
+                document=document.get("name"),
+            )
+
+        before_lines = self._read_records(
+            config["line_model"],
+            line_ids,
+            ["id", "date_planned"],
+        )
+        old_values = [
+            {
+                "line_id": line.get("id"),
+                "date_planned": line.get("date_planned"),
+            }
+            for line in before_lines
+        ]
+
+        models = self._models()
+        write_success = models.execute_kw(
+            self.database,
+            self.uid,
+            self.auth_secret,
+            config["line_model"],
+            "write",
+            [line_ids, {"date_planned": new_date}],
+        )
+
+        after_lines = self._read_records(
+            config["line_model"],
+            line_ids,
+            ["id", "date_planned"],
+        )
+        new_values = [
+            {
+                "line_id": line.get("id"),
+                "date_planned": line.get("date_planned"),
+            }
+            for line in after_lines
+        ]
+        verified = bool(write_success) and bool(after_lines) and all(
+            str(line.get("date_planned") or "").startswith(str(new_date))
+            for line in after_lines
+        )
+
+        return {
+            "success": verified,
+            "verified": verified,
+            "executed": verified,
+            "source": "real_odoo",
+            "model": "purchase.order",
+            "record_id": document.get("record_id"),
+            "document": document.get("name"),
+            "line_id": None,
+            "line_ids": line_ids,
+            "field": "date_planned",
+            "old_value": old_values,
+            "requested_value": new_date,
+            "new_value": new_values,
+            "message": (
+                "Purchase order expected arrival date updated and verified in Odoo."
+                if verified
+                else "Odoo write returned but purchase order line date_planned read-back did not verify."
+            ),
+            "candidates": document.get("candidates", []),
+        }
 
     def get_analytic_boolean_fields(self):
         if self.mock_mode:

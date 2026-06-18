@@ -4,6 +4,14 @@ from orchestrator.tool_registry import get_tool_metadata
 odoo = OdooConnector()
 
 
+def _without_none(values: dict):
+    return {
+        key: value
+        for key, value in values.items()
+        if value is not None
+    }
+
+
 def execute_tool(tool_name: str, **kwargs):
     tool = get_tool_metadata(tool_name)
 
@@ -67,50 +75,62 @@ def execute_tool(tool_name: str, **kwargs):
         result = odoo.get_delivery_order_details(kwargs.get("picking_query", ""))
 
     elif tool_name == "odoo_update_sale_order_line":
-        result = odoo.update_sale_order_line(
-            order_query=kwargs.get("order_query", ""),
-            product_query=kwargs.get("product_query", ""),
-            field=kwargs.get("field", ""),
-            new_value=kwargs.get("new_value"),
-        )
+        result = odoo.update_sale_order_line(**_without_none({
+            "order_query": kwargs.get("order_query", ""),
+            "product_query": kwargs.get("product_query", ""),
+            "field": kwargs.get("field", ""),
+            "new_value": kwargs.get("new_value"),
+            "document_id": kwargs.get("document_id"),
+            "partner_name": kwargs.get("partner_name"),
+        }))
 
     elif tool_name == "odoo_update_purchase_order_line":
-        result = odoo.update_purchase_order_line(
-            order_query=kwargs.get("order_query", ""),
-            product_query=kwargs.get("product_query", ""),
-            field=kwargs.get("field", ""),
-            new_value=kwargs.get("new_value"),
-        )
+        result = odoo.update_purchase_order_line(**_without_none({
+            "order_query": kwargs.get("order_query", ""),
+            "product_query": kwargs.get("product_query", ""),
+            "field": kwargs.get("field", ""),
+            "new_value": kwargs.get("new_value"),
+            "document_id": kwargs.get("document_id"),
+            "partner_name": kwargs.get("partner_name"),
+        }))
 
     elif tool_name == "odoo_update_invoice_line":
-        result = odoo.update_invoice_line(
-            invoice_query=kwargs.get("invoice_query", ""),
-            product_query=kwargs.get("product_query", ""),
-            field=kwargs.get("field", ""),
-            new_value=kwargs.get("new_value"),
-        )
+        result = odoo.update_invoice_line(**_without_none({
+            "invoice_query": kwargs.get("invoice_query", ""),
+            "product_query": kwargs.get("product_query", ""),
+            "field": kwargs.get("field", ""),
+            "new_value": kwargs.get("new_value"),
+            "document_id": kwargs.get("document_id"),
+            "partner_name": kwargs.get("partner_name"),
+        }))
 
     elif tool_name == "odoo_update_delivery_quantity":
-        result = odoo.update_delivery_quantity(
-            picking_query=kwargs.get("picking_query", ""),
-            product_query=kwargs.get("product_query", ""),
-            new_quantity=kwargs.get("new_quantity"),
-        )
+        result = odoo.update_delivery_quantity(**_without_none({
+            "picking_query": kwargs.get("picking_query", ""),
+            "product_query": kwargs.get("product_query", ""),
+            "new_quantity": kwargs.get("new_quantity"),
+            "document_id": kwargs.get("document_id"),
+            "partner_name": kwargs.get("partner_name"),
+        }))
 
     elif tool_name == "odoo_update_document_partner":
-        result = odoo.update_document_partner(
-            model_name=kwargs.get("model_name", ""),
-            document_query=kwargs.get("document_query", ""),
-            partner_query=kwargs.get("partner_query", ""),
-        )
+        result = odoo.update_document_partner(**_without_none({
+            "model_name": kwargs.get("model_name", ""),
+            "document_query": kwargs.get("document_query", ""),
+            "partner_query": kwargs.get("partner_query", ""),
+            "document_id": kwargs.get("document_id"),
+            "current_partner_name": kwargs.get("current_partner_name"),
+        }))
 
     elif tool_name == "odoo_update_document_date":
-        result = odoo.update_document_date(
-            model_name=kwargs.get("model_name", ""),
-            document_query=kwargs.get("document_query", ""),
-            date_field=kwargs.get("date_field", ""),
-            new_date=kwargs.get("new_date", ""),
-        )
+        result = odoo.update_document_date(**_without_none({
+            "model_name": kwargs.get("model_name", ""),
+            "document_query": kwargs.get("document_query", ""),
+            "date_field": kwargs.get("date_field", ""),
+            "new_date": kwargs.get("new_date", ""),
+            "document_id": kwargs.get("document_id"),
+            "partner_name": kwargs.get("partner_name"),
+        }))
 
     elif tool_name == "odoo_create_purchase_order":
         result = odoo.create_purchase_order(kwargs.get("description", ""))

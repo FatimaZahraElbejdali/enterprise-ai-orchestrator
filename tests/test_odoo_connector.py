@@ -329,3 +329,319 @@ def test_update_sale_order_line_refuses_ambiguous_document():
     assert result["verified"] is False
     assert len(result["candidates"]) == 2
     assert result["message"] == "Document ambigu — aucune modification exécutée."
+
+
+class PartnerDocumentSearchModels:
+    def __init__(self):
+        self.document_domains = []
+
+    def execute_kw(self, database, uid, auth_secret, model, method, args, kwargs=None):
+        if method == "fields_get":
+            return {
+                "sale.order": {
+                    "id": {},
+                    "name": {},
+                    "client_order_ref": {},
+                    "origin": {},
+                    "partner_id": {},
+                    "state": {},
+                    "date_order": {},
+                    "order_line": {},
+                },
+            }.get(model, {})
+
+        if model == "res.partner" and method == "search":
+            return [55]
+
+        if model == "sale.order" and method == "search_read":
+            domain = args[0]
+            self.document_domains.append(domain)
+
+            if ["partner_id", "in", [55]] in domain:
+                return [
+                    {
+                        "id": 300,
+                        "name": "S00100",
+                        "partner_id": [55, "Client Partner"],
+                        "state": "sale",
+                        "date_order": "2026-06-18",
+                        "order_line": [],
+                    }
+                ]
+
+            return []
+
+        raise AssertionError(f"Unexpected XML-RPC call: {model}.{method}")
+
+
+def test_search_sale_order_can_match_partner_name():
+    fake_models = PartnerDocumentSearchModels()
+    connector = real_connector_with_models(fake_models)
+
+    result = connector.search_sale_order("Client Partner")
+
+    assert result["success"] is True
+    assert result["found"] is True
+    assert result["record_id"] == 300
+    assert result["partner"] == "Client Partner"
+    assert any(
+        ["partner_id", "in", [55]] in domain
+        for domain in fake_models.document_domains
+    )
+
+
+class PurchaseExpectedArrivalModels:
+    def __init__(self, after_date="2026-06-15"):
+        self.after_date = after_date
+        self.write_values = None
+        self.search_domains = []
+
+    def execute_kw(self, database, uid, auth_secret, model, method, args, kwargs=None):
+        if method == "fields_get":
+            return {
+                "purchase.order": {
+                    "id": {},
+                    "name": {},
+                    "partner_ref": {},
+                    "origin": {},
+                    "partner_id": {},
+                    "state": {},
+                    "date_order": {},
+                    "order_line": {},
+                },
+                "purchase.order.line": {
+                    "id": {},
+                    "product_id": {},
+                    "name": {},
+                    "product_qty": {},
+                    "price_unit": {},
+                    "date_planned": {},
+                },
+            }.get(model, {})
+
+        if model == "res.partner" and method == "search":
+            return []
+
+        if model == "purchase.order" and method == "search_read":
+            domain = args[0]
+            self.search_domains.append(domain)
+
+            if domain == [["name", "=", "BC-BPP2600313"]]:
+                return [
+                    {
+                        "id": 700,
+                        "name": "BC-BPP2600313",
+                        "partner_id": [50, "Supplier A"],
+                        "state": "purchase",
+                        "date_order": "2026-06-01",
+                        "order_line": [701, 702],
+                    }
+                ]
+
+            raise AssertionError("Exact name search should resolve before fallback")
+
+        if model == "purchase.order" and method == "read":
+            return [
+                {
+                    "id": 700,
+                    "name": "BC-BPP2600313",
+                    "partner_id": [50, "Supplier A"],
+                    "state": "purchase",
+                    "date_order": "2026-06-01",
+                    "order_line": [701, 702],
+                }
+            ]
+
+        if model == "purchase.order.line" and method == "read":
+            read_date = self.after_date if self.write_values else "2026-06-10"
+
+            return [
+                {"id": 701, "date_planned": read_date},
+                {"id": 702, "date_planned": read_date},
+            ]
+
+        if model == "purchase.order.line" and method == "write":
+            self.write_values = args[1]
+            return True
+
+        raise AssertionError(f"Unexpected XML-RPC call: {model}.{method}")
+
+
+def test_exact_purchase_order_reference_is_not_ambiguous():
+    fake_models = PurchaseExpectedArrivalModels()
+    connector = real_connector_with_models(fake_models)
+
+    result = connector.search_purchase_order("BC-BPP2600313")
+
+    assert result["success"] is True
+    assert result["ambiguous"] is False
+    assert result["record_id"] == 700
+    assert fake_models.search_domains == [[["name", "=", "BC-BPP2600313"]]]
+
+
+def test_update_purchase_expected_arrival_date_verifies_line_date_planned():
+    fake_models = PurchaseExpectedArrivalModels()
+    connector = real_connector_with_models(fake_models)
+
+    result = connector.update_document_date(
+        model_name="purchase.order",
+        document_query="BC-BPP2600313",
+        date_field="date_planned",
+        new_date="2026-06-15",
+    )
+
+    assert fake_models.write_values == {"date_planned": "2026-06-15"}
+    assert result["success"] is True
+    assert result["executed"] is True
+    assert result["verified"] is True
+    assert result["field"] == "date_planned"
+    assert result["document"] == "BC-BPP2600313"
+    assert result["line_ids"] == [701, 702]
+    assert result["new_value"] == [
+        {"line_id": 701, "date_planned": "2026-06-15"},
+        {"line_id": 702, "date_planned": "2026-06-15"},
+    ]
+
+
+class DuplicatePurchaseReferenceModels:
+    def __init__(self):
+        self.write_values = None
+        self.domains = []
+
+    def execute_kw(self, database, uid, auth_secret, model, method, args, kwargs=None):
+        if method == "fields_get":
+            return {
+                "purchase.order": {
+                    "id": {},
+                    "name": {},
+                    "partner_ref": {},
+                    "origin": {},
+                    "partner_id": {},
+                    "state": {},
+                    "date_order": {},
+                    "order_line": {},
+                },
+                "purchase.order.line": {
+                    "id": {},
+                    "date_planned": {},
+                },
+            }.get(model, {})
+
+        if model == "res.partner" and method == "search":
+            domain = args[0]
+            if domain == [["name", "=ilike", "P.A.N"]]:
+                return [91]
+            return []
+
+        if model == "purchase.order" and method == "search_read":
+            domain = args[0]
+            self.domains.append(domain)
+
+            if domain == [["name", "=", "BC-BPP2600313"]]:
+                return [
+                    {
+                        "id": 793,
+                        "name": "BC-BPP2600313",
+                        "partner_id": [91, "P.A.N"],
+                        "state": "purchase",
+                        "date_order": "2026-06-01",
+                        "order_line": [801],
+                    },
+                    {
+                        "id": 794,
+                        "name": "BC-BPP2600313",
+                        "partner_id": [92, "Other Supplier"],
+                        "state": "purchase",
+                        "date_order": "2026-06-02",
+                        "order_line": [802],
+                    },
+                ]
+
+            if domain == [
+                ["name", "=", "BC-BPP2600313"],
+                ["partner_id", "in", [91]],
+            ]:
+                return [
+                    {
+                        "id": 793,
+                        "name": "BC-BPP2600313",
+                        "partner_id": [91, "P.A.N"],
+                        "state": "purchase",
+                        "date_order": "2026-06-01",
+                        "order_line": [801],
+                    },
+                ]
+
+            return []
+
+        if model == "purchase.order" and method == "read":
+            ids = args[0]
+            if ids == [793]:
+                return [
+                    {
+                        "id": 793,
+                        "name": "BC-BPP2600313",
+                        "partner_id": [91, "P.A.N"],
+                        "state": "purchase",
+                        "date_order": "2026-06-01",
+                        "order_line": [801],
+                    },
+                ]
+            return []
+
+        if model == "purchase.order.line" and method == "read":
+            read_date = "2026-06-15" if self.write_values else "2026-06-10"
+            return [{"id": 801, "date_planned": read_date}]
+
+        if model == "purchase.order.line" and method == "write":
+            self.write_values = args[1]
+            return True
+
+        raise AssertionError(f"Unexpected XML-RPC call: {model}.{method}")
+
+
+def test_duplicate_purchase_reference_is_ambiguous_without_supplier_or_id():
+    fake_models = DuplicatePurchaseReferenceModels()
+    connector = real_connector_with_models(fake_models)
+
+    result = connector.search_purchase_order("BC-BPP2600313")
+
+    assert result["success"] is False
+    assert result["ambiguous"] is True
+    assert len(result["candidates"]) == 2
+
+
+def test_duplicate_purchase_reference_with_supplier_resolves_one_document():
+    fake_models = DuplicatePurchaseReferenceModels()
+    connector = real_connector_with_models(fake_models)
+
+    result = connector.update_document_date(
+        model_name="purchase.order",
+        document_query="BC-BPP2600313",
+        date_field="date_planned",
+        new_date="2026-06-15",
+        partner_name="P.A.N",
+    )
+
+    assert result["success"] is True
+    assert result["executed"] is True
+    assert result["verified"] is True
+    assert result["record_id"] == 793
+    assert fake_models.write_values == {"date_planned": "2026-06-15"}
+
+
+def test_purchase_document_id_resolves_one_document():
+    fake_models = DuplicatePurchaseReferenceModels()
+    connector = real_connector_with_models(fake_models)
+
+    result = connector.update_document_date(
+        model_name="purchase.order",
+        document_query="",
+        document_id=793,
+        date_field="date_planned",
+        new_date="2026-06-15",
+    )
+
+    assert result["success"] is True
+    assert result["record_id"] == 793
+    assert result["document"] == "BC-BPP2600313"

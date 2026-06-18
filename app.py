@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -83,6 +84,7 @@ def normalize_document_endpoint_response(
     document_type: str,
     query: str,
     result: dict,
+    include_record: bool = True,
 ):
     result = result if isinstance(result, dict) else {}
     record = result.get("record")
@@ -105,17 +107,24 @@ def normalize_document_endpoint_response(
             "lines": result.get("lines") or [],
         }
 
-    return {
-        "success": bool(result.get("success")),
+    source = result.get("source")
+    endpoint_success = bool(result.get("success")) or source == "real_odoo"
+
+    response = {
+        "success": endpoint_success,
         "type": document_type,
         "model": result.get("model") or "",
         "query": query,
         "found": bool(result.get("found")),
         "ambiguous": bool(result.get("ambiguous")),
-        "record": record or {},
         "candidates": result.get("candidates") or [],
         "message": result.get("message") or "",
     }
+
+    if include_record:
+        response["record"] = record or {}
+
+    return response
 
 
 def dispatch_document_search(document_type: str, query: str):
@@ -158,6 +167,13 @@ def build_odoo_approval_tool_call(approval: dict):
     if tool_name not in AUTHORIZED_ODOO_UPDATE_TOOLS:
         return None, {}, "Approval metadata does not contain an authorized Odoo update tool."
 
+    def without_none(values: dict):
+        return {
+            key: value
+            for key, value in values.items()
+            if value is not None
+        }
+
     if action == "change_price" and tool_name == "odoo_update_product_price":
         product_name = metadata.get("product_name") or approval.get("entity_name")
         requested_value = metadata.get("new_price")
@@ -169,7 +185,7 @@ def build_odoo_approval_tool_call(approval: dict):
         if product_name is None or requested_value is None:
             return None, {}, "Approval metadata is missing product name or new price."
 
-        return tool_name, tool_kwargs, None
+        return tool_name, without_none(tool_kwargs), None
 
     if action == "toggle_boolean_field" and tool_name == "odoo_update_analytic_boolean_field":
         record_query = metadata.get("record_query") or approval.get("entity_name")
@@ -184,10 +200,12 @@ def build_odoo_approval_tool_call(approval: dict):
         if record_query is None or field_name is None or requested_value is None:
             return None, {}, "Approval metadata is missing analytic account, field name, or requested value."
 
-        return tool_name, tool_kwargs, None
+        return tool_name, without_none(tool_kwargs), None
 
     if action == "update_document_line":
         document_query = metadata.get("document_query")
+        document_id = metadata.get("document_id")
+        partner_name = metadata.get("partner_name")
         product_query = metadata.get("product_query")
         field_name = metadata.get("field_name")
         new_value = metadata.get("new_value")
@@ -198,6 +216,8 @@ def build_odoo_approval_tool_call(approval: dict):
                 "product_query": product_query,
                 "field": field_name,
                 "new_value": new_value,
+                "document_id": document_id,
+                "partner_name": partner_name,
             }
         elif tool_name == "odoo_update_purchase_order_line":
             tool_kwargs = {
@@ -205,6 +225,8 @@ def build_odoo_approval_tool_call(approval: dict):
                 "product_query": product_query,
                 "field": field_name,
                 "new_value": new_value,
+                "document_id": document_id,
+                "partner_name": partner_name,
             }
         elif tool_name == "odoo_update_invoice_line":
             tool_kwargs = {
@@ -212,25 +234,30 @@ def build_odoo_approval_tool_call(approval: dict):
                 "product_query": product_query,
                 "field": field_name,
                 "new_value": new_value,
+                "document_id": document_id,
+                "partner_name": partner_name,
             }
         elif tool_name == "odoo_update_delivery_quantity":
             tool_kwargs = {
                 "picking_query": document_query,
                 "product_query": product_query,
                 "new_quantity": new_value,
+                "document_id": document_id,
+                "partner_name": partner_name,
             }
         else:
             return None, {}, "Approval metadata does not match the requested document line action."
 
         if (
             document_query is None
+            and document_id is None
             or product_query is None
             or field_name is None
             or new_value is None
         ):
             return None, {}, "Approval metadata is missing document, product, field, or requested value."
 
-        return tool_name, tool_kwargs, None
+        return tool_name, without_none(tool_kwargs), None
 
     if action == "update_document_partner" and tool_name == "odoo_update_document_partner":
         partner_query = metadata.get("partner_query") or metadata.get("new_value")
@@ -238,16 +265,21 @@ def build_odoo_approval_tool_call(approval: dict):
             "model_name": metadata.get("target_model"),
             "document_query": metadata.get("document_query"),
             "partner_query": partner_query,
+            "document_id": metadata.get("document_id"),
+            "current_partner_name": metadata.get("current_partner_name"),
         }
 
         if (
             tool_kwargs["model_name"] is None
-            or tool_kwargs["document_query"] is None
+            or (
+                tool_kwargs["document_query"] is None
+                and tool_kwargs["document_id"] is None
+            )
             or partner_query is None
         ):
             return None, {}, "Approval metadata is missing document model, document reference, or partner."
 
-        return tool_name, tool_kwargs, None
+        return tool_name, without_none(tool_kwargs), None
 
     if action == "update_document_date" and tool_name == "odoo_update_document_date":
         new_date = metadata.get("new_date") or metadata.get("new_value")
@@ -256,26 +288,50 @@ def build_odoo_approval_tool_call(approval: dict):
             "document_query": metadata.get("document_query"),
             "date_field": metadata.get("date_field") or metadata.get("field_name"),
             "new_date": new_date,
+            "document_id": metadata.get("document_id"),
+            "partner_name": metadata.get("partner_name"),
         }
 
         if (
             tool_kwargs["model_name"] is None
-            or tool_kwargs["document_query"] is None
+            or (
+                tool_kwargs["document_query"] is None
+                and tool_kwargs["document_id"] is None
+            )
             or tool_kwargs["date_field"] is None
             or new_date is None
         ):
             return None, {}, "Approval metadata is missing document model, document reference, date field, or new date."
 
-        return tool_name, tool_kwargs, None
+        return tool_name, without_none(tool_kwargs), None
 
     return None, {}, "Approval action does not match an authorized Odoo update tool."
 
 
 def is_odoo_related(message: str) -> bool:
     text = message.lower()
+    normalized = (
+        text.replace("é", "e")
+        .replace("è", "e")
+        .replace("ê", "e")
+        .replace("à", "a")
+        .replace("’", "'")
+    )
+
+    odoo_reference_patterns = [
+        r"\b[a-z]{2,5}[-/][a-z0-9][a-z0-9/-]*\d{3,}\b",
+        r"\bfnp/\d{4}/\d+\b",
+        r"\bbc-[a-z0-9-]+\b",
+        r"\bol-[a-z0-9-]+\b",
+        r"\bwh/(?:out|in|pick)/\d+\b",
+    ]
+
+    if any(re.search(pattern, normalized, re.IGNORECASE) for pattern in odoo_reference_patterns):
+        return True
 
     keywords = [
         "odoo",
+        "baco",
         "stock",
         "inventory",
         "inventaire",
@@ -301,8 +357,17 @@ def is_odoo_related(message: str) -> bool:
         "livraison",
         "supplier",
         "fournisseur",
+        "fournisseurs",
+        "bon fournisseur",
         "bon de commande",
         "bon de livraison",
+        "devis",
+        "arrivée prévue",
+        "arrivee prevue",
+        "date d'arrivée",
+        "date d'arrivee",
+        "date de réception",
+        "date de reception",
         "cocher",
         "décocher",
         "decocher",
@@ -314,7 +379,7 @@ def is_odoo_related(message: str) -> bool:
         "analytic",
     ]
 
-    return any(keyword in text for keyword in keywords)
+    return any(keyword in text or keyword in normalized for keyword in keywords)
 
 
 @app.get("/")
@@ -509,6 +574,11 @@ def approve_approval(approval_id: str):
             metadata.get("product_name")
             or metadata.get("record_query")
             or metadata.get("document_query")
+            or (
+                f"ID {metadata.get('document_id')}"
+                if metadata.get("document_id") is not None
+                else None
+            )
             or approval.get("entity_name")
         )
         requested_value = (
@@ -525,6 +595,8 @@ def approve_approval(approval_id: str):
                 "action": action,
                 "product": product_name,
                 "document": metadata.get("document_query"),
+                "document_id": metadata.get("document_id"),
+                "partner_name": metadata.get("partner_name"),
                 "product_id": None,
                 "old_price": None,
                 "requested_price": requested_value if action == "change_price" else None,
@@ -553,6 +625,8 @@ def approve_approval(approval_id: str):
                 "action": action,
                 "product": product_name,
                 "document": metadata.get("document_query"),
+                "document_id": metadata.get("document_id"),
+                "partner_name": metadata.get("partner_name"),
                 "executed": False,
                 "verified": False,
                 "found": False,
@@ -587,6 +661,8 @@ def approve_approval(approval_id: str):
             "action": action,
             "product": product_name,
             "document": metadata.get("document_query"),
+            "document_id": metadata.get("document_id"),
+            "partner_name": metadata.get("partner_name"),
             "field": metadata.get("field_name"),
             "requested_value": requested_value,
             "executed": bool(
@@ -668,7 +744,12 @@ def odoo_document_search(
     query: str = Query(..., min_length=1),
 ):
     result = dispatch_document_search(document_type, query)
-    return normalize_document_endpoint_response(document_type, query, result)
+    return normalize_document_endpoint_response(
+        document_type,
+        query,
+        result,
+        include_record=False,
+    )
 
 
 @app.get("/odoo/document/details")

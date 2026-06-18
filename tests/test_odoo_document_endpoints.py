@@ -26,7 +26,15 @@ def test_document_search_endpoint_dispatches_and_normalizes(monkeypatch):
             "partner": "Client A",
             "state": "draft",
             "date": "2026-06-18",
-            "candidates": [],
+            "candidates": [
+                {
+                    "id": 10,
+                    "name": query,
+                    "partner": "Client A",
+                    "state": "draft",
+                    "date": "2026-06-18",
+                },
+            ],
             "message": "Document resolved.",
         },
     )
@@ -49,14 +57,15 @@ def test_document_search_endpoint_dispatches_and_normalizes(monkeypatch):
         "query": "INV/2026/001",
         "found": True,
         "ambiguous": False,
-        "record": {
-            "id": 10,
-            "name": "INV/2026/001",
-            "partner": "Client A",
-            "state": "draft",
-            "date": "2026-06-18",
-        },
-        "candidates": [],
+        "candidates": [
+            {
+                "id": 10,
+                "name": "INV/2026/001",
+                "partner": "Client A",
+                "state": "draft",
+                "date": "2026-06-18",
+            },
+        ],
         "message": "Document resolved.",
     }
 

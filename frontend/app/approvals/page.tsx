@@ -254,6 +254,19 @@ export default function ApprovalsPage() {
                       )}
                     />
                     <Detail
+                      label="ID document"
+                      value={formatValue(
+                        approval.execution_result?.record_id ||
+                          getMetadataString(approval.metadata, "document_id")
+                      )}
+                    />
+                    <Detail
+                      label="Partenaire"
+                      value={formatValue(
+                        getMetadataString(approval.metadata, "partner_name")
+                      )}
+                    />
+                    <Detail
                       label="Ligne"
                       value={formatValue(approval.execution_result?.line_id)}
                     />
@@ -889,6 +902,8 @@ function fieldLabel(field?: string) {
     quantity: "Quantité",
     partner_id: "Client/fournisseur",
     date_order: "Date de commande",
+    date_planned: "Arrivée prévue",
+    expected_arrival_date: "Arrivée prévue",
     invoice_date: "Date facture",
     scheduled_date: "Date livraison",
   };

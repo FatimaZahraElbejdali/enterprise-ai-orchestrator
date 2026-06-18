@@ -8,12 +8,35 @@ const API_BASE =
 
 type LooseRecord = Record<string, unknown>;
 
+type OdooStockResult = {
+  product?: unknown;
+  internal_reference?: unknown;
+  available_stock?: unknown;
+  forecast_stock?: unknown;
+  sale_price?: unknown;
+  unit?: unknown;
+  source?: unknown;
+};
+
 type ChatResponse = {
   intent?: string;
   agent?: string;
   selected_agent?: string;
   risk?: string;
   risk_level?: string;
+  parser_source?: string;
+  language?: string | null;
+  parsed_action?: string;
+  document_type?: string | null;
+  document_reference?: string | null;
+  document_id?: number | null;
+  partner_name?: string | null;
+  product_name?: string | null;
+  line_product?: string | null;
+  field?: string | null;
+  technical_field?: string | null;
+  new_value?: unknown;
+  needs_clarification?: boolean;
   requires_approval?: boolean;
   approval_required?: boolean;
   status?: string;
@@ -81,7 +104,7 @@ export default function ChatPage() {
     }
   }
 
-  const odooData = response?.data;
+  const odooStockResult = normalizeOdooStockResult(response);
   const selectedAgent =
     response?.agent ||
     response?.selected_agent ||
@@ -93,14 +116,9 @@ export default function ChatPage() {
     response?.requires_approval === true ||
     response?.approval_required === true;
 
-  const isOdooProductResult =
-    response?.intent === "odoo" &&
-    odooData &&
-    typeof odooData === "object" &&
-    ("available_stock" in odooData ||
-      "forecast_stock" in odooData ||
-      "sale_price" in odooData ||
-      "product" in odooData);
+  const isOdooProductResult = Boolean(
+    response?.intent === "odoo" && odooStockResult
+  );
 
   const isSensitiveAction =
     response?.status === "pending_approval" || isApprovalRequired;
@@ -218,50 +236,102 @@ export default function ChatPage() {
               />
             </section>
 
+            {response.parser_source && (
+              <section className="analysisPanel">
+                <div className="detailsTable">
+                  <Detail
+                    label="Source d’analyse"
+                    value={formatParserSource(response.parser_source)}
+                  />
+                  <Detail
+                    label="Action détectée"
+                    value={translateAction(response.parsed_action)}
+                  />
+                  <Detail
+                    label="Validation requise"
+                    value={isApprovalRequired ? "Oui" : "Non"}
+                  />
+                  <Detail
+                    label="Document"
+                    value={
+                      response.document_reference ||
+                      formatValue(response.document_id)
+                    }
+                  />
+                  <Detail
+                    label="Produit"
+                    value={formatValue(
+                      response.product_name || response.line_product
+                    )}
+                  />
+                </div>
+              </section>
+            )}
+
             {isOdooProductResult && !isSensitiveAction && (
               <section className="resultPanel">
                 <div className="panelHeader">
                   <div>
                     <p className="eyebrow">Résultat Odoo</p>
-                    <h3>{odooData.product || "Produit Odoo"}</h3>
+                    <h3>
+                      {odooStockResult?.product
+                        ? formatValue(odooStockResult.product)
+                        : "Produit Odoo"}
+                    </h3>
                   </div>
 
                   <span className="sourceBadge">
-                    {odooData.source || "real_odoo"}
+                    {formatValue(odooStockResult?.source || "real_odoo")}
                   </span>
                 </div>
 
                 <div className="productGrid">
                   <Metric
                     label="Stock disponible"
-                    value={formatValue(odooData.available_stock)}
+                    value={formatNumber(odooStockResult?.available_stock)}
                   />
                   <Metric
-                    label="Stock prévu"
-                    value={formatValue(odooData.forecast_stock)}
+                    label="Stock prévisionnel"
+                    value={formatNumber(odooStockResult?.forecast_stock)}
                   />
                   <Metric
                     label="Prix de vente"
-                    value={formatPrice(odooData.sale_price)}
+                    value={formatPrice(odooStockResult?.sale_price)}
                   />
                   <Metric
                     label="Unité"
-                    value={formatValue(odooData.unit)}
+                    value={formatValue(odooStockResult?.unit)}
                   />
                 </div>
 
                 <div className="detailsTable">
                   <Detail
                     label="Produit"
-                    value={formatValue(odooData.product)}
+                    value={formatValue(odooStockResult?.product)}
                   />
                   <Detail
                     label="Référence interne"
-                    value={formatValue(odooData.internal_reference)}
+                    value={formatValue(odooStockResult?.internal_reference)}
                   />
                   <Detail
-                    label="ID Odoo"
-                    value={formatValue(odooData.product_id)}
+                    label="Stock disponible"
+                    value={formatNumber(odooStockResult?.available_stock)}
+                  />
+                  <Detail
+                    label="Stock prévisionnel"
+                    value={formatNumber(odooStockResult?.forecast_stock)}
+                  />
+                  <Detail
+                    label="Prix de vente"
+                    value={formatPrice(odooStockResult?.sale_price)}
+                  />
+                  <Detail
+                    label="Unité"
+                    value={formatValue(odooStockResult?.unit)}
+                  />
+                  <Detail
+                    label="Source"
+                    value={formatValue(odooStockResult?.source || "real_odoo")}
                   />
                   <Detail
                     label="Outil utilisé"
@@ -522,6 +592,7 @@ export default function ChatPage() {
 
         .promptPanel,
         .resultPanel,
+        .analysisPanel,
         .approvalPanel,
         .rawPanel {
           background: #ffffff;
@@ -886,9 +957,55 @@ function Detail({ label, value }: { label: string; value: string }) {
   );
 }
 
+function isLooseRecord(value: unknown): value is LooseRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeOdooStockResult(response: ChatResponse | null): OdooStockResult | null {
+  const result = isLooseRecord(response?.result) ? response.result : null;
+  const data = isLooseRecord(response?.data) ? response.data : null;
+
+  const hasResultStock =
+    result &&
+    ("stock_quantity" in result ||
+      "forecast_quantity" in result ||
+      "sale_price" in result ||
+      "product" in result);
+
+  const hasDataStock =
+    data &&
+    ("available_stock" in data ||
+      "forecast_stock" in data ||
+      "sale_price" in data ||
+      "product" in data);
+
+  if (!hasResultStock && !hasDataStock) {
+    return null;
+  }
+
+  return {
+    product: result?.product ?? data?.product,
+    internal_reference:
+      result?.internal_reference ?? data?.internal_reference,
+    available_stock: result?.stock_quantity ?? data?.available_stock,
+    forecast_stock: result?.forecast_quantity ?? data?.forecast_stock,
+    sale_price: result?.sale_price ?? data?.sale_price,
+    unit: result?.unit ?? data?.unit,
+    source: result?.source ?? data?.source,
+  };
+}
+
 function formatValue(value: unknown) {
   if (value === undefined || value === null || value === "") return "-";
   return String(value);
+}
+
+function formatNumber(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Number.isInteger(value) ? String(value) : String(value);
+  }
+
+  return formatValue(value);
 }
 
 function formatPrice(value: unknown) {
@@ -951,6 +1068,13 @@ function translateRisk(value?: string) {
   return "Non évalué";
 }
 
+function formatParserSource(value?: string) {
+  if (value === "openai") return "OpenAI";
+  if (value === "fallback" || value === "local_rules") return "Fallback local";
+  if (value === "test") return "Test";
+  return value || "-";
+}
+
 function translateAction(value?: string) {
   const labels: Record<string, string> = {
     change_price: "Modification du prix",
@@ -961,6 +1085,12 @@ function translateAction(value?: string) {
     check_price: "Consultation prix",
     check_unit: "Consultation unité",
     check_product_details: "Consultation produit",
+    search_document: "Consultation document",
+    read_document: "Consultation document",
+    update_document_line: "Modification d’une ligne de document",
+    update_document_partner: "Modification client/fournisseur",
+    update_document_date: "Modification date document",
+    toggle_boolean_field: "Modification champ analytique",
   };
 
   if (!value) return "-";
