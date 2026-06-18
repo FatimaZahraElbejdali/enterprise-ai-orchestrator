@@ -15,7 +15,7 @@ def _load_approvals():
     if not APPROVALS_FILE.exists():
         return []
 
-    with open(APPROVALS_FILE, "r") as file:
+    with open(APPROVALS_FILE, "r", encoding="utf-8") as file:
         try:
             approvals = json.load(file)
         except json.JSONDecodeError:
@@ -30,21 +30,44 @@ def _load_approvals():
 def _save_approvals(approvals):
     APPROVALS_FILE.parent.mkdir(exist_ok=True)
 
-    with open(APPROVALS_FILE, "w") as file:
-        json.dump(approvals, file, indent=2)
+    with open(APPROVALS_FILE, "w", encoding="utf-8") as file:
+        json.dump(approvals, file, indent=2, ensure_ascii=False)
 
 
-def create_approval(user_message, intent, selected_agent, selected_model):
+def create_approval(
+    user_message,
+    intent,
+    selected_agent,
+    selected_model="policy_engine",
+    action=None,
+    risk="medium",
+    title=None,
+    description=None,
+    source_system=None,
+    entity_name=None,
+    requested_change=None,
+    metadata=None,
+):
     approvals = _load_approvals()
 
     approval = {
         "id": str(uuid.uuid4()),
         "timestamp": _utc_timestamp(),
+        "updated_at": None,
         "status": "pending",
         "user_message": user_message,
         "intent": intent,
         "selected_agent": selected_agent,
-        "selected_model": selected_model
+        "selected_model": selected_model,
+        "action": action,
+        "risk": risk,
+        "title": title or "Action sensible en attente de validation",
+        "description": description or user_message,
+        "source_system": source_system or "orchestrator",
+        "entity_name": entity_name,
+        "requested_change": requested_change,
+        "metadata": metadata or {},
+        "executed": False,
     }
 
     approvals.append(approval)
@@ -54,7 +77,12 @@ def create_approval(user_message, intent, selected_agent, selected_model):
 
 
 def get_approvals():
-    return _load_approvals()
+    approvals = _load_approvals()
+    return sorted(
+        approvals,
+        key=lambda item: item.get("timestamp", ""),
+        reverse=True
+    )
 
 
 def update_approval_status(approval_id, status):
@@ -64,10 +92,10 @@ def update_approval_status(approval_id, status):
     approvals = _load_approvals()
 
     for approval in approvals:
-        if approval["id"] == approval_id:
+        if approval.get("id") == approval_id:
             approval["status"] = status
             approval["updated_at"] = _utc_timestamp()
             _save_approvals(approvals)
             return approval
-        
+
     return None

@@ -1,55 +1,107 @@
-ACTION_KEYWORDS = [
+READ_ONLY_KEYWORDS = [
+    "check",
+    "show",
+    "view",
+    "get",
+    "search",
+    "consult",
+    "retrieve",
+    "verify",
+    "display",
+    "find",
 
-    # English
+    "vérifier",
+    "verifier",
+    "afficher",
+    "voir",
+    "consulter",
+    "chercher",
+    "rechercher",
+    "récupérer",
+    "recuperer",
+]
+
+SENSITIVE_ACTION_KEYWORDS = [
     "create",
     "delete",
     "update",
     "modify",
+    "change",
     "approve",
     "reject",
-    "assign",
-    "schedule",
-    "send",
     "cancel",
-    "purchase order",
-    "purchase request",
-    "access request",
-    "access change",
-    "grant access",
-    "revoke access",
-    "permission change",
-    "role change",
+    "grant",
+    "revoke",
+    "set",
+    "increase",
+    "decrease",
 
-    # French
     "créer",
     "creer",
     "supprimer",
     "modifier",
+    "changer",
     "mettre à jour",
     "mettre a jour",
     "approuver",
     "rejeter",
-    "assigner",
-    "planifier",
-    "envoyer",
     "annuler",
-    "commande achat",
-    "demande achat",
-    "demande accès",
-    "demande acces",
-    "changement accès",
-    "changement acces",
-    "accorder accès",
-    "accorder acces",
-    "révoquer accès",
-    "revoquer acces",
+    "accorder",
+    "révoquer",
+    "revoquer",
+    "définir",
+    "definir",
+    "augmenter",
+    "diminuer",
+]
+
+SENSITIVE_OBJECT_KEYWORDS = [
+    "stock",
+    "inventory",
+    "inventaire",
+    "price",
+    "prix",
+    "unit",
+    "unité",
+    "unite",
+    "invoice",
+    "facture",
+    "purchase order",
+    "purchase request",
+    "commande",
+    "client",
+    "customer",
+    "record",
+    "access",
+    "accès",
+    "acces",
 ]
 
 
 def requires_approval(message: str) -> bool:
+    if not message or not message.strip():
+        return False
+
     text = message.lower()
 
-    return any(
-        keyword in text
-        for keyword in ACTION_KEYWORDS
+    has_sensitive_action = any(
+        keyword in text for keyword in SENSITIVE_ACTION_KEYWORDS
     )
+    has_sensitive_object = any(
+        keyword in text for keyword in SENSITIVE_OBJECT_KEYWORDS
+    )
+
+    if has_sensitive_action and has_sensitive_object:
+        return True
+
+    if has_sensitive_action:
+        return True
+
+    has_read_only_keyword = any(
+        keyword in text for keyword in READ_ONLY_KEYWORDS
+    )
+
+    if has_read_only_keyword:
+        return False
+
+    return False

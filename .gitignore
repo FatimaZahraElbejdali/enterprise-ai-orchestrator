@@ -3,3 +3,22 @@ __pycache__/
 .env
 .vscode/
 *.pyc
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Runtime logs / generated demo data
+logs/approvals.json
+logs/audit_log.jsonl
+tests/logs/
+
+# Keep logs folder placeholder
+!logs/.gitkeep
+
+# Environment files
+.env
+.env.local
+.env.*
+!.env.example

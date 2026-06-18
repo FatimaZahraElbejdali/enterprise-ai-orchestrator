@@ -1,261 +1,686 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
+import { FormEvent, useEffect, useState } from "react";
+
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type OdooStatus = {
   connected?: boolean;
   mode?: string;
-  url?: string;
   database?: string;
-  database_configured?: boolean;
-  username?: string;
-  username_configured?: boolean;
-  password_or_api_key_configured?: boolean;
+  uid?: number | string;
   message?: string;
-  [key: string]: unknown;
+  error?: string;
 };
 
-type StockResult = {
+type ProductResult = {
   source?: string;
-  mode?: string;
   product?: string;
-  product_name?: string;
+  product_id?: number | string;
+  internal_reference?: string;
   stock_quantity?: number;
-  stock?: number;
-  quantity?: number;
-  available_qty?: number;
+  forecast_quantity?: number;
+  sale_price?: number;
   unit?: string;
   warehouse?: string;
-  status?: string;
-  message?: string;
-  [key: string]: unknown;
+  found?: boolean;
 };
 
 export default function OdooPage() {
   const [status, setStatus] = useState<OdooStatus | null>(null);
-  const [productName, setProductName] = useState("");
-  const [stockResult, setStockResult] = useState<StockResult | null>(null);
+  const [productName, setProductName] = useState("BACO CLEAN");
+  const [product, setProduct] = useState<ProductResult | null>(null);
   const [loadingStatus, setLoadingStatus] = useState(true);
-  const [loadingStock, setLoadingStock] = useState(false);
+  const [loadingProduct, setLoadingProduct] = useState(false);
   const [error, setError] = useState("");
 
-  async function checkStock() {
-    if (!productName.trim()) return;
-
-    setLoadingStock(true);
-    setError("");
-    setStockResult(null);
+  async function loadStatus() {
+    setLoadingStatus(true);
 
     try {
-      const response = await fetch(
-        `http://localhost:8000/odoo/stock/${encodeURIComponent(productName)}`
+      const res = await fetch(`${API_BASE}/odoo/status`, {
+        cache: "no-store",
+      });
+
+      if (res.ok) {
+        setStatus(await res.json());
+      }
+    } finally {
+      setLoadingStatus(false);
+    }
+  }
+
+  async function searchProduct(event?: FormEvent) {
+    event?.preventDefault();
+
+    const cleanName = productName.trim();
+
+    if (!cleanName) return;
+
+    setLoadingProduct(true);
+    setError("");
+    setProduct(null);
+
+    try {
+      const res = await fetch(
+        `${API_BASE}/odoo/stock/${encodeURIComponent(cleanName)}`,
+        {
+          cache: "no-store",
+        }
       );
 
-      if (!response.ok) {
-        throw new Error("Stock request failed");
+      if (!res.ok) {
+        throw new Error("Erreur lors de la consultation Odoo.");
       }
 
-      const data = await response.json();
-      setStockResult(data);
-    } catch {
-      setError("Impossible de consulter le stock.");
+      const data = await res.json();
+      setProduct(data);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Une erreur inconnue est survenue."
+      );
     } finally {
-      setLoadingStock(false);
+      setLoadingProduct(false);
     }
   }
 
   useEffect(() => {
-    let cancelled = false;
-
-    fetch("http://localhost:8000/odoo/status")
-      .then((response) => response.json())
-      .then((data) => {
-        if (!cancelled) {
-          setStatus(data);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setError("Impossible de contacter le connecteur Odoo.");
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoadingStatus(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
+    loadStatus();
   }, []);
 
-  const displayedStock =
-    stockResult?.stock_quantity ??
-    stockResult?.stock ??
-    stockResult?.quantity ??
-    stockResult?.available_qty ??
-    "-";
+  const connected = Boolean(status?.connected);
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-950 to-slate-900 text-white">
-      <div className="max-w-6xl mx-auto px-8 py-10">
-        <Link href="/" className="text-sm text-cyan-400 hover:text-cyan-300">
-          ← Retour au tableau de bord
-        </Link>
+    <main className="pageShell">
+      <aside className="sidebar">
+        <div>
+          <div className="brand">
+            <div className="brandMark">JB</div>
+            <div>
+              <p>Jamain Baco</p>
+              <h1>AI Orchestrator</h1>
+            </div>
+          </div>
 
-        <header className="mt-8 mb-8">
-          <p className="text-sm text-cyan-400 font-medium mb-2">
-            ERP Integration
-          </p>
+          <nav className="nav">
+            <Link href="/">Tableau de bord</Link>
+            <Link href="/chat">Console Chat</Link>
+            <Link href="/odoo" className="active">
+              Odoo
+            </Link>
+            <Link href="/approvals">Validations</Link>
+            <Link href="/logs">Audit Logs</Link>
+          </nav>
+        </div>
 
-          <h1 className="text-4xl font-bold tracking-tight mb-3">Odoo</h1>
+        <div className="sidebarFooter">
+          <p>Connexion ERP</p>
+          <span>
+            Accès contrôlé aux données Odoo via l’orchestrateur.
+          </span>
+        </div>
+      </aside>
 
-          <p className="text-slate-400 text-lg">
-            Vérifier l’état de l’intégration ERP et consulter les stocks produits.
-          </p>
+      <section className="content">
+        <header className="header">
+          <div>
+            <p className="eyebrow">Intégration ERP</p>
+            <h2>Console Odoo</h2>
+            <p className="subtitle">
+              Consultation sécurisée des données produits Odoo. Les opérations
+              de lecture sont exécutées directement, tandis que les modifications
+              restent soumises à validation humaine.
+            </p>
+          </div>
+
+          <span className={`connectionBadge ${connected ? "ok" : "bad"}`}>
+            <span />
+            {connected ? "Connecté" : "Non connecté"}
+          </span>
         </header>
 
-        <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-6 shadow-lg shadow-black/20">
-            <div className="mb-5 flex items-center justify-between">
-              <h2 className="text-2xl font-semibold">État de connexion</h2>
-
-              <span className="rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-300">
-                {status?.mode || "loading"}
-              </span>
+        <section className="topGrid">
+          <div className="panel">
+            <div className="panelHeader">
+              <div>
+                <p className="eyebrow">État système</p>
+                <h3>Connexion Odoo</h3>
+              </div>
             </div>
 
-            {loadingStatus ? (
-              <p className="text-slate-400">Chargement...</p>
-            ) : (
-              <div className="space-y-4 text-slate-300">
-                <StatusRow
-                  label="Connected"
-                  value={status?.connected ? "Yes" : "No"}
+            {loadingStatus && <p className="empty">Vérification...</p>}
+
+            {!loadingStatus && (
+              <div className="details">
+                <Detail
+                  label="Statut"
+                  value={connected ? "Connecté" : "Non connecté"}
                 />
-
-                <StatusRow label="Mode" value={status?.mode || "-"} />
-
-                <StatusRow label="URL" value={String(status?.url || "-")} />
-
-                <StatusRow
-                  label="Database configured"
-                  value={status?.database_configured ? "Yes" : "No"}
-                />
-
-                <StatusRow
-                  label="Username configured"
-                  value={status?.username_configured ? "Yes" : "No"}
-                />
-
-                <StatusRow
-                  label="Credentials configured"
+                <Detail label="Mode" value={status?.mode || "-"} />
+                <Detail label="Base de données" value={status?.database || "-"} />
+                <Detail label="UID" value={String(status?.uid || "-")} />
+                <Detail
+                  label="Message"
                   value={
-                    status?.password_or_api_key_configured ? "Yes" : "No"
+                    status?.message ||
+                    status?.error ||
+                    "Statut de connexion consulté."
                   }
                 />
-
-                <div className="rounded-xl bg-slate-950/70 p-4">
-                  <p className="mb-1 text-sm text-slate-500">Message</p>
-                  <p className="text-sm text-slate-300">
-                    {status?.message || "-"}
-                  </p>
-                </div>
               </div>
             )}
           </div>
 
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-6 shadow-lg shadow-black/20">
-            <h2 className="text-2xl font-semibold mb-4">
-              Consultation du stock
-            </h2>
-
-            <div className="flex flex-col gap-3 md:flex-row">
-              <input
-                className="flex-1 rounded-xl border border-slate-800 bg-slate-950 p-4 text-white placeholder:text-slate-500 outline-none transition focus:border-cyan-500"
-                placeholder="Nom du produit..."
-                value={productName}
-                onChange={(event) => setProductName(event.target.value)}
-              />
-
-              <button
-                onClick={checkStock}
-                disabled={loadingStock || !productName.trim()}
-                className="rounded-xl bg-cyan-500 px-6 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {loadingStock ? "Recherche..." : "Vérifier"}
-              </button>
+          <div className="panel">
+            <div className="panelHeader">
+              <div>
+                <p className="eyebrow">Consultation</p>
+                <h3>Recherche produit</h3>
+              </div>
             </div>
 
-            {stockResult && (
-              <div className="mt-6 rounded-xl border border-slate-800 bg-slate-950/70 p-5">
-                <div className="mb-4 flex items-center justify-between">
-                  <p className="text-sm text-slate-500">Résultat</p>
+            <form onSubmit={searchProduct}>
+              <label htmlFor="productName">Nom du produit</label>
+              <input
+                id="productName"
+                value={productName}
+                onChange={(event) => setProductName(event.target.value)}
+                placeholder="Exemple : BACO CLEAN"
+              />
 
-                  <span className="rounded-full bg-slate-800 px-3 py-1 text-xs text-slate-300">
-                    {stockResult.mode || stockResult.source || "result"}
-                  </span>
-                </div>
+              <div className="buttonRow">
+                <button type="submit" disabled={loadingProduct}>
+                  {loadingProduct ? "Recherche..." : "Vérifier le produit"}
+                </button>
 
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <div>
-                    <p className="text-sm text-slate-500">Produit</p>
-                    <p className="text-xl font-semibold">
-                      {stockResult.product ||
-                        stockResult.product_name ||
-                        productName}
-                    </p>
-                  </div>
-
-                  <div>
-                    <p className="text-sm text-slate-500">Stock disponible</p>
-                    <p className="text-xl font-semibold">{displayedStock}</p>
-                  </div>
-
-                  <div>
-                    <p className="text-sm text-slate-500">Unité</p>
-                    <p className="text-xl font-semibold">
-                      {stockResult.unit || "-"}
-                    </p>
-                  </div>
-
-                  <div>
-                    <p className="text-sm text-slate-500">Entrepôt</p>
-                    <p className="text-xl font-semibold">
-                      {stockResult.warehouse || "-"}
-                    </p>
-                  </div>
-                </div>
-
-                {stockResult.message && (
-                  <p className="mt-4 text-sm text-slate-400">
-                    {stockResult.message}
-                  </p>
-                )}
-
-                {stockResult.source === "mock_odoo" && (
-                  <p className="mt-4 text-xs text-amber-300">
-                    Données mockées en attendant les identifiants Odoo réels.
-                  </p>
-                )}
+                <Link href="/chat" className="secondaryButton">
+                  Tester dans le chat
+                </Link>
               </div>
-            )}
+            </form>
+
+            <div className="policyBox">
+              <strong>Règle de sécurité</strong>
+              <p>
+                La consultation produit est une action en lecture seule :
+                aucune validation n’est requise et aucune donnée Odoo n’est
+                modifiée.
+              </p>
+            </div>
           </div>
         </section>
 
-        {error && <p className="mt-6 text-sm text-red-400">{error}</p>}
-      </div>
+        {error && <div className="errorBox">{error}</div>}
+
+        {product && (
+          <section className="productPanel">
+            <div className="panelHeader">
+              <div>
+                <p className="eyebrow">Résultat Odoo</p>
+                <h3>
+                  {product.found
+                    ? product.product || "Produit Odoo"
+                    : "Produit introuvable"}
+                </h3>
+              </div>
+
+              <span className="sourceBadge">
+                {product.source || "real_odoo"}
+              </span>
+            </div>
+
+            {product.found ? (
+              <>
+                <div className="metrics">
+                  <Metric
+                    label="Stock disponible"
+                    value={formatValue(product.stock_quantity)}
+                  />
+                  <Metric
+                    label="Stock prévu"
+                    value={formatValue(product.forecast_quantity)}
+                  />
+                  <Metric
+                    label="Prix de vente"
+                    value={formatPrice(product.sale_price)}
+                  />
+                  <Metric label="Unité" value={formatValue(product.unit)} />
+                </div>
+
+                <div className="details">
+                  <Detail label="Produit" value={formatValue(product.product)} />
+                  <Detail
+                    label="Référence interne"
+                    value={formatValue(product.internal_reference)}
+                  />
+                  <Detail
+                    label="ID Odoo"
+                    value={formatValue(product.product_id)}
+                  />
+                  <Detail
+                    label="Entrepôt"
+                    value={formatValue(product.warehouse)}
+                  />
+                  <Detail
+                    label="Source"
+                    value={formatValue(product.source)}
+                  />
+                  <Detail label="Validation" value="Non requise" />
+                </div>
+              </>
+            ) : (
+              <p className="empty">
+                Aucun produit correspondant n’a été trouvé dans Odoo.
+              </p>
+            )}
+          </section>
+        )}
+      </section>
+
+      <style jsx global>{`
+        * {
+          box-sizing: border-box;
+        }
+
+        body {
+          margin: 0;
+          background: #f4f6f8;
+          color: #172033;
+          font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+            BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        .pageShell {
+          min-height: 100vh;
+          display: grid;
+          grid-template-columns: 280px 1fr;
+        }
+
+        .sidebar {
+          min-height: 100vh;
+          background: #101827;
+          color: #ffffff;
+          padding: 28px 22px;
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          position: sticky;
+          top: 0;
+        }
+
+        .brand {
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          margin-bottom: 34px;
+        }
+
+        .brandMark {
+          width: 44px;
+          height: 44px;
+          background: #ffffff;
+          color: #101827;
+          display: grid;
+          place-items: center;
+          font-weight: 900;
+        }
+
+        .brand p {
+          margin: 0 0 4px;
+          color: #94a3b8;
+          font-size: 12px;
+          text-transform: uppercase;
+          letter-spacing: 0.09em;
+          font-weight: 800;
+        }
+
+        .brand h1 {
+          margin: 0;
+          font-size: 18px;
+        }
+
+        .nav {
+          display: grid;
+          gap: 6px;
+        }
+
+        .nav a {
+          text-decoration: none;
+          color: #cbd5e1;
+          padding: 12px 13px;
+          border-radius: 8px;
+          font-size: 14px;
+          font-weight: 700;
+        }
+
+        .nav a:hover,
+        .nav a.active {
+          background: #1e293b;
+          color: #ffffff;
+        }
+
+        .sidebarFooter {
+          border-top: 1px solid rgba(255, 255, 255, 0.12);
+          padding-top: 18px;
+        }
+
+        .sidebarFooter p {
+          margin: 0 0 6px;
+          font-size: 13px;
+          font-weight: 800;
+        }
+
+        .sidebarFooter span {
+          color: #94a3b8;
+          font-size: 12px;
+          line-height: 1.5;
+        }
+
+        .content {
+          padding: 32px;
+        }
+
+        .header {
+          background: #ffffff;
+          border: 1px solid #d9dee7;
+          padding: 28px;
+          display: flex;
+          justify-content: space-between;
+          gap: 24px;
+          margin-bottom: 18px;
+        }
+
+        .eyebrow {
+          margin: 0;
+          color: #647084;
+          text-transform: uppercase;
+          letter-spacing: 0.09em;
+          font-size: 11px;
+          font-weight: 900;
+        }
+
+        .header h2 {
+          margin: 8px 0;
+          font-size: 30px;
+          color: #101827;
+          letter-spacing: -0.04em;
+        }
+
+        .subtitle {
+          margin: 0;
+          max-width: 820px;
+          color: #5b6472;
+          font-size: 15px;
+          line-height: 1.6;
+        }
+
+        .connectionBadge {
+          height: 38px;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          padding: 0 13px;
+          border-radius: 999px;
+          font-size: 13px;
+          font-weight: 900;
+          white-space: nowrap;
+        }
+
+        .connectionBadge span {
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          background: currentColor;
+        }
+
+        .connectionBadge.ok {
+          background: #eef8f3;
+          color: #13754a;
+          border: 1px solid #b8e0cb;
+        }
+
+        .connectionBadge.bad {
+          background: #fff1f1;
+          color: #9f1d1d;
+          border: 1px solid #f2c0c0;
+        }
+
+        .topGrid {
+          display: grid;
+          grid-template-columns: 0.9fr 1.1fr;
+          gap: 18px;
+          margin-bottom: 18px;
+        }
+
+        .panel,
+        .productPanel {
+          background: #ffffff;
+          border: 1px solid #d9dee7;
+          padding: 24px;
+        }
+
+        .panelHeader {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 16px;
+          margin-bottom: 18px;
+        }
+
+        .panelHeader h3 {
+          margin: 6px 0 0;
+          font-size: 22px;
+          color: #101827;
+        }
+
+        .details {
+          border-top: 1px solid #e5e7eb;
+        }
+
+        .detail {
+          display: grid;
+          grid-template-columns: 170px 1fr;
+          gap: 14px;
+          padding: 13px 0;
+          border-bottom: 1px solid #e5e7eb;
+        }
+
+        .detail span:first-child {
+          color: #647084;
+          font-size: 13px;
+          font-weight: 800;
+        }
+
+        .detail span:last-child {
+          color: #172033;
+          font-size: 13px;
+          font-weight: 800;
+          word-break: break-word;
+        }
+
+        label {
+          display: block;
+          margin-bottom: 10px;
+          color: #334155;
+          font-size: 13px;
+          font-weight: 900;
+        }
+
+        input {
+          width: 100%;
+          height: 44px;
+          border: 1px solid #cbd5e1;
+          border-radius: 8px;
+          padding: 0 13px;
+          font-size: 15px;
+          color: #111827;
+          outline: none;
+        }
+
+        input:focus {
+          border-color: #172033;
+          box-shadow: 0 0 0 3px rgba(23, 32, 51, 0.08);
+        }
+
+        .buttonRow {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+          margin-top: 14px;
+        }
+
+        button,
+        .secondaryButton {
+          height: 40px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border-radius: 8px;
+          padding: 0 16px;
+          font-size: 14px;
+          font-weight: 800;
+          text-decoration: none;
+          cursor: pointer;
+        }
+
+        button {
+          border: 1px solid #172033;
+          background: #172033;
+          color: #ffffff;
+        }
+
+        button:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
+        .secondaryButton {
+          border: 1px solid #cbd5e1;
+          background: #ffffff;
+          color: #172033;
+        }
+
+        .policyBox {
+          margin-top: 18px;
+          border: 1px solid #b8e0cb;
+          background: #eef8f3;
+          padding: 14px;
+        }
+
+        .policyBox strong {
+          color: #13754a;
+          font-size: 13px;
+        }
+
+        .policyBox p {
+          margin: 6px 0 0;
+          color: #475569;
+          font-size: 13px;
+          line-height: 1.5;
+        }
+
+        .errorBox {
+          border: 1px solid #f2c0c0;
+          background: #fff1f1;
+          color: #9f1d1d;
+          padding: 14px;
+          margin-bottom: 18px;
+          font-weight: 700;
+        }
+
+        .sourceBadge {
+          background: #eef8f3;
+          color: #13754a;
+          border: 1px solid #b8e0cb;
+          border-radius: 999px;
+          padding: 8px 11px;
+          font-size: 12px;
+          font-weight: 900;
+          white-space: nowrap;
+        }
+
+        .metrics {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 14px;
+          margin-bottom: 20px;
+        }
+
+        .metric {
+          border: 1px solid #e5e7eb;
+          background: #fbfcfe;
+          padding: 18px;
+        }
+
+        .metric p {
+          margin: 0 0 8px;
+          color: #647084;
+          font-size: 12px;
+          font-weight: 900;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+        }
+
+        .metric h4 {
+          margin: 0;
+          color: #101827;
+          font-size: 26px;
+          letter-spacing: -0.04em;
+        }
+
+        .empty {
+          color: #647084;
+          font-weight: 700;
+        }
+
+        @media (max-width: 1100px) {
+          .pageShell {
+            grid-template-columns: 1fr;
+          }
+
+          .sidebar {
+            min-height: auto;
+            position: relative;
+          }
+
+          .topGrid,
+          .metrics {
+            grid-template-columns: 1fr;
+          }
+        }
+      `}</style>
     </main>
   );
 }
 
-function StatusRow({ label, value }: { label: string; value: string }) {
+function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-      <span className="text-sm text-slate-500">{label}</span>
-      <span className="text-sm font-medium text-slate-300">{value}</span>
+    <div className="metric">
+      <p>{label}</p>
+      <h4>{value}</h4>
     </div>
   );
+}
+
+function Detail({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="detail">
+      <span>{label}</span>
+      <span>{value}</span>
+    </div>
+  );
+}
+
+function formatValue(value: any) {
+  if (value === undefined || value === null || value === "") return "-";
+  return String(value);
+}
+
+function formatPrice(value: any) {
+  if (value === undefined || value === null || value === "") return "-";
+  return `${value} DH`;
 }
