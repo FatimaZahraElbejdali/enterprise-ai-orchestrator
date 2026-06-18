@@ -20,8 +20,9 @@ class GraphTests(unittest.TestCase):
             "orchestrator.graph.classify_message",
             return_value=failed_classification,
         ):
-            with patch("orchestrator.graph.log_request"):
-                result = process_request("printer not working")
+            with patch("orchestrator.model_router.is_openai_configured", return_value=False):
+                with patch("orchestrator.graph.log_request"):
+                    result = process_request("printer not working")
 
         self.assertEqual(result["intent"], "classification_failed")
         self.assertEqual(result["selected_agent"], "general_agent")
@@ -42,8 +43,9 @@ class GraphTests(unittest.TestCase):
         }
 
         with patch("orchestrator.graph.classify_message", return_value=classification):
-            with patch("orchestrator.graph.log_request"):
-                result = process_request("What is the server status?")
+            with patch("orchestrator.model_router.is_openai_configured", return_value=False):
+                with patch("orchestrator.graph.log_request"):
+                    result = process_request("What is the server status?")
 
         self.assertEqual(result["risk_level"], "low")
         self.assertFalse(result["approval_required"])
@@ -60,14 +62,15 @@ class GraphTests(unittest.TestCase):
         }
 
         with patch("orchestrator.graph.classify_message", return_value=classification):
-            with patch("orchestrator.graph.log_request"):
-                result = process_request("Update the stock quantity")
+            with patch("orchestrator.model_router.is_openai_configured", return_value=False):
+                with patch("orchestrator.graph.log_request"):
+                    result = process_request("Update the stock quantity")
 
         self.assertEqual(result["risk_level"], "medium")
         self.assertTrue(result["approval_required"])
         self.assertEqual(result["approval_status"], "pending")
 
-    def test_graph_high_risk_uses_openai_and_requires_approval(self):
+    def test_graph_high_risk_keeps_odoo_on_policy_engine_and_requires_approval(self):
         classification = {
             "intent": "odoo",
             "selected_agent": "odoo_agent",
@@ -78,11 +81,13 @@ class GraphTests(unittest.TestCase):
         }
 
         with patch("orchestrator.graph.classify_message", return_value=classification):
-            with patch("orchestrator.graph.log_request"):
-                result = process_request("Delete this invoice")
+            with patch("orchestrator.model_router.is_openai_configured", return_value=True):
+                with patch("orchestrator.graph.log_request"):
+                    result = process_request("Delete this invoice")
 
         self.assertEqual(result["risk_level"], "high")
-        self.assertEqual(result["selected_model"], "openai")
+        self.assertEqual(result["selected_model"]["provider"], "mock")
+        self.assertEqual(result["selected_model"]["model"], "policy_engine")
         self.assertTrue(result["approval_required"])
         self.assertEqual(result["approval_status"], "pending")
 
@@ -97,13 +102,24 @@ class GraphTests(unittest.TestCase):
         }
 
         with patch("orchestrator.graph.classify_message", return_value=classification):
-            with patch("orchestrator.graph.log_request"):
-                result = process_request("Show me product information")
+            with patch("orchestrator.model_router.is_openai_configured", return_value=True):
+                with patch("orchestrator.graph.generate_response") as mock_generate:
+                    mock_generate.return_value = {
+                        "provider": "openai",
+                        "model": "gpt-4.1-mini",
+                        "success": True,
+                        "content": "Mock knowledge response",
+                        "error": None,
+                    }
+
+                    with patch("orchestrator.graph.log_request"):
+                        result = process_request("Show me product information")
 
         self.assertEqual(result["risk_level"], "low")
         self.assertFalse(result["approval_required"])
         self.assertEqual(result["approval_status"], "not_required")
-        self.assertEqual(result["selected_model"], "gemini")
+        self.assertEqual(result["selected_model"]["provider"], "openai")
+        self.assertEqual(result["selected_model"]["model"], "gpt-4.1-mini")
 
 
 if __name__ == "__main__":

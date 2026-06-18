@@ -8,6 +8,11 @@ from pydantic import BaseModel
 
 from agents.odoo_agent import run as run_odoo_agent
 from integrations.odoo_connector import OdooConnector
+from models.openai_adapter import (
+    generate_response,
+    get_openai_status,
+    is_openai_configured,
+)
 from orchestrator.graph import process_request
 from orchestrator.audit import log_request
 from orchestrator.approval_store import (
@@ -37,6 +42,10 @@ odoo = OdooConnector()
 
 
 class ChatRequest(BaseModel):
+    message: str
+
+
+class AITestRequest(BaseModel):
     message: str
 
 
@@ -88,12 +97,65 @@ def status():
             "audit_logging": True,
             "approval_detection": True,
             "approval_storage": True,
-            "real_model_apis": False,
+            "real_model_apis": is_openai_configured(),
             "odoo_connector": True,
             "odoo_real_integration": True,
             "sensitive_action_blocking": True,
         },
     }
+
+
+@app.get("/ai/providers")
+def ai_providers():
+    openai_status = get_openai_status()
+
+    return {
+        "openai": openai_status,
+        "default_provider": "openai" if openai_status["configured"] else "mock",
+    }
+
+
+@app.post("/ai/test")
+def ai_test(request: AITestRequest):
+    message = request.message.strip()
+
+    if not message:
+        raise HTTPException(
+            status_code=400,
+            detail="Message cannot be empty",
+        )
+
+    if not is_openai_configured():
+        status_info = get_openai_status()
+
+        return {
+            "provider": "openai",
+            "model": status_info["model"],
+            "success": False,
+            "content": "",
+            "error": "missing_api_key",
+            "status": status_info["status"],
+        }
+
+    response = generate_response(
+        prompt=message,
+        system_prompt=(
+            "You are testing the Enterprise AI Orchestrator OpenAI provider. "
+            "Reply briefly and do not execute any enterprise action."
+        ),
+    )
+
+    log_request({
+        "event_type": "ai_model_call",
+        "provider": "openai",
+        "model": response.get("model"),
+        "agent": "general_agent",
+        "status": "completed" if response.get("success") else "failed",
+        "risk": "low",
+        "approval_status": "not_required",
+    })
+
+    return response
 
 
 @app.post("/chat")

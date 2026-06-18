@@ -7,9 +7,7 @@ from orchestrator.approval import requires_approval
 from orchestrator.approval_store import create_approval
 from orchestrator.planner import create_plan
 
-from models.openai_adapter import ask_gpt
-from models.claude_adapter import ask_claude
-from models.gemini_adapter import ask_gemini
+from models.openai_adapter import generate_response
 
 from agents.odoo_agent import run as run_odoo_agent
 from agents.support_agent import run as run_support_agent
@@ -17,19 +15,6 @@ from agents.knowledge_agent import run as run_knowledge_agent
 from agents.development_agent import run as run_development_agent
 from agents.security_agent import run as run_security_agent
 from agents.server_agent import run as run_server_agent
-
-
-def call_model(model: str, prompt: str):
-    if model in ["gpt", "openai"]:
-        return ask_gpt(prompt)
-
-    if model == "claude":
-        return ask_claude(prompt)
-
-    if model == "gemini":
-        return ask_gemini(prompt)
-
-    return ask_gpt(prompt)
 
 
 AGENT_RUNNERS = {
@@ -40,6 +25,63 @@ AGENT_RUNNERS = {
     "security_agent": run_security_agent,
     "server_agent": run_server_agent,
 }
+
+
+def _fallback_response(model_route: dict, agent_result: dict | str):
+    reason = model_route.get("reason", "OpenAI is not configured.")
+
+    return {
+        "provider": "local_fallback",
+        "model": model_route.get("model", "local"),
+        "success": False,
+        "content": (
+            "OpenAI is not configured or unavailable. "
+            "The local Enterprise AI Orchestrator policy handled the request without executing sensitive actions."
+        ),
+        "error": reason,
+        "agent_result": agent_result,
+    }
+
+
+def _log_openai_call(model_route: dict, selected_agent: str, status: str):
+    log_request({
+        "event_type": "ai_model_call",
+        "provider": "openai",
+        "model": model_route.get("model"),
+        "agent": selected_agent or "general_agent",
+        "status": status,
+        "risk": "low",
+        "approval_status": "not_required",
+    })
+
+
+def call_model(model_route: dict, prompt: str, selected_agent: str, agent_result):
+    if model_route.get("provider") != "openai":
+        return _fallback_response(model_route, agent_result)
+
+    response = generate_response(
+        prompt,
+        system_prompt=(
+            "You are the general reasoning layer for the Enterprise AI Orchestrator. "
+            "Explain, summarize, and assist. Do not approve, execute, or bypass enterprise actions."
+        ),
+        model=model_route.get("model"),
+    )
+
+    _log_openai_call(
+        model_route=model_route,
+        selected_agent=selected_agent,
+        status="completed" if response.get("success") else "failed",
+    )
+
+    if not response.get("success"):
+        fallback = _fallback_response(model_route, agent_result)
+        fallback["provider"] = "openai"
+        fallback["model"] = response.get("model", model_route.get("model"))
+        fallback["error"] = response.get("error")
+        return fallback
+
+    return response
 
 
 def run_selected_agent(selected_agent: str, message: str):
@@ -100,7 +142,8 @@ def process_request(message: str):
     )
 
     prompt = f"""
-You are the selected model: {selected_model}.
+Selected model route:
+{selected_model}
 
 Intent:
 {intent}
@@ -135,7 +178,12 @@ Approval required:
 Provide a concise final response for the user.
 """
 
-    response = call_model(selected_model, prompt)
+    response = call_model(
+        model_route=selected_model,
+        prompt=prompt,
+        selected_agent=selected_agent,
+        agent_result=agent_result,
+    )
 
     log_request({
         "user_message": message,
@@ -165,6 +213,7 @@ Provide a concise final response for the user.
         "approval": approval,
         "agent_result": agent_result,
         "response": response,
+        "message": response.get("content") if isinstance(response, dict) else response,
         "classifier_source": classifier_source,
         "classifier_error": classifier_error
     }
