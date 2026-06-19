@@ -3,7 +3,6 @@ from unittest.mock import patch
 
 from orchestrator.graph import process_request
 
-
 class GraphTests(unittest.TestCase):
 
     def test_chat_does_not_crash_when_gemini_classifier_fails(self):
