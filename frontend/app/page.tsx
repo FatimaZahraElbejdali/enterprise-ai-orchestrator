@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = "http://123.123.123.12:8000";
 
 type OdooStatus = {
   connected?: boolean;
@@ -80,6 +80,7 @@ export default function Home() {
 
   useEffect(() => {
     async function loadDashboard() {
+	 console.log("API_BASE =", API_BASE);
       try {
         const [odooRes, approvalsRes, logsRes] = await Promise.allSettled([
           fetch(`${API_BASE}/odoo/status`),
