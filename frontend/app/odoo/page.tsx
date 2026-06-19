@@ -2,17 +2,11 @@
 
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { API_BASE_URL } from "@/lib/api";
 
 type OdooStatus = {
   connected?: boolean;
   mode?: string;
-  database?: string;
-  uid?: number | string;
-  message?: string;
-  error?: string;
 };
 
 type ProductResult = {
@@ -40,7 +34,7 @@ export default function OdooPage() {
     setLoadingStatus(true);
 
     try {
-      const res = await fetch(`${API_BASE}/odoo/status`, {
+      const res = await fetch(`${API_BASE_URL}/odoo/status`, {
         cache: "no-store",
       });
 
@@ -65,7 +59,7 @@ export default function OdooPage() {
 
     try {
       const res = await fetch(
-        `${API_BASE}/odoo/stock/${encodeURIComponent(cleanName)}`,
+        `${API_BASE_URL}/odoo/stock/${encodeURIComponent(cleanName)}`,
         {
           cache: "no-store",
         }
@@ -89,7 +83,11 @@ export default function OdooPage() {
   }
 
   useEffect(() => {
-    loadStatus();
+    const timer = window.setTimeout(() => {
+      void loadStatus();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
   }, []);
 
   const connected = Boolean(status?.connected);
@@ -160,16 +158,9 @@ export default function OdooPage() {
                   label="Statut"
                   value={connected ? "Connecté" : "Non connecté"}
                 />
-                <Detail label="Mode" value={status?.mode || "-"} />
-                <Detail label="Base de données" value={status?.database || "-"} />
-                <Detail label="UID" value={String(status?.uid || "-")} />
                 <Detail
                   label="Message"
-                  value={
-                    status?.message ||
-                    status?.error ||
-                    "Statut de connexion consulté."
-                  }
+                  value={connected ? "Odoo connected" : "Odoo indisponible"}
                 />
               </div>
             )}
@@ -675,12 +666,12 @@ function Detail({ label, value }: { label: string; value: string }) {
   );
 }
 
-function formatValue(value: any) {
+function formatValue(value: unknown) {
   if (value === undefined || value === null || value === "") return "-";
   return String(value);
 }
 
-function formatPrice(value: any) {
+function formatPrice(value: unknown) {
   if (value === undefined || value === null || value === "") return "-";
   return `${value} DH`;
 }

@@ -2,9 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { API_BASE_URL } from "@/lib/api";
 
 type ExecutionResult = {
   success?: boolean;
@@ -43,7 +41,7 @@ export default function LogsPage() {
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_BASE}/logs`, {
+      const res = await fetch(`${API_BASE_URL}/logs`, {
         cache: "no-store",
       });
 

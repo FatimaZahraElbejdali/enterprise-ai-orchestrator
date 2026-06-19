@@ -2,9 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { API_BASE_URL } from "@/lib/api";
 
 type ExecutionResult = {
   success?: boolean;
@@ -82,7 +80,7 @@ export default function ApprovalsPage() {
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_BASE}/approvals`, {
+      const res = await fetch(`${API_BASE_URL}/approvals`, {
         cache: "no-store",
       });
 
@@ -99,7 +97,7 @@ export default function ApprovalsPage() {
     setActionLoading(id);
 
     try {
-      const res = await fetch(`${API_BASE}/approvals/${id}/${decision}`, {
+      const res = await fetch(`${API_BASE_URL}/approvals/${id}/${decision}`, {
         method: "POST",
       });
 

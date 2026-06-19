@@ -2,16 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-
-const API_BASE = "http://123.123.123.12:8000";
+import { API_BASE_URL } from "@/lib/api";
 
 type OdooStatus = {
   connected?: boolean;
   mode?: string;
-  database?: string;
-  username?: string;
-  uid?: number;
-  message?: string;
 };
 
 type ApprovalItem = {
@@ -74,6 +69,8 @@ const controls = [
 
 export default function Home() {
   const [odooStatus, setOdooStatus] = useState<OdooStatus | null>(null);
+  const [dashboardError, setDashboardError] = useState("");
+  const [odooError, setOdooError] = useState("");
   const [approvals, setApprovals] = useState<ApprovalItem[]>([]);
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
@@ -82,14 +79,26 @@ export default function Home() {
     async function loadDashboard() {
 	 console.log("API_BASE =", API_BASE);
       try {
+        const backendRes = await fetch(`${API_BASE_URL}/status`, {
+          cache: "no-store",
+        });
+
+        if (!backendRes.ok) {
+          throw new Error("Backend inaccessible");
+        }
+
         const [odooRes, approvalsRes, logsRes] = await Promise.allSettled([
-          fetch(`${API_BASE}/odoo/status`),
-          fetch(`${API_BASE}/approvals`),
-          fetch(`${API_BASE}/logs`),
+          fetch(`${API_BASE_URL}/odoo/status`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/approvals`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/logs`, { cache: "no-store" }),
         ]);
 
         if (odooRes.status === "fulfilled" && odooRes.value.ok) {
           setOdooStatus(await odooRes.value.json());
+          setOdooError("");
+        } else {
+          setOdooStatus(null);
+          setOdooError("Odoo indisponible");
         }
 
         if (approvalsRes.status === "fulfilled" && approvalsRes.value.ok) {
@@ -101,6 +110,10 @@ export default function Home() {
           const data = await logsRes.value.json();
           setLogs(Array.isArray(data) ? data : data.logs || []);
         }
+      } catch {
+        setDashboardError("Backend inaccessible");
+        setOdooStatus(null);
+        setOdooError("");
       } finally {
         setLoading(false);
       }
@@ -132,6 +145,14 @@ export default function Home() {
     .slice(0, 5);
 
   const isConnected = Boolean(odooStatus?.connected);
+  const statusMessage =
+    dashboardError ||
+    odooError ||
+    (loading
+      ? "Loading Odoo status..."
+      : isConnected
+        ? "Odoo connected"
+        : "Odoo indisponible");
 
   return (
     <main className="dashboard-shell">
@@ -946,7 +967,7 @@ export default function Home() {
                           {isConnected ? "Connected" : "Offline"}
                         </p>
                         <p className="connection-detail">
-                          Database: {odooStatus?.database || "-"}
+                          {statusMessage}
                         </p>
                       </div>
 
@@ -1052,18 +1073,18 @@ export default function Home() {
                       label="Connection"
                       value={isConnected ? "Connected" : "Disconnected"}
                     />
-                    <Info label="Database" value={odooStatus?.database || "-"} />
-                    <Info label="User" value={odooStatus?.username || "-"} />
                     <Info
-                      label="UID"
-                      value={odooStatus?.uid ? String(odooStatus.uid) : "-"}
+                      label="Availability"
+                      value={
+                        dashboardError ||
+                        odooError ||
+                        (isConnected ? "Available" : "Unavailable")
+                      }
                     />
                   </div>
 
                   <p className="message-box">
-                    {loading
-                      ? "Loading Odoo status..."
-                      : odooStatus?.message || "No status message available."}
+                    {statusMessage}
                   </p>
                 </section>
               </aside>
