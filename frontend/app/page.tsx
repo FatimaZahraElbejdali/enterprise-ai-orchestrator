@@ -77,7 +77,7 @@ export default function Home() {
 
   useEffect(() => {
     async function loadDashboard() {
-	 console.log("API_BASE =", API_BASE);
+	 console.log("API_BASE_URL =", API_BASE_URL);
       try {
         const backendRes = await fetch(`${API_BASE_URL}/status`, {
           cache: "no-store",
