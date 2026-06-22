@@ -22,9 +22,14 @@ type AuditLog =
   | string
   | {
       user_message?: string;
+      message?: string;
+      title?: string;
       intent?: string;
+      agent?: string;
       selected_agent?: string;
       approval_status?: string;
+      status?: string;
+      requires_approval?: boolean;
       risk_level?: string;
       [key: string]: unknown;
     };
@@ -32,40 +37,110 @@ type AuditLog =
 const modules = [
   {
     title: "Chat",
-    description: "Interroger Odoo et les systèmes connectés.",
+    description: "Interroger Odoo, le support IT et les agents internes.",
     href: "/chat",
-    code: "AI",
+    code: "IA",
     tone: "blue",
   },
   {
-    title: "Odoo ERP",
-    description: "Consulter les stocks et les informations produits.",
+    title: "ERP Odoo",
+    description: "Consulter les produits, stocks et documents métiers.",
     href: "/odoo",
     code: "ERP",
     tone: "green",
   },
   {
-    title: "Approbations",
-    description: "Valider les actions sensibles avant exécution.",
+    title: "Validations",
+    description: "Approuver ou refuser les actions sensibles.",
     href: "/approvals",
-    code: "GOV",
+    code: "VAL",
     tone: "amber",
   },
   {
-    title: "Audit Logs",
-    description: "Suivre les demandes, décisions et actions.",
+    title: "Journaux d’audit",
+    description: "Suivre les décisions, agents et actions exécutées.",
     href: "/logs",
-    code: "LOG",
+    code: "AUD",
     tone: "slate",
   },
 ];
 
 const controls = [
-  { label: "Access Control", detail: "Role gated", tone: "blue" },
-  { label: "Human Approval", detail: "Required for risk", tone: "amber" },
-  { label: "Audit Logging", detail: "Event captured", tone: "slate" },
-  { label: "Odoo API", detail: "Live connector", tone: "green" },
+  {
+    label: "Routage intelligent",
+    detail: "Agent sélectionné selon l’intention",
+    tone: "blue",
+  },
+  {
+    label: "Validation humaine",
+    detail: "Requise pour les actions sensibles",
+    tone: "amber",
+  },
+  {
+    label: "Journal d’audit",
+    detail: "Traçabilité des interactions",
+    tone: "slate",
+  },
+  {
+    label: "Accès sécurisé",
+    detail: "Aucune donnée sensible exposée",
+    tone: "green",
+  },
 ];
+
+const agentLabels: Record<string, string> = {
+  odoo_agent: "Agent Odoo",
+  support_agent: "Agent Support",
+  server_agent: "Agent Serveur",
+  knowledge_agent: "Agent Connaissance",
+  development_agent: "Agent Développement",
+  security_agent: "Agent Sécurité",
+  general_agent: "Agent Général",
+  odoo: "Agent Odoo",
+  support: "Agent Support",
+  server: "Agent Serveur",
+  knowledge: "Agent Connaissance",
+  development: "Agent Développement",
+  security: "Agent Sécurité",
+  general: "Agent Général",
+};
+
+const approvalLabels: Record<string, string> = {
+  pending: "Validation requise",
+  approved: "Validé",
+  rejected: "Refusé",
+  not_required: "Validation non requise",
+  not_required_read_only: "Validation non requise",
+  required: "Validation requise",
+  completed: "Terminé",
+  failed: "Échec",
+};
+
+function labelFromMap(
+  value: unknown,
+  labels: Record<string, string>,
+  fallback: string,
+) {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  return labels[value] || labels[value.toLowerCase()] || fallback;
+}
+
+function formatOdooSource(mode?: string) {
+  if (!mode) {
+    return "Non renseigné";
+  }
+
+  const normalized = mode.toLowerCase();
+
+  if (normalized.includes("mock") || normalized.includes("demo")) {
+    return "Mode démo";
+  }
+
+  return "Odoo réel";
+}
 
 export default function Home() {
   const [odooStatus, setOdooStatus] = useState<OdooStatus | null>(null);
@@ -77,7 +152,6 @@ export default function Home() {
 
   useEffect(() => {
     async function loadDashboard() {
-	 console.log("API_BASE_URL =", API_BASE_URL);
       try {
         const backendRes = await fetch(`${API_BASE_URL}/status`, {
           cache: "no-store",
@@ -131,7 +205,12 @@ export default function Home() {
       const title =
         typeof log === "string"
           ? log
-          : log.user_message || log.intent || log.selected_agent || "";
+          : log.user_message ||
+            log.title ||
+            log.message ||
+            log.intent ||
+            log.selected_agent ||
+            "";
 
       const normalized = String(title).trim().toLowerCase();
 
@@ -149,10 +228,11 @@ export default function Home() {
     dashboardError ||
     odooError ||
     (loading
-      ? "Loading Odoo status..."
+      ? "Chargement du statut Odoo..."
       : isConnected
-        ? "Odoo connected"
+        ? "Connexion Odoo active"
         : "Odoo indisponible");
+  const odooSource = formatOdooSource(odooStatus?.mode);
 
   return (
     <main className="dashboard-shell">
@@ -879,13 +959,13 @@ export default function Home() {
               <div className="brand-mark">JB</div>
               <p className="brand-kicker">Jamain Baco</p>
               <h2 className="brand-title">
-                Enterprise AI
+                Orchestrateur IA
                 <br />
-                Orchestrator
+                d’entreprise
               </h2>
               <p className="brand-subtitle">
-                Secure AI access for enterprise systems, approvals, and audit
-                trails.
+                Accès contrôlé aux systèmes internes, journal d’audit et
+                validation humaine.
               </p>
             </div>
 
@@ -904,9 +984,9 @@ export default function Home() {
           </div>
 
           <div className="sidebar-footer">
-            Secure by design
+            Sécurisé par conception
             <br />
-            Controlled access · Audit trail · Human approval
+            Accès contrôlé · Journal d’audit · Validation humaine
           </div>
         </aside>
 
@@ -916,12 +996,12 @@ export default function Home() {
               <div>
                 <p className="page-label">
                   <span className="status-dot" />
-                  Enterprise AI Platform
+                  Plateforme IA d’entreprise
                 </p>
-                <h1 className="page-title">Operations Dashboard</h1>
+                <h1 className="page-title">Tableau de bord opérationnel</h1>
                 <p className="page-summary">
-                  Monitor approvals, audit events, and ERP connectivity from one
-                  control surface for internal operations.
+                  Supervisez les agents, les validations humaines, les journaux
+                  d’audit et la connexion Odoo depuis une interface centrale.
                 </p>
               </div>
 
@@ -932,11 +1012,11 @@ export default function Home() {
                 </span>
 
                 <Link href="/odoo" className="secondary-button">
-                  Open Odoo
+                  Ouvrir Odoo
                 </Link>
 
                 <Link href="/chat" className="primary-button">
-                  Open Chat
+                  Ouvrir le chat
                 </Link>
               </div>
             </header>
@@ -948,23 +1028,25 @@ export default function Home() {
                     <div>
                       <p className="section-kicker">
                         <span className="kicker-line" />
-                        Secure AI Operations
+                        Opérations IA sécurisées
                       </p>
                       <h2 className="command-title">
-                        Controlled access to Odoo and internal systems.
+                        Orchestrateur IA sécurisé pour Odoo et les systèmes
+                        internes
                       </h2>
                       <p className="command-text">
-                        The orchestrator gives IT a single operational view
-                        while enforcing approval workflows, audit logging, and
-                        data access controls.
+                        L’orchestrateur analyse les demandes des utilisateurs,
+                        sélectionne l’agent approprié, applique les règles de
+                        risque et déclenche une validation humaine avant toute
+                        action sensible.
                       </p>
                     </div>
 
                     <div className="connection-tile">
                       <div>
-                        <p className="connection-label">Odoo Integration</p>
+                        <p className="connection-label">Intégration Odoo</p>
                         <p className="connection-value">
-                          {isConnected ? "Connected" : "Offline"}
+                          {isConnected ? "Connecté" : "Indisponible"}
                         </p>
                         <p className="connection-detail">
                           {statusMessage}
@@ -973,7 +1055,7 @@ export default function Home() {
 
                       <div className="connection-actions">
                         <Link href="/odoo" className="dark-button">
-                          Open connector →
+                          Ouvrir le connecteur →
                         </Link>
                       </div>
                     </div>
@@ -993,25 +1075,25 @@ export default function Home() {
 
                 <section className="metrics">
                   <Metric
-                    label="Pending Approvals"
+                    label="Validations en attente"
                     value={String(pendingApprovals)}
-                    detail="Human validation queue"
+                    detail="File de validation humaine"
                   />
                   <Metric
-                    label="Audit Events"
+                    label="Événements d’audit"
                     value={String(logs.length)}
-                    detail="Recorded interactions"
+                    detail="Interactions enregistrées"
                   />
                   <Metric
-                    label="Connected Systems"
+                    label="Systèmes connectés"
                     value={isConnected ? "1" : "0"}
-                    detail={isConnected ? "Odoo ERP active" : "No connector active"}
+                    detail={isConnected ? "Odoo ERP actif" : "Connecteur inactif"}
                   />
                 </section>
 
                 <section className="card panel">
                   <div className="panel-header">
-                    <h3 className="panel-title">Operational Modules</h3>
+                    <h3 className="panel-title">Modules opérationnels</h3>
                   </div>
 
                   <div className="module-grid">
@@ -1040,9 +1122,9 @@ export default function Home() {
               <aside className="side-stack">
                 <section className="card panel">
                   <div className="panel-header">
-                    <h3 className="panel-title">Recent Activity</h3>
+                    <h3 className="panel-title">Activité récente</h3>
                     <Link href="/logs" className="panel-link">
-                      View all
+                      Voir tout
                     </Link>
                   </div>
 
@@ -1054,31 +1136,35 @@ export default function Home() {
                     </div>
                   ) : (
                     <p className="empty">
-                      No audit events yet. Interactions will appear here after
-                      using the orchestrator.
+                      Aucun événement d’audit pour le moment. Les interactions
+                      apparaîtront ici après utilisation de l’orchestrateur.
                     </p>
                   )}
                 </section>
 
                 <section className="card panel">
                   <div className="panel-header">
-                    <h3 className="panel-title">Odoo Details</h3>
+                    <h3 className="panel-title">Détails Odoo</h3>
                     <span className="panel-link">
-                      {odooStatus?.mode || "loading"}
+                      {isConnected ? "Actif" : "Indisponible"}
                     </span>
                   </div>
 
                   <div className="info-table">
                     <Info
-                      label="Connection"
-                      value={isConnected ? "Connected" : "Disconnected"}
+                      label="Connexion"
+                      value={isConnected ? "Connecté" : "Déconnecté"}
                     />
                     <Info
-                      label="Availability"
+                      label="Source"
+                      value={isConnected ? odooSource : "Non disponible"}
+                    />
+                    <Info
+                      label="Statut"
                       value={
                         dashboardError ||
                         odooError ||
-                        (isConnected ? "Available" : "Unavailable")
+                        (isConnected ? "Actif" : "Indisponible")
                       }
                     />
                   </div>
@@ -1149,14 +1235,25 @@ function Activity({ log }: { log: AuditLog }) {
   const title =
     typeof log === "string"
       ? log
-      : log.user_message || log.intent || "System event";
+      : log.user_message || log.title || log.message || log.intent || "Événement système";
+
+  const agentValue =
+    typeof log === "string" ? undefined : log.selected_agent || log.agent || log.intent;
+  const validationValue =
+    typeof log === "string"
+      ? undefined
+      : log.approval_status ||
+        log.status ||
+        (log.requires_approval ? "pending" : "not_required");
 
   const detail =
     typeof log === "string"
-      ? "Logged event"
-      : `${log.selected_agent || "agent"} · ${
-          log.approval_status || log.risk_level || "logged"
-        }`;
+      ? "Événement enregistré"
+      : `${labelFromMap(agentValue, agentLabels, "Agent interne")} · ${labelFromMap(
+          validationValue,
+          approvalLabels,
+          "Statut enregistré",
+        )}`;
 
   return (
     <div className="activity-item">
