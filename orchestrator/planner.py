@@ -1,7 +1,15 @@
 def create_plan(intent: str, message: str, risk_level: str):
     text = message.lower()
 
-    if intent == "odoo":
+    if intent == "odoo" or intent.startswith("odoo_"):
+        if "document" in text or "facture" in text or "invoice" in text:
+            return [
+                "analyze_odoo_document_request",
+                "identify_document_reference_or_id",
+                "read_odoo_document_details",
+                "return_document_result"
+            ]
+
         if "stock" in text or "inventory" in text or "inventaire" in text:
             return [
                 "analyze_stock_request",

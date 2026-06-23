@@ -84,7 +84,9 @@ KEYWORDS = {
         "best practice", "company policy", "onboarding", "handbook",
         "faq", "how to", "explain", "explanation", "what is",
         "where can i find", "rules", "process", "workflow",
-        "internal documentation", "employee guide", "tutorial"
+        "internal documentation", "employee guide", "tutorial",
+        "explique", "rôle", "role", "bénéfices", "benefices",
+        "validation humaine", "résume", "resume", "documentation serveur"
     ],
 }
 

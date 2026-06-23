@@ -31,8 +31,21 @@ type AuditLog =
       status?: string;
       requires_approval?: boolean;
       risk_level?: string;
+      action?: string;
+      business_action?: string;
+      tool_used?: string;
+      event_type?: string;
+      result?: unknown;
+      data?: unknown;
+      metadata?: unknown;
       [key: string]: unknown;
     };
+
+type RecentActivityItem = {
+  title: string;
+  agent: string;
+  validation: string;
+};
 
 const modules = [
   {
@@ -107,14 +120,42 @@ const agentLabels: Record<string, string> = {
 
 const approvalLabels: Record<string, string> = {
   pending: "Validation requise",
-  approved: "Validé",
-  rejected: "Refusé",
+  approved: "Validation non requise",
+  rejected: "Action bloquée",
+  refused: "Action bloquée",
   not_required: "Validation non requise",
   not_required_read_only: "Validation non requise",
   required: "Validation requise",
-  completed: "Terminé",
+  approval_required: "Validation requise",
+  pending_approval: "Validation requise",
+  completed: "Validation non requise",
   failed: "Échec",
+  error: "Échec",
+  blocked: "Action bloquée",
 };
+
+const fallbackRecentActivities: RecentActivityItem[] = [
+  {
+    title: "Consultation du stock produit",
+    agent: "Agent Odoo",
+    validation: "Validation non requise",
+  },
+  {
+    title: "Demande de validation Odoo",
+    agent: "Agent Odoo",
+    validation: "Validation requise",
+  },
+  {
+    title: "Consultation d’un document Odoo",
+    agent: "Agent Odoo",
+    validation: "Validation non requise",
+  },
+  {
+    title: "Diagnostic serveur",
+    agent: "Agent Serveur",
+    validation: "Validation non requise",
+  },
+];
 
 function labelFromMap(
   value: unknown,
@@ -140,6 +181,371 @@ function formatOdooSource(mode?: string) {
   }
 
   return "Odoo réel";
+}
+
+function normalizeActivityText(value: unknown) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[’']/g, " ")
+    .toLowerCase()
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function collectAuditText(value: unknown, depth = 0): string[] {
+  if (depth > 2 || value === null || value === undefined) {
+    return [];
+  }
+
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return [String(value)];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectAuditText(item, depth + 1));
+  }
+
+  if (typeof value === "object") {
+    return Object.entries(value)
+      .filter(([key]) => !/password|secret|token|api|key|url|database|username|uid/i.test(key))
+      .flatMap(([, nestedValue]) => collectAuditText(nestedValue, depth + 1));
+  }
+
+  return [];
+}
+
+function auditText(log: AuditLog) {
+  if (typeof log === "string") {
+    return log;
+  }
+
+  return collectAuditText([
+    log.user_message,
+    log.title,
+    log.message,
+    log.intent,
+    log.agent,
+    log.selected_agent,
+    log.approval_status,
+    log.status,
+    log.risk_level,
+    log.action,
+    log.business_action,
+    log.tool_used,
+    log.event_type,
+    log.result,
+    log.data,
+    log.metadata,
+  ])
+    .filter((value) => typeof value === "string" && value.trim())
+    .join(" ");
+}
+
+function extractDocumentReference(text: string) {
+  const match = text.match(
+    /\b(BC-[A-Z0-9-]+|FNP\/\d{4}\/\d+|WH\/(?:OUT|IN|PICK)\/\d+|SO\d+|PO\d+|S\d{4,}|P\d{4,})\b/i,
+  );
+
+  return match?.[1]?.toUpperCase();
+}
+
+function extractDocumentId(text: string) {
+  const match = text.match(/\b(?:document\s+id|id\s+du\s+document|id\s+document)\s+(\d+)\b/i);
+
+  return match?.[1];
+}
+
+function cleanExtractedName(value: string) {
+  return value
+    .replace(/[.;,!?]+$/g, "")
+    .replace(/\b(context|validation|required|not|required|status|agent)\b.*$/i, "")
+    .trim();
+}
+
+function extractProductName(rawText: string) {
+  const patterns = [
+    /\bBACO\s+CLEAN\b/i,
+    /\b(?:stock|inventory)\s+(?:of|for|de|du|pour)\s+([A-Z0-9][A-Z0-9\s-]{2,40})/i,
+    /\b(?:produit|product)\s+([A-Z0-9][A-Z0-9\s-]{2,40})/i,
+    /\breferenced product is\s+([A-Z0-9][A-Z0-9\s-]{2,40})/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = rawText.match(pattern);
+
+    if (match?.[0]?.toUpperCase().includes("BACO CLEAN")) {
+      return "BACO CLEAN";
+    }
+
+    if (match?.[1]) {
+      const name = cleanExtractedName(match[1]).toUpperCase();
+
+      if (name && !["STOCK", "PRICE", "PRODUCT", "PRODUIT"].includes(name)) {
+        return name;
+      }
+    }
+  }
+
+  return "";
+}
+
+function isApprovalRequired(log: AuditLog, normalizedText: string) {
+  if (typeof log !== "string" && log.requires_approval === true) {
+    return true;
+  }
+
+  return (
+    normalizedText.includes("approval required") ||
+    normalizedText.includes("pending approval") ||
+    normalizedText.includes("pending") ||
+    normalizedText.includes("requires approval") ||
+    normalizedText.includes("validation requise") ||
+    normalizedText.includes("approval required true")
+  );
+}
+
+function formatActivityTitle(log: AuditLog) {
+  const rawText = auditText(log);
+  const text = normalizeActivityText(rawText);
+  const documentReference = extractDocumentReference(rawText);
+  const documentId = extractDocumentId(rawText);
+  const productName = extractProductName(rawText);
+  const approvalRequired = isApprovalRequired(log, text);
+
+  if (!text) {
+    return "Interaction orchestrateur";
+  }
+
+  if (
+    text.includes("blocked") ||
+    text.includes("bloque") ||
+    text.includes("refused") ||
+    text.includes("rejected") ||
+    text.includes("security")
+  ) {
+    return "Action sensible bloquée";
+  }
+
+  if (
+    text.includes("odoo ne s ouvre pas") ||
+    text.includes("acceder a odoo") ||
+    text.includes("acces odoo") ||
+    text.includes("access odoo") ||
+    text.includes("cannot access odoo")
+  ) {
+    return "Assistance accès Odoo";
+  }
+
+  if (text.includes("wi-fi") || text.includes("wifi") || text.includes("reseau")) {
+    return "Assistance réseau Wi-Fi";
+  }
+
+  if (text.includes("mot de passe") || text.includes("password")) {
+    return "Assistance mot de passe";
+  }
+
+  if (
+    text.includes("serveur") ||
+    text.includes("server") ||
+    /\bram\b/.test(text) ||
+    text.includes("cpu") ||
+    text.includes("disk")
+  ) {
+    return "Diagnostic serveur";
+  }
+
+  if (
+    text.includes("delete invoice") ||
+    text.includes("invoice delete") ||
+    text.includes("supprimer facture") ||
+    text.includes("suppression facture") ||
+    (text.includes("facture") && text.includes("supprimer"))
+  ) {
+    return "Action sensible bloquée ou en validation";
+  }
+
+  if (
+    text.includes("change price") ||
+    text.includes("price update") ||
+    text.includes("update product price") ||
+    text.includes("modifier prix") ||
+    text.includes("modification de prix") ||
+    (text.includes("prix") && /(changer|modifier|mettre a jour|update)/.test(text))
+  ) {
+    return approvalRequired
+      ? "Modification de prix en attente"
+      : "Demande de modification de prix";
+  }
+
+  if (
+    text.includes("stock quantity update") ||
+    text.includes("update stock quantity") ||
+    text.includes("change stock") ||
+    text.includes("modifier stock") ||
+    text.includes("modification du stock") ||
+    text.includes("update stock")
+  ) {
+    return approvalRequired
+      ? "Modification du stock en attente"
+      : "Demande de modification du stock";
+  }
+
+  if (documentReference) {
+    return `Recherche document : ${documentReference}`;
+  }
+
+  if (documentId) {
+    return "Consultation du document Odoo";
+  }
+
+  if (
+    text.includes("document details") ||
+    text.includes("details du document") ||
+    text.includes("consultation document") ||
+    text.includes("read odoo document") ||
+    text.includes("odoo get document details")
+  ) {
+    return "Consultation d’un document Odoo";
+  }
+
+  if (
+    text.includes("document search") ||
+    text.includes("search document") ||
+    text.includes("recherche document") ||
+    text.includes("cherche le document")
+  ) {
+    return "Recherche de document Odoo";
+  }
+
+  if (
+    text.includes("stock check") ||
+    text.includes("check stock") ||
+    text.includes("verifier stock") ||
+    text.includes("consultation du stock") ||
+    text.includes("consultation stock") ||
+    text.includes("odoo check stock")
+  ) {
+    return productName
+      ? `Stock consulté : ${productName}`
+      : "Consultation du stock produit";
+  }
+
+  if (
+    text.includes("product details") ||
+    text.includes("details produit") ||
+    text.includes("details du produit") ||
+    text.includes("consultation produit")
+  ) {
+    return productName
+      ? `Consultation produit : ${productName}`
+      : "Consultation d’un produit";
+  }
+
+  if (text.includes("system event") || text.includes("evenement systeme")) {
+    return "Événement système";
+  }
+
+  return "Interaction orchestrateur";
+}
+
+function formatActivityAgent(log: AuditLog) {
+  const explicitAgent =
+    typeof log === "string" ? "" : log.selected_agent || log.agent || log.intent;
+  const text = normalizeActivityText([explicitAgent, auditText(log)].join(" "));
+  const explicitLabel = labelFromMap(explicitAgent, agentLabels, "");
+
+  if (explicitLabel) {
+    return explicitLabel;
+  }
+
+  if (
+    text.includes("odoo") ||
+    text.includes("stock") ||
+    text.includes("facture") ||
+    extractDocumentReference(auditText(log)) ||
+    extractDocumentId(auditText(log))
+  ) {
+    return "Agent Odoo";
+  }
+
+  if (text.includes("support") || text.includes("helpdesk")) {
+    return "Agent Support";
+  }
+
+  if (text.includes("server") || text.includes("serveur")) {
+    return "Agent Serveur";
+  }
+
+  if (text.includes("security") || text.includes("securite")) {
+    return "Agent Sécurité";
+  }
+
+  if (text.includes("knowledge") || text.includes("connaissance")) {
+    return "Agent Connaissance";
+  }
+
+  if (text.includes("development") || text.includes("developpement")) {
+    return "Agent Développement";
+  }
+
+  return labelFromMap(explicitAgent, agentLabels, "Agent Général");
+}
+
+function formatActivityValidation(log: AuditLog) {
+  if (typeof log !== "string") {
+    if (log.approval_status === "blocked" || log.status === "blocked") {
+      return "Action bloquée";
+    }
+
+    if (log.requires_approval === true) {
+      return "Validation requise";
+    }
+
+    if (log.requires_approval === false) {
+      return "Validation non requise";
+    }
+
+    const mapped = labelFromMap(
+      log.approval_status || log.status,
+      approvalLabels,
+      "",
+    );
+
+    if (mapped) {
+      return mapped;
+    }
+  }
+
+  const text = normalizeActivityText(auditText(log));
+
+  if (text.includes("blocked") || text.includes("bloquee")) {
+    return "Action bloquée";
+  }
+
+  if (
+    text.includes("approval required") ||
+    text.includes("pending approval") ||
+    text.includes("pending") ||
+    text.includes("requires approval") ||
+    text.includes("validation requise") ||
+    text.includes("change price") ||
+    text.includes("update stock") ||
+    text.includes("delete invoice")
+  ) {
+    return "Validation requise";
+  }
+
+  return "Validation non requise";
+}
+
+function formatRecentActivity(log: AuditLog): RecentActivityItem {
+  return {
+    title: formatActivityTitle(log),
+    agent: formatActivityAgent(log),
+    validation: formatActivityValidation(log),
+  };
 }
 
 export default function Home() {
@@ -222,6 +628,10 @@ export default function Home() {
       );
     })
     .slice(0, 5);
+  const recentActivities =
+    cleanLogs.length > 0
+      ? cleanLogs.map((log) => formatRecentActivity(log))
+      : fallbackRecentActivities;
 
   const isConnected = Boolean(odooStatus?.connected);
   const statusMessage =
@@ -697,6 +1107,13 @@ export default function Home() {
           white-space: nowrap;
         }
 
+        .activity-kicker {
+          margin: -4px 0 12px;
+          color: #667085;
+          font-size: 12px;
+          font-weight: 760;
+        }
+
         .module-grid {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1127,19 +1544,13 @@ export default function Home() {
                       Voir tout
                     </Link>
                   </div>
+                  <p className="activity-kicker">Dernières interactions traitées</p>
 
-                  {cleanLogs.length > 0 ? (
-                    <div className="activity-list">
-                      {cleanLogs.map((log, index) => (
-                        <Activity key={index} log={log} />
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="empty">
-                      Aucun événement d’audit pour le moment. Les interactions
-                      apparaîtront ici après utilisation de l’orchestrateur.
-                    </p>
-                  )}
+                  <div className="activity-list">
+                    {recentActivities.map((activity, index) => (
+                      <Activity key={`${activity.title}-${index}`} activity={activity} />
+                    ))}
+                  </div>
                 </section>
 
                 <section className="card panel">
@@ -1231,37 +1642,16 @@ function Info({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Activity({ log }: { log: AuditLog }) {
-  const title =
-    typeof log === "string"
-      ? log
-      : log.user_message || log.title || log.message || log.intent || "Événement système";
-
-  const agentValue =
-    typeof log === "string" ? undefined : log.selected_agent || log.agent || log.intent;
-  const validationValue =
-    typeof log === "string"
-      ? undefined
-      : log.approval_status ||
-        log.status ||
-        (log.requires_approval ? "pending" : "not_required");
-
-  const detail =
-    typeof log === "string"
-      ? "Événement enregistré"
-      : `${labelFromMap(agentValue, agentLabels, "Agent interne")} · ${labelFromMap(
-          validationValue,
-          approvalLabels,
-          "Statut enregistré",
-        )}`;
-
+function Activity({ activity }: { activity: RecentActivityItem }) {
   return (
     <div className="activity-item">
       <div className="activity-title-row">
         <span className="activity-indicator" />
-        <p className="activity-title">{title}</p>
+        <p className="activity-title">{activity.title}</p>
       </div>
-      <p className="activity-detail">{detail}</p>
+      <p className="activity-detail">
+        {activity.agent} · {activity.validation}
+      </p>
     </div>
   );
 }

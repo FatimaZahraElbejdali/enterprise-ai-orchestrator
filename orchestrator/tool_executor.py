@@ -71,16 +71,31 @@ def execute_tool(tool_name: str, **kwargs):
         result = odoo.search_delivery_order(kwargs.get("query", ""))
 
     elif tool_name == "odoo_get_sale_order_details":
-        result = odoo.get_sale_order_details(kwargs.get("order_query", ""))
+        result = odoo.get_sale_order_details(
+            kwargs.get("order_query", ""),
+            document_id=kwargs.get("document_id"),
+        )
 
     elif tool_name == "odoo_get_purchase_order_details":
-        result = odoo.get_purchase_order_details(kwargs.get("order_query", ""))
+        result = odoo.get_purchase_order_details(
+            kwargs.get("order_query", ""),
+            document_id=kwargs.get("document_id"),
+        )
 
     elif tool_name == "odoo_get_invoice_details":
-        result = odoo.get_invoice_details(kwargs.get("invoice_query", ""))
+        result = odoo.get_invoice_details(
+            kwargs.get("invoice_query", ""),
+            document_id=kwargs.get("document_id"),
+        )
 
     elif tool_name == "odoo_get_delivery_order_details":
-        result = odoo.get_delivery_order_details(kwargs.get("picking_query", ""))
+        result = odoo.get_delivery_order_details(
+            kwargs.get("picking_query", ""),
+            document_id=kwargs.get("document_id"),
+        )
+
+    elif tool_name == "odoo_get_document_details_by_id":
+        result = odoo.get_document_details_by_id(kwargs.get("document_id"))
 
     elif tool_name == "odoo_update_sale_order_line":
         result = odoo.update_sale_order_line(**_without_none({

@@ -1,5 +1,6 @@
 import json
 import re
+import unicodedata
 from pathlib import Path
 from typing import Literal
 
@@ -31,6 +32,8 @@ from orchestrator.approval_store import (
     get_approvals,
     update_approval_status,
 )
+from orchestrator.conversation_memory import conversation_memory
+from orchestrator.contextual_resolver import resolve_contextual_message
 from orchestrator.tool_executor import execute_tool
 
 load_dotenv()
@@ -76,6 +79,7 @@ ODOO_APPROVAL_ACTIONS = {
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: str = "demo-session"
 
 
 class AITestRequest(BaseModel):
@@ -88,6 +92,162 @@ DocumentEndpointType = Literal[
     "invoice",
     "delivery",
 ]
+
+
+def enrich_message_with_memory_context(message: str, resolved_context: dict):
+    context_lines = []
+
+    if resolved_context.get("product_name"):
+        context_lines.append(
+            f"Context: the referenced product is {resolved_context['product_name']}."
+        )
+
+    if resolved_context.get("product_id") is not None:
+        context_lines.append(
+            f"Context: the referenced product ID is {resolved_context['product_id']}."
+        )
+
+    if not context_lines:
+        return message
+
+    return f"{message}\n\n" + "\n".join(context_lines)
+
+
+def extract_document_id_from_message(message: str):
+    patterns = [
+        r"Context:\s+the selected Odoo document ID is\s+(\d+)\b",
+        r"\bdocument\s+id\s+(\d+)\b",
+        r"\bid\s+du\s+document\s+(\d+)\b",
+        r"\bid\s+document\s+(\d+)\b",
+        r"\b(?:l['’]?)?id\s+(\d+)\b",
+        r"\b(?:facture|invoice|bon\s+de\s+livraison|livraison|stock\s+picking|bon\s+de\s+commande|commande\s+fournisseur|purchase\s+order|sale\s+order)\s+id\s+(\d+)\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+
+        if match:
+            return int(match.group(1))
+
+    return None
+
+
+def enrich_message_with_document_candidate(message: str, candidate: dict):
+    context_lines = []
+
+    if candidate.get("document_id") is not None:
+        context_lines.append(
+            f"Context: the selected Odoo document ID is {candidate['document_id']}."
+        )
+
+    if candidate.get("document_name"):
+        context_lines.append(
+            f"Context: the selected Odoo document name is {candidate['document_name']}."
+        )
+
+    if candidate.get("document_model"):
+        context_lines.append(
+            f"Context: the selected Odoo document model is {candidate['document_model']}."
+        )
+
+    if candidate.get("document_type"):
+        context_lines.append(
+            f"Context: the selected Odoo document type is {candidate['document_type']}."
+        )
+
+    if candidate.get("partner_name"):
+        context_lines.append(
+            f"Context: the selected Odoo document partner is {candidate['partner_name']}."
+        )
+
+    if not context_lines:
+        return message
+
+    return f"{message}\n\n" + "\n".join(context_lines)
+
+
+def normalize_followup_text(message: str):
+    normalized = unicodedata.normalize("NFKD", message or "")
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    return " ".join(ascii_value.lower().replace("’", "'").split())
+
+
+def clarify_product_reference_message(message: str, resolved_context: dict):
+    product_name = resolved_context.get("product_name")
+
+    if not product_name:
+        return message
+
+    normalized = normalize_followup_text(message)
+    has_price_update_reference = any(
+        phrase in normalized
+        for phrase in [
+            "its price",
+            "change its price",
+            "son prix",
+            "changer son prix",
+            "modifier son prix",
+        ]
+    )
+
+    price_match = re.search(
+        r"(?:to|à|a)\s+(\d+(?:[.,]\d+)?)\s*(dh|dhs|mad|dirhams?)?",
+        message,
+        re.IGNORECASE,
+    )
+
+    if has_price_update_reference and price_match:
+        price = price_match.group(1).replace(",", ".")
+        currency = price_match.group(2) or "DH"
+
+        return f"Change the price of {product_name} to {price} {currency.upper()}"
+
+    if any(term in normalized for term in ["son stock", "its stock", "its quantity", "sa quantite"]):
+        return f"Quel est le stock du produit {product_name} ?"
+
+    if any(term in normalized for term in ["son prix", "its price"]):
+        return f"Quel est le prix du produit {product_name} ?"
+
+    if any(term in normalized for term in ["sa reference", "its reference"]):
+        return f"Quelle est la référence interne du produit {product_name} ?"
+
+    if any(
+        term in normalized
+        for term in [
+            "ses details",
+            "ses informations",
+            "ses infos",
+            "sa fiche",
+            "its details",
+            "its information",
+            "its info",
+            "ce produit",
+            "cet article",
+            "ce dernier",
+            "celui-ci",
+            "celui ci",
+            "le produit",
+            "l'article",
+            "larticle",
+        ]
+    ):
+        return f"Montre-moi les détails du produit {product_name}"
+
+    if resolved_context.get("reference_type") == "product":
+        return f"Montre-moi les détails du produit {product_name}"
+
+    return message
+
+
+def remember_chat_result(session_id: str, result):
+    conversation_memory.update_from_result(session_id, result)
+    print(
+        "[conversation_memory:update]",
+        {
+            "session_id": session_id,
+            "updated_memory_context": conversation_memory.get_safe_context(session_id),
+        },
+    )
 
 
 def normalize_document_endpoint_response(
@@ -332,7 +492,13 @@ def is_odoo_related(message: str) -> bool:
     )
 
     odoo_reference_patterns = [
+        r"\bdocument\s+id\s+\d+\b",
+        r"\bid\s+du\s+document\s+\d+\b",
+        r"\bid\s+document\s+\d+\b",
+        r"\bd[ée]tails?\s+du\s+document\s+id\s+\d+\b",
+        r"\bdetails?\s+of\s+document\s+id\s+\d+\b",
         r"\b[a-z]{2,5}[-/][a-z0-9][a-z0-9/-]*\d{3,}\b",
+        r"\bfac/\d{4}/\d+\b",
         r"\bfnp/\d{4}/\d+\b",
         r"\bbc-[a-z0-9-]+\b",
         r"\bol-[a-z0-9-]+\b",
@@ -372,7 +538,12 @@ def is_odoo_related(message: str) -> bool:
         "fournisseurs",
         "bon fournisseur",
         "bon de commande",
+        "commande fournisseur",
         "bon de livraison",
+        "document id",
+        "id document",
+        "id du document",
+        "stock picking",
         "devis",
         "arrivée prévue",
         "arrivee prevue",
@@ -575,7 +746,9 @@ def ai_test(request: AITestRequest):
 
 @app.post("/chat")
 def chat(request: ChatRequest):
-    message = request.message.strip()
+    original_message = request.message
+    message = original_message.strip()
+    session_id = request.session_id or "demo-session"
 
     if not message:
         raise HTTPException(
@@ -583,14 +756,90 @@ def chat(request: ChatRequest):
             detail="Message cannot be empty",
         )
 
-    if is_support_request(message):
-        return build_direct_support_response(message)
+    memory_context = conversation_memory.get_safe_context(session_id)
+    contextual_resolution = resolve_contextual_message(message, memory_context)
+    enriched_message = contextual_resolution.get("resolved_message") or message
 
-    if is_server_request(message):
-        return build_direct_server_response(message)
+    if (
+        contextual_resolution.get("confidence") == "low"
+        and contextual_resolution.get("used_memory") is not True
+    ):
+        fallback_context = conversation_memory.resolve_references(message, session_id)
 
-    if is_odoo_related(message):
-        odoo_result = run_odoo_agent(message)
+        if fallback_context:
+            clarified_message = clarify_product_reference_message(message, fallback_context)
+            enriched_message = enrich_message_with_memory_context(
+                clarified_message,
+                fallback_context,
+            )
+            contextual_resolution = {
+                "original_message": original_message,
+                "resolved_message": enriched_message,
+                "used_memory": True,
+                "resolved_references": fallback_context,
+                "confidence": "medium",
+            }
+
+    print(
+        "[contextual_resolver]",
+        {
+            "session_id": session_id,
+            "original_message": original_message,
+            "resolved_message": enriched_message,
+            "used_memory": contextual_resolution.get("used_memory"),
+            "confidence": contextual_resolution.get("confidence"),
+            "resolved_references": contextual_resolution.get("resolved_references"),
+            "enriched_message": enriched_message,
+        },
+    )
+
+    resolved_references = contextual_resolution.get("resolved_references")
+    resolved_document_context_applied = False
+
+    if (
+        isinstance(resolved_references, dict)
+        and resolved_references.get("reference_type") == "document"
+    ):
+        enriched_message = enrich_message_with_document_candidate(
+            enriched_message,
+            resolved_references,
+        )
+        resolved_document_context_applied = True
+
+    document_id = extract_document_id_from_message(enriched_message)
+
+    if document_id is not None and not resolved_document_context_applied:
+        document_candidate = conversation_memory.resolve_document_candidate(
+            session_id,
+            document_id,
+        )
+
+        if document_candidate:
+            enriched_message = enrich_message_with_document_candidate(
+                enriched_message,
+                document_candidate,
+            )
+            print(
+                "[conversation_memory:document_candidate]",
+                {
+                    "session_id": session_id,
+                    "document_id": document_id,
+                    "resolved_candidate": document_candidate,
+                },
+            )
+
+    if is_support_request(enriched_message):
+        result = build_direct_support_response(enriched_message)
+        remember_chat_result(session_id, result)
+        return result
+
+    if is_server_request(enriched_message):
+        result = build_direct_server_response(enriched_message)
+        remember_chat_result(session_id, result)
+        return result
+
+    if is_odoo_related(enriched_message):
+        odoo_result = run_odoo_agent(enriched_message)
 
         if isinstance(odoo_result, dict):
             odoo_result.setdefault("agent", "odoo_agent")
@@ -606,9 +855,22 @@ def chat(request: ChatRequest):
                 "result": odoo_result.get("result") or odoo_result.get("data"),
             })
 
+        remember_chat_result(session_id, odoo_result)
         return odoo_result
 
-    return process_request(message)
+    result = process_request(enriched_message)
+    remember_chat_result(session_id, result)
+    return result
+
+
+@app.get("/debug/conversation/{session_id}")
+def debug_conversation(session_id: str):
+    return conversation_memory.get_safe_context(session_id)
+
+
+@app.get("/debug/routes")
+def debug_routes():
+    return sorted(route.path for route in app.routes)
 
 
 @app.get("/logs")

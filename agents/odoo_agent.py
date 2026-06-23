@@ -213,6 +213,15 @@ def clean_product_name(value: str) -> str:
 def extract_product_name(message: str) -> str:
     text = message.strip()
 
+    context_match = re.search(
+        r"Context:\s+the referenced product is\s+(.+?)(?:\.|\n|$)",
+        text,
+        re.IGNORECASE,
+    )
+
+    if context_match:
+        return clean_product_name(context_match.group(1))
+
     patterns = [
         r"(?:stock|inventory|inventaire)\s+(?:for|of|du|de|pour)\s+(.+)",
         r"(?:check|show|view|verify|get|consult|search)\s+(?:the\s+)?(?:stock|inventory|product|details|information)\s+(?:for|of)?\s*(.+)",
@@ -306,6 +315,12 @@ def detect_odoo_action(message: str) -> str:
 
     has_change = any(keyword in text for keyword in CHANGE_KEYWORDS)
 
+    if is_odoo_document_details_request(message):
+        return "document_details"
+
+    if is_odoo_document_search_request(message):
+        return "search_document"
+
     if any(
         phrase in normalized
         for phrase in [
@@ -342,6 +357,152 @@ def detect_odoo_action(message: str) -> str:
         return "check_product_details"
 
     return "odoo_status"
+
+
+def extract_document_id(message: str):
+    patterns = [
+        r"Context:\s+the selected Odoo document ID is\s+(\d+)\b",
+        r"\bdocument\s+id\s+(\d+)\b",
+        r"\bid\s+du\s+document\s+(\d+)\b",
+        r"\bid\s+document\s+(\d+)\b",
+        r"\bd[ée]tails?\s+du\s+document\s+id\s+(\d+)\b",
+        r"\bdetails?\s+of\s+document\s+id\s+(\d+)\b",
+        r"\b(?:l['’]?)?id\s+(\d+)\b",
+        r"\b(?:purchase\s+order|sale\s+order|invoice|facture|livraison|stock\s+picking|bon\s+de\s+livraison|bon\s+de\s+commande|commande\s+fournisseur)\s+id\s+(\d+)\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+
+        if match:
+            return int(match.group(1))
+
+    return None
+
+
+def extract_context_document_field(message: str, field_label: str):
+    match = re.search(
+        rf"Context:\s+the selected Odoo document {field_label} is\s+([^\n]+)",
+        message,
+        re.IGNORECASE,
+    )
+
+    if match:
+        return match.group(1).strip().removesuffix(".").strip()
+
+    return None
+
+
+def extract_context_document_model(message: str):
+    return extract_context_document_field(message, "model")
+
+
+def extract_context_document_type(message: str):
+    return extract_context_document_field(message, "type")
+
+
+def extract_context_document_name(message: str):
+    return extract_context_document_field(message, "name")
+
+
+def extract_context_document_partner(message: str):
+    return extract_context_document_field(message, "partner")
+
+
+def extract_document_reference(message: str):
+    patterns = [
+        r"\b(BC-[A-Z0-9-]+)\b",
+        r"\b(FAC/\d{4}/\d+)\b",
+        r"\b(FNP/\d{4}/\d+)\b",
+        r"\b(WH/(?:OUT|IN|PICK)/\d+)\b",
+        r"\b(SO\d+|S\d{4,})\b",
+        r"\b(PO\d+|P\d{4,})\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+
+        if match:
+            return match.group(1)
+
+    return None
+
+
+def infer_document_type_from_message(message: str):
+    normalized = normalize_label(message)
+
+    if any(term in normalized for term in ["bon de commande", "commande fournisseur", "purchase order"]):
+        return "purchase_order"
+
+    if "purchase_order" in normalized:
+        return "purchase_order"
+
+    if "sale order" in normalized or "commande client" in normalized or "sale_order" in normalized:
+        return "sale_order"
+
+    if "facture" in normalized or "invoice" in normalized or "account_move" in normalized:
+        return "invoice"
+
+    if "bon de livraison" in normalized or "livraison" in normalized or "stock picking" in normalized or "delivery" in normalized or "stock_picking" in normalized:
+        return "delivery"
+
+    return None
+
+
+def is_odoo_document_details_request(message: str):
+    normalized = normalize_label(message)
+
+    return (
+        bool(extract_document_id(message))
+        and any(
+            term in normalized
+            for term in [
+                "document",
+                "facture",
+                "invoice",
+                "livraison",
+                "bon de livraison",
+                "stock picking",
+                "purchase order",
+                "sale order",
+                "bon de commande",
+                "commande fournisseur",
+            ]
+        )
+        or any(
+            term in normalized
+            for term in [
+                "details du document id",
+                "details of document id",
+                "show details of document id",
+                "details facture id",
+                "details de la facture",
+                "details facture",
+                "details du bon de commande",
+                "details commande fournisseur",
+                "details du bon de livraison",
+            ]
+        )
+    )
+
+
+def is_odoo_document_search_request(message: str):
+    normalized = normalize_label(message)
+
+    return any(
+        term in normalized
+        for term in [
+            "bon de commande",
+            "commande fournisseur",
+            "bon de livraison",
+            "facture",
+            "livraison",
+            "stock picking",
+            "purchase order",
+            "sale order",
+            "invoice",
+        ]
+    )
 
 
 def _empty_parse() -> dict:
@@ -465,6 +626,45 @@ def parse_odoo_action_deterministic(message: str) -> dict:
             "field_name": None,
             "new_value": None,
             "confidence": 0.75,
+            "parser_source": "local_rules",
+            "parser_error": None,
+        }
+
+    if action in {"search_document", "document_details"}:
+        document_id = extract_document_id(message)
+        document_reference = extract_document_reference(message)
+        document_type = infer_document_type_from_message(message)
+        context_document_type = extract_context_document_type(message)
+        target_model = (
+            DOCUMENT_TYPE_TO_MODEL.get(document_type or "")
+            or extract_context_document_model(message)
+            or DOCUMENT_TYPE_TO_MODEL.get(context_document_type or "")
+        )
+
+        return {
+            "intent": "odoo_document_details" if action == "document_details" else "odoo_document_search",
+            "action": action,
+            "business_action": INTERNAL_TO_BUSINESS_ACTION.get(action, "document_details"),
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": target_model,
+            "record_query": None,
+            "document_query": None if document_id else (document_reference or extract_context_document_name(message) or message),
+            "product_query": None,
+            "field_label": None,
+            "field_name": None,
+            "new_value": None,
+            "document_type": document_type or context_document_type or MODEL_TO_DOCUMENT_TYPE.get(target_model),
+            "document_reference": document_reference,
+            "document_id": document_id,
+            "partner_name": extract_context_document_partner(message),
+            "line_product": None,
+            "field": None,
+            "technical_field": None,
+            "language": "fr" if re.search(r"\b(montre|détails|details|bon|commande|facture|livraison)\b", message, re.IGNORECASE) else None,
+            "needs_clarification": False,
+            "clarification_reason": None,
+            "confidence": 0.82,
             "parser_source": "local_rules",
             "parser_error": None,
         }
@@ -694,6 +894,38 @@ def normalize_openai_parse(
         "entities": entities,
     }
 
+    context_document_model = extract_context_document_model(message)
+    context_document_type = extract_context_document_type(message)
+    context_document_name = extract_context_document_name(message)
+    context_document_partner = extract_context_document_partner(message)
+
+    if action in {"search_document", "document_details"}:
+        if result.get("document_type") == "unknown":
+            result["document_type"] = None
+
+        if not result.get("target_model"):
+            result["target_model"] = (
+                context_document_model
+                or DOCUMENT_TYPE_TO_MODEL.get(context_document_type or "")
+            )
+
+        if not result.get("document_type"):
+            result["document_type"] = (
+                context_document_type
+                or MODEL_TO_DOCUMENT_TYPE.get(result.get("target_model"))
+            )
+
+        if not result.get("document_query") and context_document_name:
+            result["document_query"] = context_document_name
+            result["document_reference"] = context_document_name
+
+        if not result.get("partner_name") and context_document_partner:
+            result["partner_name"] = context_document_partner
+
+        if action == "document_details" and result.get("document_id") is not None:
+            result["needs_clarification"] = False
+            result["clarification_reason"] = None
+
     if action == "check_stock":
         result.update({
             "risk": "low",
@@ -875,7 +1107,7 @@ def normalize_openai_parse(
             "purchase.order",
             "stock.picking",
             "account.move",
-        }:
+        } and result.get("document_id") is None:
             return None
 
         result.update({
@@ -1017,7 +1249,13 @@ def normalize_stock_result(raw_result: dict, action: str):
         "action": action,
         "found": raw_result.get("found", False),
         "product": raw_result.get("product"),
+        "product_name": raw_result.get("product_name") or raw_result.get("product"),
         "product_id": raw_result.get("product_id"),
+        "metadata": raw_result.get("metadata") or {
+            "product_name": raw_result.get("product_name") or raw_result.get("product"),
+            "product_id": raw_result.get("product_id"),
+            "source": raw_result.get("source", "real_odoo"),
+        },
         "internal_reference": raw_result.get("internal_reference"),
         "available_stock": raw_result.get("stock_quantity"),
         "forecast_stock": raw_result.get("forecast_quantity"),
@@ -1137,6 +1375,142 @@ def wants_document_details(message: str) -> bool:
             "show me",
         ]
     )
+
+
+def detect_document_response_focus(message: str) -> str | None:
+    normalized = normalize_label(message)
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "son fournisseur",
+            "le fournisseur",
+            "qui est le fournisseur",
+            "what is its supplier",
+            "who is the supplier",
+            "supplier",
+        ]
+    ):
+        return "partner"
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "son statut",
+            "le statut",
+            "what is its status",
+            "status",
+            "statut",
+        ]
+    ):
+        return "status"
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "sa date",
+            "la date",
+            "what is its date",
+            "date",
+        ]
+    ):
+        return "date"
+
+    if any(
+        phrase in normalized
+        for phrase in [
+            "ses articles",
+            "ses lignes",
+            "les articles",
+            "les lignes",
+            "show its lines",
+            "its lines",
+            "articles",
+            "lignes",
+            "lines",
+        ]
+    ):
+        return "lines"
+
+    return None
+
+
+def document_partner_label(raw_result: dict, focus: str | None = None) -> str:
+    metadata = raw_result.get("metadata") if isinstance(raw_result.get("metadata"), dict) else {}
+    document_type = raw_result.get("document_type") or metadata.get("document_type")
+    model_name = raw_result.get("document_model") or raw_result.get("model")
+
+    if document_type == "sale_order" or model_name == "sale.order":
+        return "Client"
+
+    if focus == "partner":
+        return "Fournisseur"
+
+    return "Partenaire"
+
+
+def _document_value(raw_result: dict, key: str):
+    metadata = raw_result.get("metadata") if isinstance(raw_result.get("metadata"), dict) else {}
+    document = raw_result.get("document") if isinstance(raw_result.get("document"), dict) else {}
+    return raw_result.get(key) or metadata.get(key) or document.get(key)
+
+
+def format_document_lines_summary(lines: list[dict]) -> str:
+    if not lines:
+        return "Articles : aucun article trouvé."
+
+    formatted_lines = []
+
+    for line in lines[:8]:
+        product_name = line.get("product_name") or line.get("product") or line.get("name") or "Article"
+        quantity = line.get("quantity")
+        price = line.get("price_unit")
+        parts = [str(product_name)]
+
+        if quantity is not None:
+            parts.append(f"quantité {quantity}")
+
+        if price is not None:
+            parts.append(f"prix unitaire {price}")
+
+        formatted_lines.append("- " + " · ".join(parts))
+
+    remaining_count = len(lines) - len(formatted_lines)
+
+    if remaining_count > 0:
+        formatted_lines.append(f"- ... (+{remaining_count} lignes)")
+
+    return "Articles :\n" + "\n".join(formatted_lines)
+
+
+def focused_document_response_message(message: str, raw_result: dict) -> tuple[str | None, str | None]:
+    focus = detect_document_response_focus(message)
+
+    if not focus:
+        return None, None
+
+    if focus == "partner":
+        partner_name = (
+            raw_result.get("partner_name")
+            or raw_result.get("partner")
+            or _document_value(raw_result, "partner_name")
+            or _document_value(raw_result, "partner")
+        )
+        return f"{document_partner_label(raw_result, focus)} : {partner_name or 'non renseigné'}", focus
+
+    if focus == "status":
+        state = raw_result.get("state") or _document_value(raw_result, "state")
+        return f"Statut : {state or 'non renseigné'}", focus
+
+    if focus == "date":
+        date_value = raw_result.get("date") or _document_value(raw_result, "date")
+        return f"Date : {date_value or 'non renseignée'}", focus
+
+    if focus == "lines":
+        lines = raw_result.get("lines") or []
+        return format_document_lines_summary(lines), focus
+
+    return None, None
 
 
 def document_type_label(model_name: str | None):
@@ -1561,6 +1935,14 @@ def run(message: str):
     action = parsed_action.get("action")
     business_action = parsed_action.get("business_action") or business_action_for(action, action)
 
+    if (
+        action == "document_details"
+        and parsed_action.get("document_id") is not None
+        and parsed_action.get("needs_clarification")
+    ):
+        parsed_action["needs_clarification"] = False
+        parsed_action["clarification_reason"] = None
+
     if parsed_action.get("needs_clarification"):
         reason = parsed_action.get("clarification_reason")
         return build_needs_clarification_response(
@@ -1642,9 +2024,10 @@ def run(message: str):
         })
 
         return with_parser_debug({
-            "intent": "odoo",
+            "intent": parsed_action.get("intent") or "odoo_document_details",
             "agent": "odoo_agent",
             "risk": "low",
+            "risk_level": "low",
             "requires_approval": False,
             "approval_required": False,
             "status": "completed" if success else "failed",
@@ -1677,9 +2060,10 @@ def run(message: str):
         })
 
         return with_parser_debug({
-            "intent": "odoo",
+            "intent": parsed_action.get("intent") or "odoo_document_details",
             "agent": "odoo_agent",
             "risk": "low",
+            "risk_level": "low",
             "requires_approval": False,
             "approval_required": False,
             "status": "completed" if found else "not_found",
@@ -1710,9 +2094,10 @@ def run(message: str):
         })
 
         return with_parser_debug({
-            "intent": "odoo",
+            "intent": parsed_action.get("intent") or "odoo_document_details",
             "agent": "odoo_agent",
             "risk": "low",
+            "risk_level": "low",
             "requires_approval": False,
             "approval_required": False,
             "status": "completed" if found else "not_found",
@@ -1724,29 +2109,38 @@ def run(message: str):
 
     if action in {"search_document", "document_details"}:
         target_model = parsed_action.get("target_model")
+        document_id = parsed_action.get("document_id")
         document_query = (
             parsed_action.get("document_query")
             or parsed_action.get("record_query")
-            or message
+            or (f"ID {document_id}" if document_id is not None else message)
         )
         tool_name = search_document_tool_name(target_model)
 
-        if not tool_name:
+        if not tool_name and not (action == "document_details" and document_id is not None):
             return build_needs_clarification_response(
                 message,
                 parsed_action,
                 ["type de document"],
             )
 
-        if action == "document_details" or wants_document_details(message):
+        if action == "document_details" and document_id is not None and not target_model:
+            tool_name = "odoo_get_document_details_by_id"
+            raw_result = unwrap_tool_response(
+                execute_tool(tool_name, document_id=document_id)
+            )
+        elif action == "document_details" or wants_document_details(message):
             details_tool_name = document_details_tool_name(target_model)
             query_arg = document_details_query_arg(target_model)
 
             if details_tool_name and query_arg:
                 tool_name = details_tool_name
-                raw_result = unwrap_tool_response(
-                    execute_tool(tool_name, **{query_arg: document_query})
-                )
+                tool_kwargs = {query_arg: document_query}
+
+                if document_id is not None:
+                    tool_kwargs["document_id"] = document_id
+
+                raw_result = unwrap_tool_response(execute_tool(tool_name, **tool_kwargs))
             else:
                 raw_result = unwrap_tool_response(
                     execute_tool(tool_name, query=document_query)
@@ -1757,6 +2151,12 @@ def run(message: str):
             )
 
         found = bool(isinstance(raw_result, dict) and raw_result.get("found"))
+        ambiguous = bool(isinstance(raw_result, dict) and raw_result.get("ambiguous"))
+        focused_message, response_focus = (
+            focused_document_response_message(message, raw_result)
+            if found and not ambiguous
+            else (None, None)
+        )
 
         log_request({
             "event_type": "odoo_read",
@@ -1775,13 +2175,18 @@ def run(message: str):
         })
 
         return with_parser_debug({
-            "intent": "odoo",
+            "intent": parsed_action.get("intent") or "odoo_document_details",
             "agent": "odoo_agent",
             "risk": "low",
+            "risk_level": "low",
             "requires_approval": False,
             "approval_required": False,
             "status": "completed" if found else "not_found",
-            "message": "Document consulté avec succès." if found else "Document introuvable dans Odoo.",
+            "message": (
+                focused_message
+                or ("Document consulté avec succès." if found else "Document introuvable dans Odoo.")
+            ),
+            "response_focus": response_focus,
             "tool_used": tool_name,
             "data": raw_result,
             "result": raw_result,

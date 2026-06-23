@@ -645,3 +645,16 @@ def test_purchase_document_id_resolves_one_document():
     assert result["success"] is True
     assert result["record_id"] == 793
     assert result["document"] == "BC-BPP2600313"
+
+
+def test_read_document_details_by_id_resolves_purchase_order():
+    fake_models = DuplicatePurchaseReferenceModels()
+    connector = real_connector_with_models(fake_models)
+
+    result = connector.get_document_details_by_id(793)
+
+    assert result["success"] is True
+    assert result["found"] is True
+    assert result["model"] == "purchase.order"
+    assert result["record_id"] == 793
+    assert result["name"] == "BC-BPP2600313"

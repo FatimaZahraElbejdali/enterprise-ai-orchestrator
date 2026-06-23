@@ -22,3 +22,4 @@ tests/logs/
 .env.local
 .env.*
 !.env.example
+storage/

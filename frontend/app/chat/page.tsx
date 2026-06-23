@@ -61,7 +61,7 @@ type ChatResponse = {
 };
 
 export default function ChatPage() {
-  const [message, setMessage] = useState("Check stock for BACO CLEAN");
+  const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<ChatResponse | null>(null);
   const [error, setError] = useState("");
@@ -86,6 +86,7 @@ export default function ChatPage() {
         },
         body: JSON.stringify({
           message: cleanMessage,
+          session_id: "demo-session",
         }),
       });
 

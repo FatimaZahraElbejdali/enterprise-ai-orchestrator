@@ -60,6 +60,14 @@ DOCUMENT_DATE_FIELDS = {
 }
 
 
+DOCUMENT_MODEL_TO_TYPE = {
+    "sale.order": "sale_order",
+    "purchase.order": "purchase_order",
+    "account.move": "invoice",
+    "stock.picking": "delivery",
+}
+
+
 class OdooConnector:
     def __init__(self):
         self.url = os.getenv("ODOO_URL")
@@ -478,7 +486,13 @@ class OdooConnector:
             return {
                 "source": "mock_odoo",
                 "product": product_name,
+                "product_name": product_name,
                 "product_id": "MOCK-PROD-001",
+                "metadata": {
+                    "product_name": product_name,
+                    "product_id": "MOCK-PROD-001",
+                    "source": "mock_odoo",
+                },
                 "internal_reference": "MOCK-REF",
                 "stock_quantity": 42,
                 "forecast_quantity": 42,
@@ -503,11 +517,19 @@ class OdooConnector:
                 }
 
             product = resolved["product"]
+            product_name = product.get("name")
+            product_id = product.get("id")
 
             return {
                 "source": "real_odoo",
-                "product": product.get("name"),
-                "product_id": product.get("id"),
+                "product": product_name,
+                "product_name": product_name,
+                "product_id": product_id,
+                "metadata": {
+                    "product_name": product_name,
+                    "product_id": product_id,
+                    "source": "real_odoo",
+                },
                 "internal_reference": product.get("default_code") or "-",
                 "stock_quantity": product.get("qty_available"),
                 "forecast_quantity": product.get("virtual_available"),
@@ -1238,6 +1260,14 @@ class OdooConnector:
         ]
 
         header = self._format_document_candidate(model_name, document)
+        metadata = {
+            "document_name": header["name"],
+            "document_id": record_id,
+            "document_model": model_name,
+            "document_type": DOCUMENT_MODEL_TO_TYPE.get(model_name),
+            "partner_name": header["partner"],
+            "source": "real_odoo",
+        }
 
         return {
             "success": True,
@@ -1246,6 +1276,12 @@ class OdooConnector:
             "source": "real_odoo",
             "model": model_name,
             "record_id": record_id,
+            "document_name": header["name"],
+            "document_id": record_id,
+            "document_model": model_name,
+            "document_type": DOCUMENT_MODEL_TO_TYPE.get(model_name),
+            "partner_name": header["partner"],
+            "metadata": metadata,
             "document": header,
             "name": header["name"],
             "partner": header["partner"],
@@ -1256,17 +1292,68 @@ class OdooConnector:
             "message": "Document details read from Odoo.",
         }
 
-    def get_sale_order_details(self, order_query: str) -> dict:
-        return self._get_document_details("sale.order", order_query)
+    def get_sale_order_details(self, order_query: str = "", document_id: int | None = None) -> dict:
+        return self._get_document_details("sale.order", order_query, document_id=document_id)
 
-    def get_purchase_order_details(self, order_query: str) -> dict:
-        return self._get_document_details("purchase.order", order_query)
+    def get_purchase_order_details(self, order_query: str = "", document_id: int | None = None) -> dict:
+        return self._get_document_details("purchase.order", order_query, document_id=document_id)
 
-    def get_invoice_details(self, invoice_query: str) -> dict:
-        return self._get_document_details("account.move", invoice_query)
+    def get_invoice_details(self, invoice_query: str = "", document_id: int | None = None) -> dict:
+        return self._get_document_details("account.move", invoice_query, document_id=document_id)
 
-    def get_delivery_order_details(self, picking_query: str) -> dict:
-        return self._get_document_details("stock.picking", picking_query)
+    def get_delivery_order_details(self, picking_query: str = "", document_id: int | None = None) -> dict:
+        return self._get_document_details("stock.picking", picking_query, document_id=document_id)
+
+    def get_document_details_by_id(self, document_id: int) -> dict:
+        matches = []
+
+        for model_name in ["purchase.order", "sale.order", "account.move", "stock.picking"]:
+            details = self._get_document_details(
+                model_name,
+                "",
+                document_id=document_id,
+            )
+
+            if details.get("success") and details.get("found"):
+                matches.append(details)
+
+        if len(matches) == 1:
+            return matches[0]
+
+        if len(matches) > 1:
+            return {
+                "success": False,
+                "found": True,
+                "ambiguous": True,
+                "source": "real_odoo",
+                "model": "odoo.document",
+                "record_id": document_id,
+                "candidates": [
+                    {
+                        "model": item.get("model"),
+                        "record_id": item.get("record_id"),
+                        "name": item.get("name"),
+                        "partner": item.get("partner"),
+                        "state": item.get("state"),
+                        "date": item.get("date"),
+                    }
+                    for item in matches
+                ],
+                "lines": [],
+                "message": "Document ID matched multiple Odoo document models.",
+            }
+
+        return {
+            "success": False,
+            "found": False,
+            "ambiguous": False,
+            "source": "real_odoo",
+            "model": "odoo.document",
+            "record_id": document_id,
+            "candidates": [],
+            "lines": [],
+            "message": "No matching Odoo document found for this ID.",
+        }
 
     def _blocked_document_message(self, model_name: str, state: str):
         if model_name == "account.move" and state == "posted":

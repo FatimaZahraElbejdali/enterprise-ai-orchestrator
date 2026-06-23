@@ -41,7 +41,7 @@ def select_model(intent: str, risk_level: str = "low") -> dict:
     normalized_intent = intent.lower() if intent else "general"
     normalized_risk = risk_level.lower() if risk_level else "low"
 
-    if normalized_intent == "odoo":
+    if normalized_intent == "odoo" or normalized_intent.startswith("odoo_"):
         return {
             "provider": "mock",
             "model": "policy_engine",

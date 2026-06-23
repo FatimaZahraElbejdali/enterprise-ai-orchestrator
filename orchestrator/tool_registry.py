@@ -101,6 +101,12 @@ TOOLS = {
         "risk_level": "low",
         "requires_approval": False,
     },
+    "odoo_get_document_details_by_id": {
+        "description": "Read Odoo business document details and lines by exact numeric ID.",
+        "system": "odoo",
+        "risk_level": "low",
+        "requires_approval": False,
+    },
     "odoo_update_sale_order_line": {
         "description": "Update a sale order line after approval.",
         "system": "odoo",
