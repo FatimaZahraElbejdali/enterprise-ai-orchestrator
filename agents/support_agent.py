@@ -68,6 +68,15 @@ def _structured_response(
     }
 
 
+def _support_tool_for_message(message: str, default: str = "support_knowledge_base"):
+    text = message.lower()
+
+    if "printer" in text or "imprimante" in text:
+        return "diagnose_printer_issue"
+
+    return default
+
+
 def is_odoo_access_issue(message: str):
     text = message.lower().replace("’", "'")
 
@@ -280,6 +289,7 @@ def _openai_support_response(message: str, action: str):
     )
     result["response"] = response["content"]
     result["message"] = response["content"]
+    result["tool_used"] = _support_tool_for_message(message)
     return result
 
 
@@ -298,7 +308,6 @@ def run(message: str):
         escalation=escalation,
     )
 
-    if "printer" in message.lower() or "imprimante" in message.lower():
-        result["tool_used"] = "diagnose_printer_issue"
+    result["tool_used"] = _support_tool_for_message(message)
 
     return result

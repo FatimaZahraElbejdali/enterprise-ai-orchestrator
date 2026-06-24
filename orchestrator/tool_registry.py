@@ -155,6 +155,42 @@ TOOLS = {
         "risk_level": "low",
         "requires_approval": False,
     },
+    "check_ram_usage": {
+        "description": "Read safe demo RAM usage for the orchestrator server.",
+        "system": "server",
+        "risk_level": "low",
+        "requires_approval": False,
+    },
+    "check_cpu_usage": {
+        "description": "Read safe demo CPU usage for the orchestrator server.",
+        "system": "server",
+        "risk_level": "low",
+        "requires_approval": False,
+    },
+    "check_disk_usage": {
+        "description": "Read safe demo disk usage for the orchestrator server.",
+        "system": "server",
+        "risk_level": "low",
+        "requires_approval": False,
+    },
+    "check_server_status": {
+        "description": "Read safe demo status and uptime for the orchestrator server.",
+        "system": "server",
+        "risk_level": "low",
+        "requires_approval": False,
+    },
+    "check_service_status": {
+        "description": "Read safe demo backend/frontend service status.",
+        "system": "server",
+        "risk_level": "low",
+        "requires_approval": False,
+    },
+    "server_diagnostic_summary": {
+        "description": "Read safe demo CPU, RAM, disk, uptime, and service summary.",
+        "system": "server",
+        "risk_level": "low",
+        "requires_approval": False,
+    },
 }
 
 

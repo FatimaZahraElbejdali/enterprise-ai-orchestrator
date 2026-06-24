@@ -1,4 +1,7 @@
-from orchestrator.classifier_router import classify_message
+from orchestrator.classifier_router import (
+    apply_backend_safety_overrides,
+    classify_message,
+)
 
 from orchestrator.model_router import select_model
 from orchestrator.risk import classify_risk, requires_approval_for_risk
@@ -106,6 +109,80 @@ AGENT_RUNNERS = {
 }
 
 
+def _blocked_security_response(message: str, classification: dict):
+    reason = classification.get("reason") or "Backend safety policy blocked this request."
+    intent = classification.get("intent", "sensitive_secret_request")
+
+    safe_message = (
+        "Je ne peux pas aider à afficher, extraire ou exécuter cette demande sensible. "
+        "L’orchestrateur a bloqué la requête pour protéger les secrets, les accès et les systèmes."
+    )
+
+    if intent == "destructive_operation_blocked":
+        safe_message = (
+            "Je ne peux pas exécuter ni préparer cette opération destructive. "
+            "L’orchestrateur a bloqué la requête afin d’éviter une action dangereuse ou irréversible."
+        )
+
+    agent_result = {
+        "agent": "security_agent",
+        "parser_source": "backend_safety_override",
+        "parsed_action": "block_request",
+        "tool_used": "none",
+        "status": "blocked",
+        "result": {
+            "blocked": True,
+            "reason": reason,
+        },
+        "message": safe_message,
+        "response": safe_message,
+    }
+
+    return {
+        "intent": intent,
+        "agent": "security_agent",
+        "risk_level": "blocked",
+        "risk": "blocked",
+        "classification_confidence": classification.get("confidence", "high"),
+        "selected_agent": "security_agent",
+        "selected_model": {
+            "provider": "local_fallback",
+            "model": "backend_safety_policy",
+            "reason": "Backend safety override blocked the request before tool execution.",
+        },
+        "execution_plan": [
+            "apply_backend_safety_policy",
+            "block_sensitive_or_dangerous_request",
+            "return_safe_explanation",
+        ],
+        "approval_required": False,
+        "requires_approval": False,
+        "approval_status": "not_required",
+        "approval": None,
+        "agent_result": agent_result,
+        "tool_used": "none",
+        "result": agent_result["result"],
+        "response": {
+            "provider": "local_fallback",
+            "model": "backend_safety_policy",
+            "success": True,
+            "content": safe_message,
+            "error": None,
+            "agent_result": agent_result,
+        },
+        "message": safe_message,
+        "status": "blocked",
+        "parser_source": "backend_safety_override",
+        "parsed_action": "block_request",
+        "classifier_source": classification.get("classifier_source"),
+        "classifier_error": classification.get("classifier_error"),
+        "action": "block_request",
+        "target_system": "security",
+        "entities": classification.get("entities", {}),
+        "reason": reason,
+    }
+
+
 def _fallback_response(model_route: dict, agent_result: dict | str):
     reason = model_route.get("reason", "OpenAI is not configured.")
 
@@ -181,13 +258,14 @@ def run_selected_agent(selected_agent: str, message: str):
     }
 
 
-def process_request(message: str):
+def process_request(message: str, classification: dict | None = None):
     if not message or not message.strip():
         return {
             "error": "Message cannot be empty"
         }
 
-    classification = classify_message(message)
+    classification = classification or classify_message(message)
+    classification = apply_backend_safety_overrides(message, classification) or classification
 
     intent = classification.get("intent", "general")
     selected_agent = classification.get("selected_agent", "general_agent")
@@ -195,9 +273,32 @@ def process_request(message: str):
     classifier_source = classification.get("classifier_source")
     classifier_error = classification.get("classifier_error")
 
-    classification_failed = classifier_source == "gemini_failed"
+    classification_failed = (
+        intent == "classification_failed"
+        or classifier_source in {"gemini_failed", "openai_failed"}
+    )
 
-    risk_level = classify_risk(message)
+    risk_level = classification.get("risk_level") or classify_risk(message)
+
+    if risk_level == "blocked" or selected_agent == "security_agent" and classification.get("action") == "block_request":
+        result = _blocked_security_response(message, classification)
+        log_request({
+            "user_message": message,
+            "intent": result["intent"],
+            "risk_level": "blocked",
+            "classification_confidence": confidence,
+            "selected_agent": "security_agent",
+            "selected_model": result["selected_model"],
+            "execution_plan": result["execution_plan"],
+            "classifier_source": classifier_source,
+            "classifier_error": classifier_error,
+            "approval_required": False,
+            "approval_status": "not_required",
+            "approval_id": None,
+            "agent_result": result["agent_result"],
+        })
+        return result
+
     selected_model = select_model(intent, risk_level)
     execution_plan = create_plan(intent, message, risk_level)
 
@@ -315,5 +416,18 @@ Provide a concise final response for the user.
         "parser_source": agent_parser_source,
         "parsed_action": agent_parsed_action,
         "classifier_source": classifier_source,
-        "classifier_error": classifier_error
+        "classifier_error": classifier_error,
+        "action": classification.get("action"),
+        "target_system": classification.get("target_system"),
+        "entities": classification.get("entities", {}),
+        "reason": classification.get("reason"),
+        "status": (
+            "pending_approval"
+            if approval_required
+            else (
+                agent_result.get("status")
+                if isinstance(agent_result, dict) and agent_result.get("status")
+                else "completed"
+            )
+        ),
     }

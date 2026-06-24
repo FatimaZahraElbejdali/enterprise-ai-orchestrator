@@ -26,6 +26,7 @@ from models.openai_adapter import (
     is_openai_configured,
 )
 from orchestrator.graph import process_request
+from orchestrator.classifier_router import classify_message
 from orchestrator.audit import log_request
 from orchestrator.approval_store import (
     attach_execution_result,
@@ -828,17 +829,23 @@ def chat(request: ChatRequest):
                 },
             )
 
-    if is_support_request(enriched_message):
+    primary_classification = classify_message(
+        enriched_message,
+        context_memory=memory_context,
+    )
+    primary_agent = primary_classification.get("selected_agent")
+
+    if primary_agent == "support_agent":
         result = build_direct_support_response(enriched_message)
         remember_chat_result(session_id, result)
         return result
 
-    if is_server_request(enriched_message):
+    if primary_agent == "server_agent":
         result = build_direct_server_response(enriched_message)
         remember_chat_result(session_id, result)
         return result
 
-    if is_odoo_related(enriched_message):
+    if primary_agent == "odoo_agent":
         odoo_result = run_odoo_agent(enriched_message)
 
         if isinstance(odoo_result, dict):
@@ -858,7 +865,7 @@ def chat(request: ChatRequest):
         remember_chat_result(session_id, odoo_result)
         return odoo_result
 
-    result = process_request(enriched_message)
+    result = process_request(enriched_message, classification=primary_classification)
     remember_chat_result(session_id, result)
     return result
 

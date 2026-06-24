@@ -92,6 +92,98 @@ class InternalServerConnector:
             "message": f"Fichier {path.name} lu depuis le stockage interne.",
         }
 
+    def demo_server_metrics(self):
+        mode = "Mode démonstration — serveur local de l’orchestrateur"
+
+        return {
+            "success": True,
+            "mode": mode,
+            "cpu_usage": "34%",
+            "ram_usage": "61%",
+            "disk_usage": "72%",
+            "uptime": "2 jours 4 heures",
+            "backend_status": "accessible",
+            "frontend_status": "accessible",
+            "services": [
+                {"name": "backend", "status": "actif"},
+                {"name": "frontend", "status": "actif"},
+                {"name": "orchestrator_api", "status": "actif"},
+            ],
+        }
+
+    def check_ram_usage(self):
+        metrics = self.demo_server_metrics()
+        return {
+            **metrics,
+            "action": "check_ram_usage",
+            "message": (
+                f"{metrics['mode']} — utilisation RAM actuelle: "
+                f"{metrics['ram_usage']}."
+            ),
+        }
+
+    def check_cpu_usage(self):
+        metrics = self.demo_server_metrics()
+        return {
+            **metrics,
+            "action": "check_cpu_usage",
+            "message": (
+                f"{metrics['mode']} — utilisation CPU actuelle: "
+                f"{metrics['cpu_usage']}."
+            ),
+        }
+
+    def check_disk_usage(self):
+        metrics = self.demo_server_metrics()
+        return {
+            **metrics,
+            "action": "check_disk_usage",
+            "message": (
+                f"{metrics['mode']} — espace disque utilisé: "
+                f"{metrics['disk_usage']}."
+            ),
+        }
+
+    def check_server_status(self):
+        metrics = self.demo_server_metrics()
+        return {
+            **metrics,
+            "action": "check_server_status",
+            "status": "healthy",
+            "message": (
+                f"{metrics['mode']} — serveur actif, backend accessible, "
+                "frontend accessible."
+            ),
+        }
+
+    def check_service_status(self):
+        metrics = self.demo_server_metrics()
+        active_services = ", ".join(
+            service["name"]
+            for service in metrics["services"]
+            if service["status"] == "actif"
+        )
+        return {
+            **metrics,
+            "action": "check_service_status",
+            "message": (
+                f"{metrics['mode']} — services actifs: {active_services}."
+            ),
+        }
+
+    def server_diagnostic_summary(self):
+        metrics = self.demo_server_metrics()
+        return {
+            **metrics,
+            "action": "server_diagnostic_summary",
+            "status": "healthy",
+            "message": (
+                f"{metrics['mode']} — diagnostic OK: CPU {metrics['cpu_usage']}, "
+                f"RAM {metrics['ram_usage']}, disque {metrics['disk_usage']}, "
+                f"uptime {metrics['uptime']}."
+            ),
+        }
+
     def _blocked_result(self, filename: str, message: str):
         return {
             "success": False,

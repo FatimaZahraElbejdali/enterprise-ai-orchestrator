@@ -1,7 +1,9 @@
 from integrations.odoo_connector import OdooConnector
+from integrations.internal_server_connector import InternalServerConnector
 from orchestrator.tool_registry import get_tool_metadata
 
 odoo = OdooConnector()
+internal_server = InternalServerConnector()
 
 
 def _without_none(values: dict):
@@ -160,6 +162,24 @@ def execute_tool(tool_name: str, **kwargs):
 
     elif tool_name == "odoo_test_connection":
         result = odoo.test_connection()
+
+    elif tool_name == "check_ram_usage":
+        result = internal_server.check_ram_usage()
+
+    elif tool_name == "check_cpu_usage":
+        result = internal_server.check_cpu_usage()
+
+    elif tool_name == "check_disk_usage":
+        result = internal_server.check_disk_usage()
+
+    elif tool_name == "check_server_status":
+        result = internal_server.check_server_status()
+
+    elif tool_name == "check_service_status":
+        result = internal_server.check_service_status()
+
+    elif tool_name == "server_diagnostic_summary":
+        result = internal_server.server_diagnostic_summary()
 
     else:
         return {

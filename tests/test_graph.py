@@ -70,7 +70,7 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(result["selected_agent"], "support_agent")
         self.assertEqual(result["risk"], "low")
         self.assertEqual(result["risk_level"], "low")
-        self.assertEqual(result["tool_used"], "support_knowledge_base")
+        self.assertEqual(result["tool_used"], "diagnose_printer_issue")
         self.assertIn("message", result)
         self.assertTrue(len(result["message"]) > 0)
 
@@ -93,7 +93,7 @@ class GraphTests(unittest.TestCase):
         self.assertTrue(result["approval_required"])
         self.assertEqual(result["approval_status"], "pending")
 
-    def test_graph_high_risk_keeps_odoo_on_policy_engine_and_requires_approval(self):
+    def test_graph_destructive_odoo_request_is_blocked_by_backend_policy(self):
         classification = {
             "intent": "odoo",
             "selected_agent": "odoo_agent",
@@ -108,11 +108,13 @@ class GraphTests(unittest.TestCase):
                 with patch("orchestrator.graph.log_request"):
                     result = process_request("Delete this invoice")
 
-        self.assertEqual(result["risk_level"], "high")
-        self.assertEqual(result["selected_model"]["provider"], "mock")
-        self.assertEqual(result["selected_model"]["model"], "policy_engine")
-        self.assertTrue(result["approval_required"])
-        self.assertEqual(result["approval_status"], "pending")
+        self.assertEqual(result["risk_level"], "blocked")
+        self.assertEqual(result["selected_agent"], "security_agent")
+        self.assertEqual(result["selected_model"]["provider"], "local_fallback")
+        self.assertEqual(result["selected_model"]["model"], "backend_safety_policy")
+        self.assertFalse(result["approval_required"])
+        self.assertEqual(result["approval_status"], "not_required")
+        self.assertEqual(result["status"], "blocked")
 
     def test_graph_low_risk_does_not_require_approval(self):
         classification = {

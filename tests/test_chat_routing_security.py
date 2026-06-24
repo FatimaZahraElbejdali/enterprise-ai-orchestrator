@@ -268,9 +268,10 @@ def test_internal_server_env_path_is_blocked(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["intent"] == "server"
-    assert data["agent"] == "server_agent"
-    assert data["parsed_action"] == "blocked_sensitive_path"
+    assert data["intent"] == "sensitive_secret_request"
+    assert data["agent"] == "security_agent"
+    assert data["parsed_action"] == "block_request"
+    assert data["risk_level"] == "blocked"
     assert data["approval_required"] is False
 
 
