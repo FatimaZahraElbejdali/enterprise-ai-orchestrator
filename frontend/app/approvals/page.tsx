@@ -2,7 +2,17 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { API_BASE_URL } from "@/lib/api";
+import {
+  ACCESS_DENIED_MESSAGE,
+  API_BASE_URL,
+  AuthUser,
+  authHeaders,
+  clearAuth,
+  getStoredUser,
+  handleAuthFailure,
+  hasAnyPermission,
+  requireAuth,
+} from "@/lib/api";
 
 type ExecutionResult = {
   success?: boolean;
@@ -75,18 +85,34 @@ export default function ApprovalsPage() {
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [currentUser] = useState<AuthUser | null>(() => getStoredUser());
+  const [error, setError] = useState("");
+  const accessDenied = !hasAnyPermission(currentUser, [
+    "all",
+    "view_approvals",
+    "approve_odoo_actions",
+  ]);
+
+  function handleLogout() {
+    clearAuth();
+    window.location.href = "/login";
+  }
 
   async function loadApprovals() {
     setLoading(true);
+    setError("");
 
     try {
       const res = await fetch(`${API_BASE_URL}/approvals`, {
         cache: "no-store",
+        headers: authHeaders(),
       });
 
       if (res.ok) {
         const data = await res.json();
         setApprovals(Array.isArray(data) ? data : []);
+      } else {
+        setError(handleAuthFailure(res.status) || ACCESS_DENIED_MESSAGE);
       }
     } finally {
       setLoading(false);
@@ -99,10 +125,13 @@ export default function ApprovalsPage() {
     try {
       const res = await fetch(`${API_BASE_URL}/approvals/${id}/${decision}`, {
         method: "POST",
+        headers: authHeaders(),
       });
 
       if (res.ok) {
         await loadApprovals();
+      } else {
+        setError(handleAuthFailure(res.status) || ACCESS_DENIED_MESSAGE);
       }
     } finally {
       setActionLoading(null);
@@ -110,6 +139,14 @@ export default function ApprovalsPage() {
   }
 
   useEffect(() => {
+    if (!requireAuth()) return;
+
+    const user = getStoredUser();
+
+    if (!hasAnyPermission(user, ["all", "view_approvals", "approve_odoo_actions"])) {
+      return;
+    }
+
     const timer = window.setTimeout(() => {
       void loadApprovals();
     }, 0);
@@ -151,15 +188,18 @@ export default function ApprovalsPage() {
             <Link href="/approvals" className="active">
               Validations
             </Link>
-            <Link href="/logs">Audit Logs</Link>
+            {hasAnyPermission(currentUser, ["all", "view_audit_logs"]) && (
+              <Link href="/logs">Journaux d’audit</Link>
+            )}
           </nav>
         </div>
 
         <div className="sidebarFooter">
-          <p>Contrôle humain</p>
-          <span>
-            Les actions sensibles sont bloquées jusqu’à validation.
-          </span>
+          <p>{currentUser?.email || "Utilisateur connecté"}</p>
+          <span>Rôle : {currentUser?.role_label || "Lecture seule"}</span>
+          <button className="logoutButton" type="button" onClick={handleLogout}>
+            Se déconnecter
+          </button>
         </div>
       </aside>
 
@@ -185,6 +225,12 @@ export default function ApprovalsPage() {
           <Metric label="Rejetées" value={rejectedCount} tone="danger" />
         </section>
 
+        {(error || accessDenied) && (
+          <div className="errorBox">
+            {accessDenied ? ACCESS_DENIED_MESSAGE : error}
+          </div>
+        )}
+
         <section className="listPanel">
           <div className="panelHeader">
             <div>
@@ -193,15 +239,16 @@ export default function ApprovalsPage() {
             </div>
           </div>
 
-          {loading && <p className="emptyText">Chargement...</p>}
+          {loading && !accessDenied && <p className="emptyText">Chargement...</p>}
 
-          {!loading && approvals.length === 0 && (
+          {!loading && !accessDenied && approvals.length === 0 && (
             <p className="emptyText">
               Aucune demande de validation pour le moment.
             </p>
           )}
 
           {!loading &&
+            !accessDenied &&
             approvals.map((approval) => {
               const isPending = approval.status === "pending";
 

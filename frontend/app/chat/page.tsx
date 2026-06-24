@@ -2,7 +2,17 @@
 
 import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { API_BASE_URL } from "@/lib/api";
+import {
+  ACCESS_DENIED_MESSAGE,
+  API_BASE_URL,
+  AuthUser,
+  authHeaders,
+  clearAuth,
+  getStoredUser,
+  handleAuthFailure,
+  hasAnyPermission,
+  requireAuth,
+} from "@/lib/api";
 
 type LooseRecord = Record<string, unknown>;
 
@@ -65,7 +75,17 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<ChatResponse | null>(null);
   const [error, setError] = useState("");
+  const [currentUser] = useState<AuthUser | null>(() => getStoredUser());
   const resultRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!requireAuth()) return;
+  }, []);
+
+  function handleLogout() {
+    clearAuth();
+    window.location.href = "/login";
+  }
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -83,6 +103,7 @@ export default function ChatPage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...authHeaders(),
         },
         body: JSON.stringify({
           message: cleanMessage,
@@ -91,7 +112,8 @@ export default function ChatPage() {
       });
 
       if (!res.ok) {
-        throw new Error("Erreur lors de l’appel au backend.");
+        const authMessage = handleAuthFailure(res.status);
+        throw new Error(authMessage || "Erreur lors de l’appel au backend.");
       }
 
       const data = await res.json();
@@ -168,14 +190,21 @@ export default function ChatPage() {
               Console Chat
             </Link>
             <Link href="/odoo">Odoo</Link>
-            <Link href="/approvals">Validations</Link>
-            <Link href="/logs">Audit Logs</Link>
+            {hasAnyPermission(currentUser, ["all", "view_approvals", "approve_odoo_actions"]) && (
+              <Link href="/approvals">Validations</Link>
+            )}
+            {hasAnyPermission(currentUser, ["all", "view_audit_logs"]) && (
+              <Link href="/logs">Journaux d’audit</Link>
+            )}
           </nav>
         </div>
 
         <div className="sidebarFooter">
-          <p>Mode démo sécurisé</p>
-          <span>Aucune action sensible n’est exécutée sans validation.</span>
+          <p>{currentUser?.email || "Utilisateur connecté"}</p>
+          <span>Rôle : {currentUser?.role_label || "Lecture seule"}</span>
+          <button className="logoutButton" type="button" onClick={handleLogout}>
+            Se déconnecter
+          </button>
         </div>
       </aside>
 
@@ -226,7 +255,11 @@ export default function ChatPage() {
           </form>
         </section>
 
-        {error && <div className="errorBox">{error}</div>}
+        {error && (
+          <div className="errorBox">
+            {error === ACCESS_DENIED_MESSAGE ? ACCESS_DENIED_MESSAGE : error}
+          </div>
+        )}
 
         {response && (
           <>
@@ -570,6 +603,17 @@ export default function ChatPage() {
           color: #94a3b8;
           font-size: 12px;
           line-height: 1.5;
+        }
+
+        .logoutButton {
+          margin-top: 12px;
+          width: 100%;
+          min-height: 38px;
+          border: 1px solid rgba(255, 255, 255, 0.22);
+          background: transparent;
+          color: #ffffff;
+          font-weight: 800;
+          cursor: pointer;
         }
 
         .content {

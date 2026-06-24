@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -28,6 +28,18 @@ from models.openai_adapter import (
 from orchestrator.graph import process_request
 from orchestrator.classifier_router import classify_message
 from orchestrator.audit import log_request
+from orchestrator.auth import (
+    ACCESS_DENIED_MESSAGE,
+    INVALID_CREDENTIALS_MESSAGE,
+    access_denied_payload,
+    authenticate_demo_user,
+    check_chat_permission,
+    get_current_user,
+    require_any_permission,
+    require_permission,
+    reset_audit_user_context,
+    set_audit_user_context,
+)
 from orchestrator.approval_store import (
     attach_execution_result,
     get_approvals,
@@ -85,6 +97,11 @@ class ChatRequest(BaseModel):
 
 class AITestRequest(BaseModel):
     message: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 
 
 DocumentEndpointType = Literal[
@@ -249,6 +266,22 @@ def remember_chat_result(session_id: str, result):
             "updated_memory_context": conversation_memory.get_safe_context(session_id),
         },
     )
+
+
+def attach_auth_metadata(result: dict, current_user: dict, permission_decision: str):
+    if not isinstance(result, dict):
+        return result
+
+    result.setdefault("permission_decision", permission_decision)
+    result.setdefault(
+        "user",
+        {
+            "email": current_user.get("email"),
+            "role": current_user.get("role"),
+            "role_label": current_user.get("role_label"),
+        },
+    )
+    return result
 
 
 def normalize_document_endpoint_response(
@@ -745,8 +778,33 @@ def ai_test(request: AITestRequest):
     return response
 
 
+@app.post("/auth/login")
+def auth_login(request: LoginRequest):
+    result = authenticate_demo_user(request.email, request.password)
+
+    if result is None:
+        raise HTTPException(
+            status_code=401,
+            detail=INVALID_CREDENTIALS_MESSAGE,
+        )
+
+    return result
+
+
 @app.post("/chat")
-def chat(request: ChatRequest):
+def chat(
+    request: ChatRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    audit_token = set_audit_user_context(current_user, "allowed")
+
+    try:
+        return _authenticated_chat(request, current_user)
+    finally:
+        reset_audit_user_context(audit_token)
+
+
+def _authenticated_chat(request: ChatRequest, current_user: dict):
     original_message = request.message
     message = original_message.strip()
     session_id = request.session_id or "demo-session"
@@ -832,16 +890,42 @@ def chat(request: ChatRequest):
     primary_classification = classify_message(
         enriched_message,
         context_memory=memory_context,
+        user_permissions={
+            "email": current_user.get("email"),
+            "role": current_user.get("role"),
+            "permissions": current_user.get("permissions", []),
+        },
     )
     primary_agent = primary_classification.get("selected_agent")
 
+    if not check_chat_permission(current_user, enriched_message, primary_classification):
+        denied_result = access_denied_payload(primary_classification, current_user)
+        log_request({
+            "event_type": "permission_denied",
+            "title": "Accès refusé",
+            "system": primary_classification.get("target_system", "orchestrator"),
+            "agent": primary_agent or "orchestrator",
+            "status": "denied",
+            "risk": primary_classification.get("risk_level", "low"),
+            "approval_status": "not_required",
+            "permission_decision": "denied",
+            "user_message": enriched_message,
+            "intent": primary_classification.get("intent"),
+            "action": primary_classification.get("action"),
+            "message": ACCESS_DENIED_MESSAGE,
+        })
+        remember_chat_result(session_id, denied_result)
+        return denied_result
+
     if primary_agent == "support_agent":
         result = build_direct_support_response(enriched_message)
+        result = attach_auth_metadata(result, current_user, "allowed")
         remember_chat_result(session_id, result)
         return result
 
     if primary_agent == "server_agent":
         result = build_direct_server_response(enriched_message)
+        result = attach_auth_metadata(result, current_user, "allowed")
         remember_chat_result(session_id, result)
         return result
 
@@ -862,10 +946,24 @@ def chat(request: ChatRequest):
                 "result": odoo_result.get("result") or odoo_result.get("data"),
             })
 
+        odoo_result = attach_auth_metadata(
+            odoo_result,
+            current_user,
+            "requires_approval"
+            if isinstance(odoo_result, dict) and odoo_result.get("approval_required")
+            else "allowed",
+        )
         remember_chat_result(session_id, odoo_result)
         return odoo_result
 
     result = process_request(enriched_message, classification=primary_classification)
+    result = attach_auth_metadata(
+        result,
+        current_user,
+        "requires_approval"
+        if isinstance(result, dict) and result.get("approval_required")
+        else "allowed",
+    )
     remember_chat_result(session_id, result)
     return result
 
@@ -881,7 +979,8 @@ def debug_routes():
 
 
 @app.get("/logs")
-def get_logs():
+def get_logs(current_user: dict = Depends(get_current_user)):
+    require_permission(current_user, "view_audit_logs")
     log_path = Path("logs/audit_log.jsonl")
 
     if not log_path.exists():
@@ -918,12 +1017,26 @@ def get_logs():
 
 
 @app.get("/approvals")
-def approvals():
+def approvals(current_user: dict = Depends(get_current_user)):
+    require_any_permission(current_user, {"view_approvals", "approve_odoo_actions"})
     return get_approvals()
 
 
 @app.post("/approvals/{approval_id}/approve")
-def approve_approval(approval_id: str):
+def approve_approval(
+    approval_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    require_permission(current_user, "approve_odoo_actions")
+    audit_token = set_audit_user_context(current_user, "allowed")
+
+    try:
+        return _approve_approval(approval_id)
+    finally:
+        reset_audit_user_context(audit_token)
+
+
+def _approve_approval(approval_id: str):
     current_approval = next(
         (
             item
@@ -936,7 +1049,7 @@ def approve_approval(approval_id: str):
     if current_approval is None:
         raise HTTPException(
             status_code=404,
-            detail="Approval not found",
+            detail="Validation introuvable.",
         )
 
     if current_approval.get("status") == "approved" and current_approval.get("executed"):
@@ -947,7 +1060,7 @@ def approve_approval(approval_id: str):
     if approval is None:
         raise HTTPException(
             status_code=404,
-            detail="Approval not found",
+            detail="Validation introuvable.",
         )
 
     log_request({
@@ -1079,13 +1192,26 @@ def approve_approval(approval_id: str):
 
 
 @app.post("/approvals/{approval_id}/reject")
-def reject_approval(approval_id: str):
+def reject_approval(
+    approval_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    require_permission(current_user, "approve_odoo_actions")
+    audit_token = set_audit_user_context(current_user, "allowed")
+
+    try:
+        return _reject_approval(approval_id)
+    finally:
+        reset_audit_user_context(audit_token)
+
+
+def _reject_approval(approval_id: str):
     approval = update_approval_status(approval_id, "rejected")
 
     if approval is None:
         raise HTTPException(
             status_code=404,
-            detail="Approval not found",
+            detail="Validation introuvable.",
         )
 
     log_request({
@@ -1109,32 +1235,65 @@ def reject_approval(approval_id: str):
 
 
 @app.get("/odoo/status")
-def odoo_status():
+def odoo_status(current_user: dict = Depends(get_current_user)):
+    require_any_permission(
+        current_user,
+        {"view_odoo_products", "view_odoo_documents", "view_limited_odoo_info"},
+    )
     return odoo.test_connection()
 
 
 @app.get("/odoo/stock/{product_name}")
-def odoo_stock(product_name: str):
+def odoo_stock(
+    product_name: str,
+    current_user: dict = Depends(get_current_user),
+):
+    require_any_permission(
+        current_user,
+        {"view_odoo_products", "view_limited_odoo_info"},
+    )
     return odoo.check_stock(product_name)
 
 
 @app.get("/odoo/product/{product_name}")
-def odoo_product(product_name: str):
+def odoo_product(
+    product_name: str,
+    current_user: dict = Depends(get_current_user),
+):
+    require_any_permission(
+        current_user,
+        {"view_odoo_products", "view_limited_odoo_info"},
+    )
     return odoo.check_stock(product_name)
 
 
 @app.get("/odoo/product-search/{query}")
-def odoo_product_search(query: str):
+def odoo_product_search(
+    query: str,
+    current_user: dict = Depends(get_current_user),
+):
+    require_any_permission(
+        current_user,
+        {"view_odoo_products", "view_limited_odoo_info"},
+    )
     return odoo.search_product_templates_for_debug(query)
 
 
 @app.get("/odoo/product-by-id/{product_id}")
-def odoo_product_by_id(product_id: int):
+def odoo_product_by_id(
+    product_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    require_any_permission(
+        current_user,
+        {"view_odoo_products", "view_limited_odoo_info"},
+    )
     return odoo.get_product_template_by_id(product_id)
 
 
 @app.get("/odoo/analytic-fields")
-def odoo_analytic_fields():
+def odoo_analytic_fields(current_user: dict = Depends(get_current_user)):
+    require_any_permission(current_user, {"view_odoo_products", "request_odoo_write"})
     return odoo.get_analytic_boolean_fields()
 
 
@@ -1142,7 +1301,12 @@ def odoo_analytic_fields():
 def odoo_document_search(
     document_type: DocumentEndpointType = Query(..., alias="type"),
     query: str = Query(..., min_length=1),
+    current_user: dict = Depends(get_current_user),
 ):
+    require_any_permission(
+        current_user,
+        {"view_odoo_documents", "view_limited_odoo_info"},
+    )
     result = dispatch_document_search(document_type, query)
     return normalize_document_endpoint_response(
         document_type,
@@ -1156,6 +1320,11 @@ def odoo_document_search(
 def odoo_document_details(
     document_type: DocumentEndpointType = Query(..., alias="type"),
     query: str = Query(..., min_length=1),
+    current_user: dict = Depends(get_current_user),
 ):
+    require_any_permission(
+        current_user,
+        {"view_odoo_documents", "view_limited_odoo_info"},
+    )
     result = dispatch_document_details(document_type, query)
     return normalize_document_endpoint_response(document_type, query, result)

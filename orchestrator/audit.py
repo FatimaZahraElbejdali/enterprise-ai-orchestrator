@@ -3,6 +3,8 @@ import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 
+from orchestrator.auth import get_audit_user_context
+
 LOG_PATH = Path("logs/audit_log.jsonl")
 
 
@@ -12,6 +14,7 @@ def _utc_timestamp():
 
 def log_request(data: dict):
     LOG_PATH.parent.mkdir(exist_ok=True)
+    audit_user_context = get_audit_user_context() or {}
 
     if not isinstance(data, dict):
         data = {
@@ -30,6 +33,7 @@ def log_request(data: dict):
         "status": data.get("status", "logged"),
         "risk": data.get("risk", "low"),
         "approval_status": data.get("approval_status", "not_required"),
+        **audit_user_context,
         **data,
     }
 

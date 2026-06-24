@@ -5,6 +5,7 @@ from app import app
 import agents.odoo_agent as odoo_agent_module
 from agents.odoo_agent import parse_odoo_action_deterministic
 from orchestrator.classifier_router import classify_message
+from tests.auth_helpers import auth_headers
 
 
 client = TestClient(app)
@@ -355,6 +356,7 @@ def test_chat_routes_document_id_details_to_odoo(monkeypatch):
     response = client.post(
         "/chat",
         json={"message": "Montre-moi les détails du document ID 793"},
+        headers=auth_headers("odoo.manager@company.local"),
     )
 
     assert response.status_code == 200
@@ -399,6 +401,7 @@ def test_chat_routes_purchase_order_reference_to_odoo(monkeypatch):
     response = client.post(
         "/chat",
         json={"message": "Cherche le bon de commande fournisseur BC-BPP2600313"},
+        headers=auth_headers("odoo.manager@company.local"),
     )
 
     assert response.status_code == 200

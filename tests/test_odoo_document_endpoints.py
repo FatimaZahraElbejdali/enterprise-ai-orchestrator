@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 import app as app_module
+from tests.auth_helpers import auth_headers
 
 
 def test_document_routes_are_in_openapi_schema():
@@ -46,6 +47,7 @@ def test_document_search_endpoint_dispatches_and_normalizes(monkeypatch):
             "type": "invoice",
             "query": "INV/2026/001",
         },
+        headers=auth_headers("odoo.manager@company.local"),
     )
 
     assert response.status_code == 200
@@ -107,6 +109,7 @@ def test_document_details_endpoint_includes_lines(monkeypatch):
             "type": "sale_order",
             "query": "S00045",
         },
+        headers=auth_headers("odoo.manager@company.local"),
     )
 
     assert response.status_code == 200

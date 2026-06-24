@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from agents.odoo_agent import run as run_odoo_agent
 from app import app
 from orchestrator.approval_store import create_approval, get_approvals
+from tests.auth_helpers import auth_headers
 
 
 def parsed_price_action(record_query="BACO CLEAN", new_value=25.0):
@@ -245,7 +246,10 @@ def test_approve_change_price_executes_tool_and_stores_result(monkeypatch, tmp_p
     monkeypatch.setattr("app.log_request", lambda data: None)
 
     client = TestClient(app)
-    response = client.post(f"/approvals/{approval['id']}/approve")
+    response = client.post(
+        f"/approvals/{approval['id']}/approve",
+        headers=auth_headers("odoo.manager@company.local"),
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -302,7 +306,10 @@ def test_approve_change_price_does_not_mark_executed_when_verification_fails(mon
     monkeypatch.setattr("app.log_request", lambda data: None)
 
     client = TestClient(app)
-    response = client.post(f"/approvals/{approval['id']}/approve")
+    response = client.post(
+        f"/approvals/{approval['id']}/approve",
+        headers=auth_headers("odoo.manager@company.local"),
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -372,7 +379,10 @@ def test_approve_change_price_stores_ambiguous_candidates_as_failed(monkeypatch,
     monkeypatch.setattr("app.log_request", lambda data: None)
 
     client = TestClient(app)
-    response = client.post(f"/approvals/{approval['id']}/approve")
+    response = client.post(
+        f"/approvals/{approval['id']}/approve",
+        headers=auth_headers("odoo.manager@company.local"),
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -441,7 +451,10 @@ def test_approve_document_line_executes_whitelisted_tool(monkeypatch, tmp_path):
     monkeypatch.setattr("app.log_request", lambda data: None)
 
     client = TestClient(app)
-    response = client.post(f"/approvals/{approval['id']}/approve")
+    response = client.post(
+        f"/approvals/{approval['id']}/approve",
+        headers=auth_headers("odoo.manager@company.local"),
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -651,7 +664,10 @@ def test_approve_purchase_expected_arrival_executes_and_verifies(monkeypatch, tm
     monkeypatch.setattr("app.log_request", lambda data: None)
 
     client = TestClient(app)
-    response = client.post(f"/approvals/{approval['id']}/approve")
+    response = client.post(
+        f"/approvals/{approval['id']}/approve",
+        headers=auth_headers("odoo.manager@company.local"),
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -724,7 +740,10 @@ def test_approve_purchase_expected_arrival_passes_supplier_to_executor(monkeypat
     monkeypatch.setattr("app.log_request", lambda data: None)
 
     client = TestClient(app)
-    response = client.post(f"/approvals/{approval['id']}/approve")
+    response = client.post(
+        f"/approvals/{approval['id']}/approve",
+        headers=auth_headers("odoo.manager@company.local"),
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -758,7 +777,10 @@ def test_reject_change_price_does_not_execute_tool(monkeypatch, tmp_path):
     monkeypatch.setattr("app.log_request", lambda data: None)
 
     client = TestClient(app)
-    response = client.post(f"/approvals/{approval['id']}/reject")
+    response = client.post(
+        f"/approvals/{approval['id']}/reject",
+        headers=auth_headers("odoo.manager@company.local"),
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -852,6 +874,7 @@ def test_chat_routes_french_odoo_document_request_to_odoo_agent(monkeypatch):
     response = client.post(
         "/chat",
         json={"message": "Montre-moi les détails de la facture FNP/2026/04016"},
+        headers=auth_headers("odoo.manager@company.local"),
     )
 
     assert response.status_code == 200
@@ -975,7 +998,10 @@ def test_approve_toggle_analytic_boolean_executes_tool(monkeypatch, tmp_path):
     monkeypatch.setattr("app.log_request", lambda data: None)
 
     client = TestClient(app)
-    response = client.post(f"/approvals/{approval['id']}/approve")
+    response = client.post(
+        f"/approvals/{approval['id']}/approve",
+        headers=auth_headers("odoo.manager@company.local"),
+    )
 
     assert response.status_code == 200
     data = response.json()

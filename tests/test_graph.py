@@ -89,7 +89,7 @@ class GraphTests(unittest.TestCase):
                 with patch("orchestrator.graph.log_request"):
                     result = process_request("Update the stock quantity")
 
-        self.assertEqual(result["risk_level"], "medium")
+        self.assertEqual(result["risk_level"], "high")
         self.assertTrue(result["approval_required"])
         self.assertEqual(result["approval_status"], "pending")
 

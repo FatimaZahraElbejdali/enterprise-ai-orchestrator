@@ -2,7 +2,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { API_BASE_URL } from "@/lib/api";
+import {
+  API_BASE_URL,
+  AuthUser,
+  authHeaders,
+  clearAuth,
+  getStoredUser,
+  hasAnyPermission,
+  requireAuth,
+} from "@/lib/api";
 
 type OdooStatus = {
   connected?: boolean;
@@ -555,8 +563,16 @@ export default function Home() {
   const [approvals, setApprovals] = useState<ApprovalItem[]>([]);
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
+  const [currentUser] = useState<AuthUser | null>(() => getStoredUser());
+
+  function handleLogout() {
+    clearAuth();
+    window.location.href = "/login";
+  }
 
   useEffect(() => {
+    if (!requireAuth()) return;
+
     async function loadDashboard() {
       try {
         const backendRes = await fetch(`${API_BASE_URL}/status`, {
@@ -568,9 +584,18 @@ export default function Home() {
         }
 
         const [odooRes, approvalsRes, logsRes] = await Promise.allSettled([
-          fetch(`${API_BASE_URL}/odoo/status`, { cache: "no-store" }),
-          fetch(`${API_BASE_URL}/approvals`, { cache: "no-store" }),
-          fetch(`${API_BASE_URL}/logs`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/odoo/status`, {
+            cache: "no-store",
+            headers: authHeaders(),
+          }),
+          fetch(`${API_BASE_URL}/approvals`, {
+            cache: "no-store",
+            headers: authHeaders(),
+          }),
+          fetch(`${API_BASE_URL}/logs`, {
+            cache: "no-store",
+            headers: authHeaders(),
+          }),
         ]);
 
         if (odooRes.status === "fulfilled" && odooRes.value.ok) {
@@ -601,6 +626,24 @@ export default function Home() {
 
     loadDashboard();
   }, []);
+
+  const visibleModules = useMemo(() => {
+    return modules.filter((module) => {
+      if (module.href === "/approvals") {
+        return hasAnyPermission(currentUser, [
+          "all",
+          "view_approvals",
+          "approve_odoo_actions",
+        ]);
+      }
+
+      if (module.href === "/logs") {
+        return hasAnyPermission(currentUser, ["all", "view_audit_logs"]);
+      }
+
+      return true;
+    });
+  }, [currentUser]);
 
   const pendingApprovals = useMemo(() => {
     return approvals.filter((item) => item.status === "pending").length;
@@ -1387,7 +1430,7 @@ export default function Home() {
             </div>
 
             <nav className="sidebar-nav">
-              {modules.map((module) => (
+              {visibleModules.map((module) => (
                 <Link
                   key={module.title}
                   className="sidebar-link"
@@ -1401,9 +1444,13 @@ export default function Home() {
           </div>
 
           <div className="sidebar-footer">
-            Sécurisé par conception
+            <span>{currentUser?.email || "Utilisateur connecté"}</span>
             <br />
-            Accès contrôlé · Journal d’audit · Validation humaine
+            <span>Rôle : {currentUser?.role_label || "Lecture seule"}</span>
+            <br />
+            <button type="button" onClick={handleLogout}>
+              Se déconnecter
+            </button>
           </div>
         </aside>
 
@@ -1514,7 +1561,7 @@ export default function Home() {
                   </div>
 
                   <div className="module-grid">
-                    {modules.map((module) => (
+                    {visibleModules.map((module) => (
                       <Link
                         key={module.title}
                         href={module.href}

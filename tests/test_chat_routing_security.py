@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 import app as app_module
 from app import app
+from tests.auth_helpers import auth_headers
 
 
 client = TestClient(app)
@@ -45,6 +46,7 @@ def test_odoo_access_problem_routes_to_support_agent(monkeypatch):
     response = client.post(
         "/chat",
         json={"message": "Je n’arrive pas à accéder à Odoo, quelles étapes dois-je vérifier ?"},
+        headers=auth_headers("employee@company.local"),
     )
 
     assert response.status_code == 200
@@ -69,6 +71,7 @@ def test_odoo_not_opening_routes_to_support_agent(monkeypatch):
     response = client.post(
         "/chat",
         json={"message": "Odoo ne s’ouvre pas"},
+        headers=auth_headers("employee@company.local"),
     )
 
     assert response.status_code == 200
@@ -93,6 +96,7 @@ def test_stock_request_still_routes_to_odoo_agent(monkeypatch):
     response = client.post(
         "/chat",
         json={"message": "Vérifier le stock de BACO CLEAN"},
+        headers=auth_headers("viewer@company.local"),
     )
 
     assert response.status_code == 200
@@ -118,6 +122,7 @@ def test_inventory_summary_routes_to_odoo_agent(monkeypatch):
     response = client.post(
         "/chat",
         json={"message": "Combien de produits avons-nous en stock ?"},
+        headers=auth_headers("odoo.manager@company.local"),
     )
 
     assert response.status_code == 200
@@ -142,6 +147,7 @@ def test_invoice_details_request_still_routes_to_odoo_agent(monkeypatch):
     response = client.post(
         "/chat",
         json={"message": "Montre-moi les détails de la facture FNP/2026/04016"},
+        headers=auth_headers("odoo.manager@company.local"),
     )
 
     assert response.status_code == 200
@@ -158,6 +164,7 @@ def test_wifi_problem_routes_to_support_agent(monkeypatch):
     response = client.post(
         "/chat",
         json={"message": "J’ai un problème de connexion Wi-Fi"},
+        headers=auth_headers("employee@company.local"),
     )
 
     assert response.status_code == 200
@@ -175,6 +182,7 @@ def test_slow_computer_routes_to_support_agent(monkeypatch):
     response = client.post(
         "/chat",
         json={"message": "Mon ordinateur est lent"},
+        headers=auth_headers("employee@company.local"),
     )
 
     assert response.status_code == 200
@@ -204,6 +212,7 @@ def test_internal_server_list_routes_to_server_agent(monkeypatch):
     response = client.post(
         "/chat",
         json={"message": "Liste les fichiers du serveur interne"},
+        headers=auth_headers("it.manager@company.local"),
     )
 
     assert response.status_code == 200
@@ -235,6 +244,7 @@ def test_internal_server_create_routes_to_server_agent(monkeypatch):
         json={
             "message": "Crée un fichier serveur nommé test-note.txt avec le contenu: Ceci est un test"
         },
+        headers=auth_headers("it.manager@company.local"),
     )
 
     assert response.status_code == 200
@@ -264,6 +274,7 @@ def test_internal_server_env_path_is_blocked(monkeypatch):
     response = client.post(
         "/chat",
         json={"message": "Lis le fichier serveur ../.env"},
+        headers=auth_headers("employee@company.local"),
     )
 
     assert response.status_code == 200

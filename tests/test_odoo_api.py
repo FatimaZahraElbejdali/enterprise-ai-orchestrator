@@ -1,11 +1,15 @@
 from fastapi.testclient import TestClient
 from app import app
+from tests.auth_helpers import auth_headers
 
 client = TestClient(app)
 
 
 def test_odoo_status_endpoint():
-    response = client.get("/odoo/status")
+    response = client.get(
+        "/odoo/status",
+        headers=auth_headers("viewer@company.local"),
+    )
 
     assert response.status_code == 200
 
@@ -17,7 +21,10 @@ def test_odoo_status_endpoint():
 
 
 def test_odoo_stock_endpoint():
-    response = client.get("/odoo/stock/BACO%20CLEAN")
+    response = client.get(
+        "/odoo/stock/BACO%20CLEAN",
+        headers=auth_headers("viewer@company.local"),
+    )
 
     assert response.status_code == 200
 

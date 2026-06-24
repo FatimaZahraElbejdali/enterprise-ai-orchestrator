@@ -4,6 +4,7 @@ import app as app_module
 from agents.odoo_agent import extract_product_name, parse_odoo_action_deterministic
 from orchestrator import contextual_resolver
 from orchestrator.conversation_memory import ConversationMemory
+from tests.auth_helpers import auth_headers
 
 
 def test_conversation_memory_resolves_product_reference():
@@ -350,12 +351,14 @@ def test_chat_enriches_follow_up_product_reference(monkeypatch):
     monkeypatch.setattr(app_module, "run_odoo_agent", fake_run_odoo_agent)
 
     client = TestClient(app_module.app)
+    headers = auth_headers("odoo.manager@company.local")
     first_response = client.post(
         "/chat",
         json={
             "message": "Vérifier le stock de BACO CLEAN",
             "session_id": "demo-follow-up",
         },
+        headers=headers,
     )
     second_response = client.post(
         "/chat",
@@ -363,6 +366,7 @@ def test_chat_enriches_follow_up_product_reference(monkeypatch):
             "message": "Change its price to 7",
             "session_id": "demo-follow-up",
         },
+        headers=headers,
     )
 
     assert first_response.status_code == 200
@@ -426,12 +430,14 @@ def test_chat_enriches_french_details_followup(monkeypatch):
     monkeypatch.setattr(app_module, "run_odoo_agent", fake_run_odoo_agent)
 
     client = TestClient(app_module.app)
+    headers = auth_headers("odoo.manager@company.local")
     first_response = client.post(
         "/chat",
         json={
             "message": "Cherche le produit BACO CLEAN",
             "session_id": "demo-french-follow-up",
         },
+        headers=headers,
     )
     second_response = client.post(
         "/chat",
@@ -439,6 +445,7 @@ def test_chat_enriches_french_details_followup(monkeypatch):
             "message": "Montre-moi ses détails",
             "session_id": "demo-french-follow-up",
         },
+        headers=headers,
     )
 
     assert first_response.status_code == 200
@@ -492,12 +499,14 @@ def test_chat_resolves_document_followup_to_odoo(monkeypatch):
     monkeypatch.setattr(app_module, "run_odoo_agent", fake_run_odoo_agent)
 
     client = TestClient(app_module.app)
+    headers = auth_headers("odoo.manager@company.local")
     first_response = client.post(
         "/chat",
         json={
             "message": "Montre-moi les détails du document ID 793",
             "session_id": "demo-doc-follow-up",
         },
+        headers=headers,
     )
     second_response = client.post(
         "/chat",
@@ -505,6 +514,7 @@ def test_chat_resolves_document_followup_to_odoo(monkeypatch):
             "message": "Quel est son fournisseur ?",
             "session_id": "demo-doc-follow-up",
         },
+        headers=headers,
     )
 
     assert first_response.status_code == 200
@@ -593,6 +603,7 @@ def test_chat_resolves_document_id_from_recent_candidates(monkeypatch):
             "message": "Montre-moi les détails du document ID 793",
             "session_id": "candidate-session",
         },
+        headers=auth_headers("odoo.manager@company.local"),
     )
 
     assert response.status_code == 200

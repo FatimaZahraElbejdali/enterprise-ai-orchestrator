@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 from app import app
+from tests.auth_helpers import auth_headers
 
 client = TestClient(app)
 
@@ -17,7 +18,8 @@ def test_status_endpoint():
 def test_chat_support_request():
     response = client.post(
         "/chat",
-        json={"message": "printer not working"}
+        json={"message": "printer not working"},
+        headers=auth_headers("employee@company.local"),
     )
 
     assert response.status_code == 200
@@ -32,7 +34,8 @@ def test_chat_support_request():
 def test_chat_odoo_request():
     response = client.post(
         "/chat",
-        json={"message": "check stock in Odoo for product X"}
+        json={"message": "check stock in Odoo for product X"},
+        headers=auth_headers("viewer@company.local"),
     )
 
     assert response.status_code == 200

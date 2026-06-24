@@ -297,6 +297,40 @@ def _is_odoo_access_issue(message: str) -> bool:
     )
 
 
+def _is_odoo_write_request(message: str) -> bool:
+    text = _normalize_text(message)
+    has_write = any(
+        term in text
+        for term in [
+            "modifier",
+            "changer",
+            "mettre a jour",
+            "update",
+            "change",
+            "set",
+            "create",
+            "delete",
+        ]
+    )
+    has_odoo_object = any(
+        term in text
+        for term in [
+            "prix",
+            "price",
+            "stock",
+            "produit",
+            "product",
+            "facture",
+            "invoice",
+            "commande",
+            "document",
+            "baco",
+        ]
+    )
+
+    return has_write and has_odoo_object
+
+
 def _is_odoo_write_route(route: dict) -> bool:
     selected_agent = route.get("selected_agent") or route.get("agent")
     target_system = route.get("target_system")
@@ -336,6 +370,18 @@ def apply_backend_safety_overrides(message: str, route: dict | None = None) -> d
             requires_approval=False,
             confidence="high",
             reason="Backend safety override treats Odoo access/login wording as IT support.",
+            source="backend_safety_override",
+        )
+
+    if _is_odoo_write_request(message):
+        return _route(
+            intent="product_price_update" if "prix" in _normalize_text(message) or "price" in _normalize_text(message) else "odoo_write_request",
+            selected_agent="odoo_agent",
+            action="update_product_price" if "prix" in _normalize_text(message) or "price" in _normalize_text(message) else "odoo_write_request",
+            risk_level="high",
+            requires_approval=True,
+            confidence="high",
+            reason="Backend safety override detected an Odoo write request.",
             source="backend_safety_override",
         )
 
