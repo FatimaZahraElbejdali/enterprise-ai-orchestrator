@@ -52,6 +52,8 @@ KEYWORDS = {
         "odoo", "erp", "stock", "inventory", "inventaire", "warehouse",
         "entrepôt", "supplier", "fournisseur", "vendor", "customer",
         "client", "crm", "product", "produit", "purchase", "achat",
+        "integrated", "intégré", "integre", "category", "catégorie",
+        "categorie", "matching", "correspondant",
         "purchase order", "sales order", "invoice", "facture",
         "quotation", "devis", "payment", "paiement", "refund",
         "remboursement", "delivery", "livraison", "order", "commande",
@@ -86,7 +88,9 @@ KEYWORDS = {
         "where can i find", "rules", "process", "workflow",
         "internal documentation", "employee guide", "tutorial",
         "explique", "rôle", "role", "bénéfices", "benefices",
-        "validation humaine", "résume", "resume", "documentation serveur"
+        "validation", "approval", "résume", "resume", "orchestrator",
+        "orchestrateur", "agent", "agents", "company", "entreprise",
+        "internal", "interne"
     ],
 }
 

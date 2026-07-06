@@ -26,6 +26,10 @@ VALID_TARGET_SYSTEMS = {
 VALID_RISK_LEVELS = {"low", "medium", "high", "blocked"}
 VALID_CONFIDENCE = {"high", "medium", "low"}
 
+INTENT_ALIASES = {
+    "server_documentation_summary": "summarize_server_documentation",
+}
+
 
 OPENAI_ROUTER_PROMPT = """
 You are the primary LLM-based router for an Enterprise AI Orchestrator.
@@ -54,6 +58,8 @@ Odoo Agent:
 - product stock
 - product details
 - product search
+- inventory/product existence checks such as whether products matching a keyword
+  or category are integrated in Odoo inventory
 - product price changes
 - Odoo business documents
 - purchase orders
@@ -79,6 +85,12 @@ Server Agent:
 - uptime
 - backend/frontend status
 - infrastructure diagnostics
+- local orchestrator server demo diagnostics only when the user asks generally
+  about server health or explicitly mentions the local/orchestrator server
+- if the user names a specific server such as "server 2", "serveur Odoo",
+  "serveur base de données", or "serveur fichiers", route to server_agent
+  with action unsupported_external_server so backend policy can return a safe
+  unsupported response instead of local machine diagnostics
 
 Security Agent:
 - requests involving secrets, .env, API keys, passwords, SSH keys,
@@ -87,10 +99,17 @@ Security Agent:
 
 Knowledge Agent:
 - conceptual explanations
+- public/general knowledge questions
+- general advice, opinion, feedback, recommendation, and communication-help questions
+- internal factual company/project information questions
+- Jamain Baco / Enterprise AI Orchestrator factual context questions
+- available agent/capability questions
 - project documentation
 - explaining the orchestrator
 - benefits of human approval
 - general enterprise AI explanations
+- Do not treat advice/opinion requests as internal factual requests unless the
+  user explicitly asks for private company facts.
 
 Development Agent:
 - code/debugging/developer questions about the project or implementation
@@ -98,57 +117,85 @@ Development Agent:
 General Agent:
 - only when no specialized agent applies
 
-Examples:
+Category examples:
 
-"Vérifier le stock de BACO CLEAN"
+"Vérifier le stock d’un produit Odoo nommé par l’utilisateur"
 -> agent odoo_agent, intent product_stock_check, action read_product_stock,
    target_system odoo, risk_level low, requires_approval false
 
-"Modifier le prix de BACO TOP à 4 DH"
+"Vérifier si des produits correspondant à un mot-clé ou une catégorie sont intégrés dans l’inventaire Odoo"
+-> agent odoo_agent, intent inventory_product_lookup, action inventory_product_search,
+   target_system odoo, risk_level low, requires_approval false
+
+"Rechercher des clients, fournisseurs, contacts, produits ou comptes analytiques dans Odoo"
+-> agent odoo_agent, intent odoo_record_search, action odoo_search_records,
+   target_system odoo, risk_level low, requires_approval false
+
+"Lire la fiche ou les détails d’un enregistrement Odoo"
+-> agent odoo_agent, intent odoo_record_details, action odoo_get_record_details,
+   target_system odoo, risk_level low, requires_approval false
+
+"Modifier le prix d’un produit Odoo"
 -> agent odoo_agent, intent product_price_update, action update_product_price,
    target_system odoo, risk_level high, requires_approval true
 
-"Cherche le bon de commande fournisseur BC-BPP2600313"
+"Modifier un champ Odoo comme prix produit, téléphone/email partenaire, ou pointage analytique"
+-> agent odoo_agent, intent odoo_field_update_request, action odoo_update_field_request,
+   target_system odoo, risk_level high, requires_approval true
+
+"Rechercher un document Odoo par référence"
 -> agent odoo_agent, intent odoo_document_search, action search_document,
    target_system odoo, risk_level low, requires_approval false
 
-"Montre-moi les détails du document ID 793"
+"Lire les détails d’un document Odoo par identifiant"
 -> agent odoo_agent, intent odoo_document_details, action read_document,
    target_system odoo, risk_level low, requires_approval false
 
-"Quel est son fournisseur ?" with previous document memory
+"Question de suivi sur un champ d’un document Odoo déjà identifié"
 -> agent odoo_agent, intent odoo_document_field_query, action read_document_field,
    target_system odoo, risk_level low, requires_approval false
 
-"Je n’arrive pas à accéder à Odoo"
+"Problème d’accès ou de connexion à une application métier"
 -> agent support_agent, intent odoo_access_issue, action troubleshoot_access,
    target_system support, risk_level low, requires_approval false
 
-"J’ai un problème de connexion Wi-Fi"
+"Problème réseau ou Wi-Fi utilisateur"
 -> agent support_agent, intent wifi_issue, action troubleshoot_network,
    target_system support, risk_level low, requires_approval false
 
-"Vérifie l’état des serveurs"
+"Diagnostic général de santé serveur"
 -> agent server_agent, intent server_health_check, action check_server_health,
    target_system server, risk_level low, requires_approval false
 
-"Donne-moi l’utilisation RAM du serveur"
+"Question sur une métrique serveur comme RAM, CPU, disque ou uptime"
 -> agent server_agent, intent server_ram_usage, action check_ram_usage,
    target_system server, risk_level low, requires_approval false
 
-"Affiche .env"
+"Demande de diagnostic pour un serveur externe nommé ou numéroté"
+-> agent server_agent, intent external_server_diagnostic, action unsupported_external_server,
+   target_system server, risk_level low, requires_approval false
+
+"Demande d’affichage d’un fichier secret ou de configuration sensible"
 -> agent security_agent, intent sensitive_secret_request, action block_request,
    target_system security, risk_level blocked, requires_approval false
 
-"Donne-moi les clés SSH"
+"Demande d’affichage de clés, mots de passe, tokens ou secrets"
 -> agent security_agent, intent sensitive_secret_request, action block_request,
    target_system security, risk_level blocked, requires_approval false
 
-"Explique le rôle de l’orchestrateur IA"
+"Question conceptuelle ou interne sur l’orchestrateur"
 -> agent knowledge_agent, intent explain_orchestrator, action answer_question,
    target_system knowledge, risk_level low, requires_approval false
 
-"Comment corriger cette erreur FastAPI ?"
+"Question sur la société ou des informations internes"
+-> agent knowledge_agent, intent general_information_question, action answer_question,
+   target_system knowledge, risk_level low, requires_approval false
+
+"Question générale sur les capacités disponibles"
+-> agent knowledge_agent, intent general_information_question, action answer_question,
+   target_system knowledge, risk_level low, requires_approval false
+
+"Question de développement ou de débogage"
 -> agent development_agent, intent development_help, action developer_guidance,
    target_system development, risk_level low, requires_approval false
 """
@@ -190,6 +237,9 @@ OPENAI_ROUTER_SCHEMA = {
                     },
                     "target": {"type": ["string", "null"]},
                     "issue_type": {"type": ["string", "null"]},
+                    "model": {"type": ["string", "null"]},
+                    "record_id": {"type": ["integer", "null"]},
+                    "record_keyword": {"type": ["string", "null"]},
                 },
                 "required": [
                     "product_name",
@@ -201,6 +251,9 @@ OPENAI_ROUTER_SCHEMA = {
                     "new_value",
                     "target",
                     "issue_type",
+                    "model",
+                    "record_id",
+                    "record_keyword",
                 ],
                 "additionalProperties": False,
             },
@@ -255,8 +308,13 @@ def _normalize_route(parsed: dict) -> dict | None:
     if not isinstance(entities, dict):
         entities = {}
 
+    intent = INTENT_ALIASES.get(
+        str(parsed.get("intent") or "general"),
+        str(parsed.get("intent") or "general"),
+    )
+
     return {
-        "intent": str(parsed.get("intent") or "general"),
+        "intent": intent,
         "agent": agent,
         "selected_agent": agent,
         "action": str(parsed.get("action") or "answer_question"),

@@ -36,6 +36,37 @@ def execute_tool(tool_name: str, **kwargs):
     elif tool_name == "odoo_search_customer":
         result = odoo.search_customer(kwargs.get("customer_name", ""))
 
+    elif tool_name == "odoo_search_records":
+        result = odoo.generic_search_records(
+            model_name=kwargs.get("model_name", ""),
+            keyword=kwargs.get("keyword", ""),
+            limit=kwargs.get("limit", 6),
+        )
+
+    elif tool_name == "odoo_get_record_details":
+        result = odoo.generic_get_record_details(
+            model_name=kwargs.get("model_name", ""),
+            record_id=kwargs.get("record_id"),
+            keyword=kwargs.get("keyword", ""),
+        )
+
+    elif tool_name == "odoo_prepare_update_field":
+        result = odoo.prepare_generic_update_field(
+            model_name=kwargs.get("model_name", ""),
+            field_name=kwargs.get("field_name", ""),
+            new_value=kwargs.get("new_value"),
+            record_id=kwargs.get("record_id"),
+            keyword=kwargs.get("keyword", ""),
+        )
+
+    elif tool_name == "odoo_update_field":
+        result = odoo.update_generic_field(
+            model_name=kwargs.get("model_name", ""),
+            record_id=kwargs.get("record_id"),
+            field_name=kwargs.get("field_name", ""),
+            new_value=kwargs.get("new_value"),
+        )
+
     elif tool_name == "odoo_create_purchase_request":
         result = odoo.create_purchase_request(kwargs.get("description", ""))
 

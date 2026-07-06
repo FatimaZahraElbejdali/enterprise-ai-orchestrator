@@ -7,6 +7,32 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+PRODUCT_SEARCH_MODELS = {"product.product", "product.template"}
+
+ALLOWED_GENERIC_READ_MODELS = {
+    "product.product",
+    "product.template",
+    "res.partner",
+    "sale.order",
+    "purchase.order",
+    "account.move",
+    "stock.picking",
+}
+
+ALLOWED_GENERIC_WRITE_FIELDS = {
+    "product.template": {"list_price", "standard_price"},
+    "res.partner": {"phone", "mobile", "email"},
+    "account.analytic.account": {"x_studio_pointage"},
+}
+
+DOCUMENT_MODELS = {
+    "sale.order",
+    "purchase.order",
+    "account.move",
+    "stock.picking",
+}
+
+
 def _normalize_label(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value or "")
     ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
@@ -154,11 +180,29 @@ class OdooConnector:
         return xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/object")
 
     def _product_search_domain(self, product_name: str):
-        return [
-            "|",
+        return self._or_domain([
             ["name", "ilike", product_name],
             ["default_code", "ilike", product_name],
-        ]
+        ])
+
+    def _product_search_domain_for_model(self, model_name: str, product_name: str):
+        if model_name not in PRODUCT_SEARCH_MODELS:
+            raise ValueError("Unsupported Odoo product search model.")
+
+        fields = self._existing_fields(
+            model_name,
+            ["name", "default_code", "barcode", "product_tmpl_id"],
+        )
+        conditions = []
+
+        for field in ["name", "default_code", "barcode"]:
+            if field in fields:
+                conditions.append([field, "ilike", product_name])
+
+        if model_name == "product.product" and "product_tmpl_id" in fields:
+            conditions.append(["product_tmpl_id.name", "ilike", product_name])
+
+        return self._or_domain(conditions)
 
     def _product_fields(self):
         return [
@@ -175,11 +219,18 @@ class OdooConnector:
 
     def _format_product_candidate(self, product: dict):
         unit = product.get("uom_id")
+        template = product.get("product_tmpl_id")
 
         return {
             "id": product.get("id"),
             "name": product.get("name") or "",
             "default_code": product.get("default_code") or "",
+            "barcode": product.get("barcode") or "",
+            "template_name": (
+                template[1]
+                if isinstance(template, list) and len(template) > 1
+                else ""
+            ),
             "list_price": product.get("list_price"),
             "qty_available": product.get("qty_available"),
             "virtual_available": product.get("virtual_available"),
@@ -206,6 +257,55 @@ class OdooConnector:
                 },
             },
         )
+
+    def _search_products_for_inventory(self, product_name: str, limit: int = 5):
+        models = self._models()
+        remaining = limit
+        results = []
+        seen = set()
+
+        for model_name in ["product.product", "product.template"]:
+            domain = self._product_search_domain_for_model(model_name, product_name)
+
+            if not domain or remaining <= 0:
+                continue
+
+            fields = self._existing_fields(
+                model_name,
+                self._product_fields() + ["barcode", "product_tmpl_id"],
+            )
+            products = models.execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                model_name,
+                "search_read",
+                [domain],
+                {
+                    "fields": fields,
+                    "limit": remaining,
+                    "context": {
+                        "active_test": False,
+                    },
+                },
+            )
+
+            for product in products:
+                key = (model_name, product.get("id"))
+
+                if key in seen:
+                    continue
+
+                formatted = self._format_product_candidate(product)
+                formatted["model"] = model_name
+                results.append(formatted)
+                seen.add(key)
+                remaining -= 1
+
+                if remaining <= 0:
+                    break
+
+        return results
 
     def _resolve_single_candidate(
         self,
@@ -440,7 +540,9 @@ class OdooConnector:
     def search_product(self, product_name: str):
         if self.mock_mode:
             return {
+                "success": True,
                 "source": "mock_odoo",
+                "model": "product.product",
                 "product": product_name,
                 "found": True,
                 "results": [
@@ -448,6 +550,8 @@ class OdooConnector:
                         "id": "MOCK-PROD-001",
                         "name": product_name,
                         "default_code": "MOCK-REF",
+                        "barcode": "",
+                        "template_name": product_name,
                         "qty_available": 42,
                         "virtual_available": 42,
                         "list_price": 1.0,
@@ -458,27 +562,34 @@ class OdooConnector:
             }
 
         try:
-            products = self._search_product_templates(
-                self._product_search_domain(product_name),
+            products = self._search_products_for_inventory(
+                product_name,
                 limit=5,
             )
 
             return {
+                "success": True,
                 "source": "real_odoo",
+                "model": "product.product",
                 "product": product_name,
                 "found": len(products) > 0,
-                "results": [
-                    self._format_product_candidate(product)
-                    for product in products
-                ],
+                "results": products,
+                "message": (
+                    "Matching products found in Odoo inventory."
+                    if products
+                    else "No matching product found in Odoo inventory."
+                ),
             }
 
         except Exception as error:
             return {
+                "success": False,
                 "source": "real_odoo_error",
+                "model": "product.product",
                 "product": product_name,
                 "found": False,
-                "message": str(error),
+                "results": [],
+                "message": "Odoo product search is unavailable.",
             }
 
     def check_stock(self, product_name: str):
@@ -825,6 +936,518 @@ class OdooConnector:
             [record_ids],
             {"fields": safe_fields},
         )
+
+    def _validate_generic_read_model(self, model_name: str):
+        if model_name not in ALLOWED_GENERIC_READ_MODELS:
+            raise ValueError("Unsupported Odoo model for generic read.")
+
+    def _validate_generic_write_field(self, model_name: str, field_name: str):
+        allowed_fields = ALLOWED_GENERIC_WRITE_FIELDS.get(model_name, set())
+
+        if field_name not in allowed_fields:
+            raise ValueError("Unsupported Odoo field for generic write.")
+
+    def _generic_search_fields(self, model_name: str):
+        self._validate_generic_read_model(model_name)
+        fields = self._existing_fields(
+            model_name,
+            ["name", "display_name", "default_code", "ref", "barcode", "partner_id"],
+        )
+        conditions = [
+            [field, "ilike", "{keyword}"]
+            for field in ["name", "display_name", "default_code", "ref", "barcode"]
+            if field in fields
+        ]
+
+        if model_name in DOCUMENT_MODELS and "partner_id" in fields:
+            conditions.append(["partner_id.name", "ilike", "{keyword}"])
+
+        return conditions
+
+    def _generic_summary_fields(self, model_name: str):
+        base_fields = {
+            "product.product": [
+                "id",
+                "name",
+                "display_name",
+                "default_code",
+                "barcode",
+                "qty_available",
+                "virtual_available",
+                "list_price",
+            ],
+            "product.template": [
+                "id",
+                "name",
+                "display_name",
+                "default_code",
+                "barcode",
+                "qty_available",
+                "virtual_available",
+                "list_price",
+                "standard_price",
+            ],
+            "res.partner": [
+                "id",
+                "name",
+                "display_name",
+                "phone",
+                "mobile",
+                "email",
+                "customer_rank",
+                "supplier_rank",
+                "is_company",
+            ],
+            "sale.order": ["id", "name", "display_name", "partner_id", "state", "date_order"],
+            "purchase.order": ["id", "name", "display_name", "partner_id", "state", "date_order"],
+            "account.move": ["id", "name", "display_name", "partner_id", "state", "invoice_date", "move_type", "ref"],
+            "stock.picking": ["id", "name", "display_name", "partner_id", "state", "scheduled_date", "origin"],
+            "account.analytic.account": ["id", "name", "display_name", "x_studio_pointage"],
+        }
+
+        return self._existing_fields(model_name, base_fields.get(model_name, ["id", "name"]))
+
+    def _format_generic_record(self, model_name: str, record: dict):
+        partner = self._m2o_name(record.get("partner_id"))
+        record_id = record.get("id")
+
+        if model_name in {"product.product", "product.template"}:
+            return {
+                "id": record_id,
+                "model": model_name,
+                "name": record.get("display_name") or record.get("name") or "",
+                "internal_reference": record.get("default_code") or "",
+                "barcode": record.get("barcode") or "",
+                "stock_quantity": record.get("qty_available"),
+                "forecast_quantity": record.get("virtual_available"),
+                "price": record.get("list_price"),
+                "standard_price": record.get("standard_price"),
+            }
+
+        if model_name == "res.partner":
+            customer_rank = record.get("customer_rank") or 0
+            supplier_rank = record.get("supplier_rank") or 0
+            partner_type = []
+
+            if customer_rank:
+                partner_type.append("client")
+
+            if supplier_rank:
+                partner_type.append("fournisseur")
+
+            return {
+                "id": record_id,
+                "model": model_name,
+                "name": record.get("display_name") or record.get("name") or "",
+                "type": ", ".join(partner_type) or "contact",
+                "phone": record.get("phone") or record.get("mobile") or "",
+                "email": record.get("email") or "",
+            }
+
+        if model_name in DOCUMENT_MODELS:
+            date_value = (
+                record.get("date_order")
+                or record.get("invoice_date")
+                or record.get("scheduled_date")
+            )
+            return {
+                "id": record_id,
+                "model": model_name,
+                "document": record.get("display_name") or record.get("name") or "",
+                "reference": record.get("name") or record.get("ref") or record.get("origin") or "",
+                "partner": partner,
+                "status": record.get("state") or "",
+                "date": date_value or "",
+            }
+
+        if model_name == "account.analytic.account":
+            return {
+                "id": record_id,
+                "model": model_name,
+                "name": record.get("display_name") or record.get("name") or "",
+                "pointage": record.get("x_studio_pointage"),
+            }
+
+        return {
+            "id": record_id,
+            "model": model_name,
+            "name": record.get("display_name") or record.get("name") or "",
+        }
+
+    def generic_search_records(self, model_name: str, keyword: str, limit: int = 6):
+        if self.mock_mode:
+            return {
+                "success": False,
+                "source": "mock_odoo",
+                "model": model_name,
+                "keyword": keyword,
+                "found": False,
+                "records": [],
+                "message": "Odoo credentials are missing.",
+            }
+
+        try:
+            self._validate_generic_read_model(model_name)
+            search_conditions = self._generic_search_fields(model_name)
+            domain = self._or_domain([
+                [field, operator, keyword]
+                for field, operator, _ in search_conditions
+            ])
+
+            if not domain:
+                return {
+                    "success": False,
+                    "source": "real_odoo",
+                    "model": model_name,
+                    "keyword": keyword,
+                    "found": False,
+                    "records": [],
+                    "message": "No safe searchable fields are available for this model.",
+                }
+
+            models = self._models()
+            raw_records = models.execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                model_name,
+                "search_read",
+                [domain],
+                {
+                    "fields": self._generic_summary_fields(model_name),
+                    "limit": limit,
+                    "context": {
+                        "active_test": False,
+                    },
+                },
+            )
+            records = [
+                self._format_generic_record(model_name, record)
+                for record in raw_records
+            ]
+
+            return {
+                "success": True,
+                "source": "real_odoo",
+                "model": model_name,
+                "keyword": keyword,
+                "found": bool(records),
+                "records": records,
+                "message": (
+                    "Matching records found in Odoo."
+                    if records
+                    else "No matching record found in Odoo."
+                ),
+            }
+
+        except Exception:
+            return {
+                "success": False,
+                "source": "real_odoo_error",
+                "model": model_name if model_name in ALLOWED_GENERIC_READ_MODELS else None,
+                "keyword": keyword,
+                "found": False,
+                "records": [],
+                "message": "Odoo search is unavailable for this request.",
+            }
+
+    def generic_get_record_details(
+        self,
+        model_name: str,
+        record_id=None,
+        keyword: str = "",
+    ):
+        if self.mock_mode:
+            return {
+                "success": False,
+                "source": "mock_odoo",
+                "model": model_name,
+                "record_id": record_id,
+                "found": False,
+                "record": None,
+                "message": "Odoo credentials are missing.",
+            }
+
+        try:
+            self._validate_generic_read_model(model_name)
+            resolved_id = record_id
+            candidates = []
+
+            if resolved_id is None:
+                search = self.generic_search_records(model_name, keyword, limit=6)
+                candidates = search.get("records", [])
+
+                if len(candidates) != 1:
+                    return {
+                        "success": False,
+                        "source": search.get("source", "real_odoo"),
+                        "model": model_name,
+                        "keyword": keyword,
+                        "found": bool(candidates),
+                        "ambiguous": len(candidates) > 1,
+                        "record": None,
+                        "candidates": candidates,
+                        "message": (
+                            "Multiple matching records found in Odoo."
+                            if len(candidates) > 1
+                            else "No matching record found in Odoo."
+                        ),
+                    }
+
+                resolved_id = candidates[0].get("id")
+
+            if model_name in DOCUMENT_MODELS:
+                details = self._get_document_details(
+                    model_name,
+                    keyword or "",
+                    document_id=resolved_id,
+                )
+                return details
+
+            records = self._read_records(
+                model_name,
+                [resolved_id],
+                self._generic_summary_fields(model_name),
+            )
+
+            if not records:
+                return {
+                    "success": False,
+                    "source": "real_odoo",
+                    "model": model_name,
+                    "record_id": resolved_id,
+                    "found": False,
+                    "record": None,
+                    "message": "No matching record found in Odoo.",
+                }
+
+            return {
+                "success": True,
+                "source": "real_odoo",
+                "model": model_name,
+                "record_id": resolved_id,
+                "found": True,
+                "record": self._format_generic_record(model_name, records[0]),
+                "message": "Record details read from Odoo.",
+            }
+
+        except Exception:
+            return {
+                "success": False,
+                "source": "real_odoo_error",
+                "model": model_name if model_name in ALLOWED_GENERIC_READ_MODELS else None,
+                "record_id": record_id,
+                "found": False,
+                "record": None,
+                "message": "Odoo details are unavailable for this request.",
+            }
+
+    def prepare_generic_update_field(
+        self,
+        model_name: str,
+        field_name: str,
+        new_value,
+        record_id=None,
+        keyword: str = "",
+    ):
+        if self.mock_mode:
+            return {
+                "success": False,
+                "source": "mock_odoo",
+                "model": model_name,
+                "field_name": field_name,
+                "record_id": record_id,
+                "found": False,
+                "ambiguous": False,
+                "candidates": [],
+                "message": "Odoo credentials are missing.",
+            }
+
+        try:
+            self._validate_generic_read_model(model_name)
+            self._validate_generic_write_field(model_name, field_name)
+            resolved_id = record_id
+            candidates = []
+
+            if resolved_id is None:
+                search = self.generic_search_records(model_name, keyword, limit=6)
+                candidates = search.get("records", [])
+
+                if len(candidates) != 1:
+                    return {
+                        "success": False,
+                        "source": search.get("source", "real_odoo"),
+                        "model": model_name,
+                        "field_name": field_name,
+                        "keyword": keyword,
+                        "record_id": None,
+                        "found": bool(candidates),
+                        "ambiguous": len(candidates) > 1,
+                        "candidates": candidates,
+                        "message": (
+                            "Multiple matching records found in Odoo."
+                            if len(candidates) > 1
+                            else "No matching record found in Odoo."
+                        ),
+                    }
+
+                resolved_id = candidates[0].get("id")
+
+            records = self._read_records(
+                model_name,
+                [resolved_id],
+                ["id", "name", "display_name", field_name],
+            )
+
+            if not records:
+                return {
+                    "success": False,
+                    "source": "real_odoo",
+                    "model": model_name,
+                    "field_name": field_name,
+                    "record_id": resolved_id,
+                    "found": False,
+                    "ambiguous": False,
+                    "candidates": [],
+                    "message": "No matching record found in Odoo.",
+                }
+
+            record = records[0]
+
+            return {
+                "success": True,
+                "source": "real_odoo",
+                "model": model_name,
+                "field_name": field_name,
+                "record_id": resolved_id,
+                "record_name": record.get("display_name") or record.get("name") or str(resolved_id),
+                "old_value": record.get(field_name),
+                "new_value": new_value,
+                "found": True,
+                "ambiguous": False,
+                "candidates": candidates,
+                "message": "Record resolved for approval.",
+            }
+
+        except ValueError:
+            return {
+                "success": False,
+                "source": "policy",
+                "model": model_name if model_name in ALLOWED_GENERIC_READ_MODELS else None,
+                "field_name": field_name,
+                "record_id": record_id,
+                "found": False,
+                "ambiguous": False,
+                "candidates": [],
+                "message": "Unsupported Odoo write field.",
+            }
+        except Exception:
+            return {
+                "success": False,
+                "source": "real_odoo_error",
+                "model": model_name if model_name in ALLOWED_GENERIC_READ_MODELS else None,
+                "field_name": field_name,
+                "record_id": record_id,
+                "found": False,
+                "ambiguous": False,
+                "candidates": [],
+                "message": "Odoo record resolution is unavailable.",
+            }
+
+    def update_generic_field(
+        self,
+        model_name: str,
+        record_id,
+        field_name: str,
+        new_value,
+    ):
+        if self.mock_mode:
+            return {
+                "success": False,
+                "source": "mock_odoo",
+                "model": model_name,
+                "record_id": record_id,
+                "field": field_name,
+                "requested_value": new_value,
+                "executed": False,
+                "verified": False,
+                "message": "Odoo credentials are missing. Real update was not executed.",
+            }
+
+        try:
+            self._validate_generic_read_model(model_name)
+            self._validate_generic_write_field(model_name, field_name)
+            before_records = self._read_records(
+                model_name,
+                [record_id],
+                ["id", "name", "display_name", field_name],
+            )
+
+            if not before_records:
+                return {
+                    "success": False,
+                    "source": "real_odoo",
+                    "model": model_name,
+                    "record_id": record_id,
+                    "field": field_name,
+                    "requested_value": new_value,
+                    "executed": False,
+                    "verified": False,
+                    "found": False,
+                    "message": "No matching record found in Odoo.",
+                }
+
+            old_value = before_records[0].get(field_name)
+            models = self._models()
+            write_success = models.execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                model_name,
+                "write",
+                [[record_id], {field_name: new_value}],
+            )
+            after_records = self._read_records(
+                model_name,
+                [record_id],
+                ["id", "name", "display_name", field_name],
+            )
+            updated_record = after_records[0] if after_records else {}
+            actual_value = updated_record.get(field_name)
+            verified = bool(write_success) and str(actual_value) == str(new_value)
+
+            return {
+                "success": verified,
+                "source": "real_odoo",
+                "model": model_name,
+                "record_id": record_id,
+                "record": updated_record.get("display_name") or updated_record.get("name") or str(record_id),
+                "field": field_name,
+                "old_value": old_value,
+                "requested_value": new_value,
+                "new_value": actual_value,
+                "executed": verified,
+                "verified": verified,
+                "found": True,
+                "message": (
+                    "Odoo field updated and verified."
+                    if verified
+                    else "Odoo write returned but read-back verification failed."
+                ),
+            }
+
+        except Exception:
+            return {
+                "success": False,
+                "source": "real_odoo_error",
+                "model": model_name if model_name in ALLOWED_GENERIC_READ_MODELS else None,
+                "record_id": record_id,
+                "field": field_name,
+                "requested_value": new_value,
+                "executed": False,
+                "verified": False,
+                "message": "Odoo update is unavailable for this request.",
+            }
 
     def _m2o_name(self, value):
         if isinstance(value, list) and len(value) > 1:

@@ -6,6 +6,17 @@ from integrations.internal_server_connector import InternalServerConnector
 
 connector = InternalServerConnector()
 
+UNCONFIGURED_SERVER_MESSAGE = (
+    "Je comprends que la demande concerne {server_name}, mais ce serveur n’est pas "
+    "encore connecté à un outil de diagnostic sécurisé. Pour le moment, je peux "
+    "uniquement vérifier le serveur local de l’orchestrateur en mode démonstration."
+)
+
+SERVER_CLARIFICATION_MESSAGE = (
+    "Pouvez-vous préciser le problème rencontré : accès, lenteur, RAM, disque, "
+    "service arrêté ou réseau ?"
+)
+
 
 def _response(action: str, tool_used: str, result: dict | str, status: str = "completed"):
     return {
@@ -34,6 +45,128 @@ def _has_word(text: str, *words: str) -> bool:
         re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE)
         for word in words
     )
+
+
+def _is_internal_storage_request(text: str) -> bool:
+    return any(
+        term in text
+        for term in [
+            "serveur interne",
+            "fichier serveur",
+            "stockage interne",
+            "internal server",
+            "server file",
+            "internal file",
+        ]
+    )
+
+
+def _extract_specific_server_reference(message: str):
+    text = _normalize_text(message)
+
+    if _is_internal_storage_request(text):
+        return None
+
+    local_server_terms = [
+        "serveur local",
+        "local server",
+        "serveur local de l'orchestrateur",
+        "orchestrateur",
+        "orchestrator",
+        "local_orchestrator",
+    ]
+
+    if any(term in text for term in local_server_terms):
+        return None
+
+    patterns = [
+        r"\b(?P<server>(?:serveur|server)\s+\d+)\b",
+        r"\b(?P<server>(?:serveur|server)\s+odoo)\b",
+        r"\b(?P<server>(?:serveur|server)\s+base\s+de\s+donn[ée]es)\b",
+        r"\b(?P<server>(?:serveur|server)\s+(?:database|db))\b",
+        r"\b(?P<server>(?:serveur|server)\s+fichiers?)\b",
+        r"\b(?P<server>(?:serveur|server)\s+files?)\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, message or "", re.IGNORECASE)
+
+        if match:
+            return " ".join(match.group("server").split())
+
+    return None
+
+
+def extract_specific_server_reference(message: str):
+    return _extract_specific_server_reference(message)
+
+
+def _is_vague_server_problem(message: str):
+    text = _normalize_text(message)
+
+    if _is_internal_storage_request(text):
+        return False
+
+    if _extract_specific_server_reference(message):
+        return False
+
+    has_server = "serveur" in text or "server" in text
+    has_problem = any(
+        term in text
+        for term in [
+            "probleme",
+            "problem",
+            "incident",
+            "panne",
+            "ne marche pas",
+            "not working",
+        ]
+    )
+    has_diagnostic_detail = any(
+        term in text
+        for term in [
+            "ram",
+            "memoire",
+            "memory",
+            "cpu",
+            "disque",
+            "disk",
+            "espace disque",
+            "service",
+            "services",
+            "reseau",
+            "network",
+            "uptime",
+            "etat",
+            "status",
+            "diagnostic",
+        ]
+    )
+
+    return has_server and has_problem and not has_diagnostic_detail
+
+
+def is_vague_server_problem(message: str):
+    return _is_vague_server_problem(message)
+
+
+def _unconfigured_server_result(server_name: str):
+    return {
+        "success": False,
+        "action": "unsupported_external_server",
+        "server": server_name,
+        "configured": False,
+        "message": UNCONFIGURED_SERVER_MESSAGE.format(server_name=server_name),
+    }
+
+
+def _server_clarification_result():
+    return {
+        "success": False,
+        "action": "clarify_server_issue",
+        "needs_clarification": True,
+        "message": SERVER_CLARIFICATION_MESSAGE,
+    }
 
 
 def _blocked_security_result(message: str):
@@ -183,31 +316,35 @@ def _select_diagnostic_action(message: str):
 def is_server_request(message: str):
     text = _normalize_text(message)
 
-    return any(
-        phrase in text
-        for phrase in [
-            "serveur interne",
-            "fichier serveur",
-            "stockage interne",
-            "internal server",
-            "server file",
-            "internal file",
-            "liste les fichiers",
-            "list files",
-            "crée un fichier",
-            "cree un fichier",
-            "create file",
-            "lis le fichier",
-            "read file",
-            "ram",
-            "cpu",
-            "disque",
-            "disk",
-            "uptime",
-            "backend",
-            "frontend",
-            "diagnostic serveur",
-        ]
+    return (
+        bool(_extract_specific_server_reference(message))
+        or _is_vague_server_problem(message)
+        or any(
+            phrase in text
+            for phrase in [
+                "serveur interne",
+                "fichier serveur",
+                "stockage interne",
+                "internal server",
+                "server file",
+                "internal file",
+                "liste les fichiers",
+                "list files",
+                "crée un fichier",
+                "cree un fichier",
+                "create file",
+                "lis le fichier",
+                "read file",
+                "ram",
+                "cpu",
+                "disque",
+                "disk",
+                "uptime",
+                "backend",
+                "frontend",
+                "diagnostic serveur",
+            ]
+        )
     )
 
 
@@ -232,6 +369,19 @@ def run(message: str):
             },
             status="unsupported",
         )
+
+    specific_server = _extract_specific_server_reference(message)
+
+    if specific_server:
+        server_id, _server_config = connector.resolve_server_reference(specific_server)
+
+        if server_id != "local_orchestrator":
+            return _response(
+                "unsupported_external_server",
+                "none",
+                _unconfigured_server_result(specific_server),
+                status="unsupported",
+            )
 
     if _is_list_file_request(message):
         return _response(
@@ -280,6 +430,14 @@ def run(message: str):
             "internal_server_read_file",
             result,
             status="blocked" if result.get("blocked") else "completed",
+        )
+
+    if _is_vague_server_problem(message):
+        return _response(
+            "clarify_server_issue",
+            "none",
+            _server_clarification_result(),
+            status="needs_clarification",
         )
 
     diagnostic_action = _select_diagnostic_action(message)

@@ -40,6 +40,71 @@ def parsed_stock_action(record_query="BACO CLEAN"):
     }
 
 
+def parsed_inventory_product_search_action(record_query="nettoyage"):
+    return {
+        "intent": "odoo",
+        "action": "inventory_product_search",
+        "business_action": "inventory_product_search",
+        "risk": "low",
+        "requires_approval": False,
+        "target_model": "product.template",
+        "record_query": record_query,
+        "field_label": None,
+        "field_name": None,
+        "new_value": None,
+        "confidence": 0.9,
+        "parser_source": "test",
+        "parser_error": None,
+    }
+
+
+def parsed_generic_partner_search_action(record_query="Atlas"):
+    return {
+        "intent": "odoo",
+        "action": "odoo_search_records",
+        "business_action": "odoo_search_records",
+        "risk": "low",
+        "requires_approval": False,
+        "target_model": "res.partner",
+        "model": "res.partner",
+        "record_query": record_query,
+        "record_id": None,
+        "field_label": None,
+        "field_name": None,
+        "new_value": None,
+        "confidence": 0.9,
+        "parser_source": "test",
+        "parser_error": None,
+    }
+
+
+def parsed_generic_update_action(
+    *,
+    model="res.partner",
+    record_query="Atlas",
+    record_id=None,
+    field_name="phone",
+    new_value="0600000000",
+):
+    return {
+        "intent": "odoo",
+        "action": "odoo_update_field_request",
+        "business_action": "odoo_update_field_request",
+        "risk": "high",
+        "requires_approval": True,
+        "target_model": model,
+        "model": model,
+        "record_query": record_query,
+        "record_id": record_id,
+        "field_label": field_name,
+        "field_name": field_name,
+        "new_value": new_value,
+        "confidence": 0.9,
+        "parser_source": "test",
+        "parser_error": None,
+    }
+
+
 def parsed_purchase_expected_arrival_action():
     return {
         "intent": "odoo",
@@ -822,6 +887,222 @@ def test_check_stock_still_does_not_require_approval(monkeypatch):
     assert result["parsed_action"] == "check_product_stock"
     assert result["product_name"] == "BACO CLEAN"
     assert result["needs_clarification"] is False
+
+
+def test_inventory_product_search_calls_odoo_with_extracted_keyword(monkeypatch):
+    captured = {}
+
+    def fake_execute_tool(tool_name, **kwargs):
+        captured["call"] = {
+            "tool_name": tool_name,
+            "kwargs": kwargs,
+        }
+        return {
+            "success": True,
+            "result": {
+                "success": True,
+                "source": "real_odoo",
+                "model": "product.product",
+                "product": kwargs["product_name"],
+                "found": True,
+                "results": [
+                    {
+                        "id": 21,
+                        "name": "NETTOYAGE SOL",
+                        "default_code": "NET-SOL",
+                        "qty_available": 18,
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: parsed_inventory_product_search_action(),
+    )
+    monkeypatch.setattr(
+        "agents.odoo_agent.execute_tool",
+        fake_execute_tool,
+    )
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent(
+        "Est-ce que les produits de nettoyage sont intégrés dans l’inventaire Odoo ?"
+    )
+
+    assert captured["call"]["tool_name"] == "odoo_search_product"
+    assert captured["call"]["kwargs"]["product_name"] == "nettoyage"
+    assert result["approval_required"] is False
+    assert result["parsed_action"] == "inventory_product_search"
+    assert result["tool_used"] == "odoo_search_product"
+    assert result["status"] == "completed"
+    assert "Produits correspondants trouvés" in result["message"]
+    assert result["result"]["results"][0]["default_code"] == "NET-SOL"
+
+
+def test_inventory_product_search_not_found_returns_clean_message(monkeypatch):
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: parsed_inventory_product_search_action(record_query="xyz"),
+    )
+    monkeypatch.setattr(
+        "agents.odoo_agent.execute_tool",
+        lambda *args, **kwargs: {
+            "success": True,
+            "result": {
+                "success": True,
+                "source": "real_odoo",
+                "model": "product.product",
+                "product": kwargs["product_name"],
+                "found": False,
+                "results": [],
+            },
+        },
+    )
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent("Les produits de type xyz existent-ils dans Odoo ?")
+
+    assert result["status"] == "not_found"
+    assert result["approval_required"] is False
+    assert "Aucun produit correspondant trouvé" in result["message"]
+    assert "JSON" not in result["message"]
+
+
+def test_generic_partner_search_uses_safe_record_search(monkeypatch):
+    captured = {}
+
+    def fake_execute_tool(tool_name, **kwargs):
+        captured["tool_name"] = tool_name
+        captured["kwargs"] = kwargs
+        return {
+            "success": True,
+            "result": {
+                "success": True,
+                "source": "real_odoo",
+                "model": "res.partner",
+                "keyword": kwargs["keyword"],
+                "found": True,
+                "records": [
+                    {
+                        "id": 31,
+                        "model": "res.partner",
+                        "name": "Atlas",
+                        "type": "client",
+                        "phone": "0612345678",
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: parsed_generic_partner_search_action(),
+    )
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent("Rechercher le client Atlas dans Odoo")
+
+    assert captured["tool_name"] == "odoo_search_records"
+    assert captured["kwargs"]["model_name"] == "res.partner"
+    assert captured["kwargs"]["keyword"] == "Atlas"
+    assert result["approval_required"] is False
+    assert result["status"] == "completed"
+    assert result["result"]["records"][0]["phone"] == "0612345678"
+
+
+def test_generic_record_search_ambiguous_asks_clarification(monkeypatch):
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: parsed_generic_partner_search_action(),
+    )
+    monkeypatch.setattr(
+        "agents.odoo_agent.execute_tool",
+        lambda *args, **kwargs: {
+            "success": True,
+            "result": {
+                "success": False,
+                "source": "real_odoo",
+                "model": "res.partner",
+                "keyword": kwargs["keyword"],
+                "found": True,
+                "ambiguous": True,
+                "candidates": [
+                    {"id": 31, "name": "Atlas A"},
+                    {"id": 32, "name": "Atlas B"},
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent("Afficher la fiche du client Atlas")
+
+    assert result["status"] == "needs_clarification"
+    assert "Plusieurs enregistrements" in result["message"]
+    assert result["approval_required"] is False
+
+
+def test_allowed_generic_partner_field_update_creates_approval(monkeypatch, tmp_path):
+    approvals_file = tmp_path / "approvals.json"
+    monkeypatch.setattr("orchestrator.approval_store.APPROVALS_FILE", approvals_file)
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: parsed_generic_update_action(),
+    )
+    monkeypatch.setattr(
+        "agents.odoo_agent.execute_tool",
+        lambda *args, **kwargs: {
+            "success": True,
+            "result": {
+                "success": True,
+                "source": "real_odoo",
+                "model": kwargs["model_name"],
+                "field_name": kwargs["field_name"],
+                "record_id": 31,
+                "record_name": "Atlas",
+                "old_value": "0612345678",
+                "new_value": kwargs["new_value"],
+                "found": True,
+                "ambiguous": False,
+            },
+        },
+    )
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent("Modifier le téléphone du client Atlas à 0600000000")
+    approval = get_approvals()[0]
+
+    assert result["status"] == "pending_approval"
+    assert result["approval_required"] is True
+    assert approval["action"] == "odoo_update_field_request"
+    assert approval["metadata"]["tool_name"] == "odoo_update_field"
+    assert approval["metadata"]["target_model"] == "res.partner"
+    assert approval["metadata"]["record_id"] == 31
+    assert approval["metadata"]["field_name"] == "phone"
+    assert approval["metadata"]["old_value"] == "0612345678"
+    assert approval["metadata"]["new_value"] == "0600000000"
+
+
+def test_generic_unsupported_write_field_returns_clean_unsupported(monkeypatch, tmp_path):
+    approvals_file = tmp_path / "approvals.json"
+    monkeypatch.setattr("orchestrator.approval_store.APPROVALS_FILE", approvals_file)
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: parsed_generic_update_action(field_name="comment", new_value="note"),
+    )
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent("Modifier la note du client Atlas")
+
+    assert result["status"] == "unsupported"
+    assert result["message"] == (
+        "Je comprends la modification demandée, mais cette opération n'est pas "
+        "encore connectée à un outil Odoo sécurisé."
+    )
+    assert result["approval_required"] is False
+    assert get_approvals() == []
 
 
 def test_missing_product_price_returns_clarification_without_approval(monkeypatch):

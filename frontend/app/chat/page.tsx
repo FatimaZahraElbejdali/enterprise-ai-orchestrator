@@ -1,20 +1,27 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ACCESS_DENIED_MESSAGE,
-  API_BASE_URL,
+  API_ERROR_MESSAGE,
+  ApiRequestError,
   AuthUser,
-  authHeaders,
+  BACKEND_UNREACHABLE_MESSAGE,
+  approveApproval,
   clearAuth,
+  getRoleLabel,
   getStoredUser,
-  handleAuthFailure,
   hasAnyPermission,
+  postChatMessage,
   requireAuth,
+  rejectApproval,
 } from "@/lib/api";
 
 type LooseRecord = Record<string, unknown>;
+
+const SHOW_TECHNICAL_DETAILS =
+  process.env.NEXT_PUBLIC_CHAT_DEBUG === "true";
 
 type OdooStockResult = {
   product?: unknown;
@@ -26,7 +33,37 @@ type OdooStockResult = {
   source?: unknown;
 };
 
+type OdooDocumentResult = {
+  document?: unknown;
+  type?: unknown;
+  id?: unknown;
+  partner?: unknown;
+  status?: unknown;
+  date?: unknown;
+  lines: LooseRecord[];
+};
+
+type OdooProductSearchResult = {
+  keyword?: unknown;
+  found: boolean;
+  products: Candidate[];
+};
+
+type OdooGenericRecordResult = {
+  model?: unknown;
+  keyword?: unknown;
+  found: boolean;
+  ambiguous: boolean;
+  records: Candidate[];
+  record?: LooseRecord | null;
+};
+
 type Candidate = Record<string, unknown>;
+
+type MainAnswer = {
+  title: string;
+  message: string;
+};
 
 type ChatResponse = {
   intent?: string;
@@ -49,10 +86,17 @@ type ChatResponse = {
   needs_clarification?: boolean;
   requires_approval?: boolean;
   approval_required?: boolean;
+  approval_status?: string;
   status?: string;
   message?: string;
   approval_id?: string;
+  timestamp?: string;
+  updated_at?: string | null;
+  permission_decision?: string;
+  response_focus?: string | null;
+  target_system?: string;
   tool_used?: string | null;
+  action?: string;
   data?: LooseRecord;
   result?: unknown;
   candidates?: Candidate[];
@@ -75,6 +119,11 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<ChatResponse | null>(null);
   const [error, setError] = useState("");
+  const [approvalActionLoading, setApprovalActionLoading] = useState<
+    "approve" | "reject" | null
+  >(null);
+  const [approvalActionMessage, setApprovalActionMessage] = useState("");
+  const [approvalActionError, setApprovalActionError] = useState("");
   const [currentUser] = useState<AuthUser | null>(() => getStoredUser());
   const resultRef = useRef<HTMLElement | null>(null);
 
@@ -97,69 +146,123 @@ export default function ChatPage() {
     setLoading(true);
     setError("");
     setResponse(null);
+    setApprovalActionLoading(null);
+    setApprovalActionMessage("");
+    setApprovalActionError("");
 
     try {
-      const res = await fetch(`${API_BASE_URL}/chat`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...authHeaders(),
-        },
-        body: JSON.stringify({
-          message: cleanMessage,
-          session_id: "demo-session",
-        }),
-      });
-
-      if (!res.ok) {
-        const authMessage = handleAuthFailure(res.status);
-        throw new Error(authMessage || "Erreur lors de l’appel au backend.");
-      }
-
-      const data = await res.json();
+      const data = await postChatMessage<ChatResponse>(cleanMessage);
       setResponse(data);
     } catch (err) {
       setError(
-        err instanceof Error
-          ? err.message
-          : "Une erreur inconnue est survenue."
+        err instanceof TypeError
+          ? BACKEND_UNREACHABLE_MESSAGE
+          : err instanceof Error
+            ? err.message
+            : API_ERROR_MESSAGE
       );
     } finally {
       setLoading(false);
     }
   }
 
+  async function handleInlineApproval(decision: "approve" | "reject") {
+    const approvalId = getApprovalId(response);
+
+    if (!approvalId || !isPendingApprovalResponse(response)) return;
+
+    setApprovalActionLoading(decision);
+    setApprovalActionMessage("");
+    setApprovalActionError("");
+
+    try {
+      const updatedApproval =
+        decision === "approve"
+          ? await approveApproval<LooseRecord>(approvalId)
+          : await rejectApproval<LooseRecord>(approvalId);
+      const status = getStringValue(updatedApproval.status) || (
+        decision === "approve" ? "approved" : "rejected"
+      );
+
+      setResponse((current) =>
+        current
+          ? {
+              ...current,
+              approval_status: status,
+              result: mergeApprovalResult(current.result, updatedApproval),
+            }
+          : current
+      );
+      setApprovalActionMessage(
+        decision === "approve" ? "Demande approuvée." : "Demande refusée."
+      );
+    } catch (err) {
+      setApprovalActionError(formatApprovalActionError(err));
+    } finally {
+      setApprovalActionLoading(null);
+    }
+  }
+
   const odooStockResult = normalizeOdooStockResult(response);
+  const odooDocumentResult = normalizeOdooDocumentResult(response);
+  const odooProductSearchResult = normalizeOdooProductSearchResult(response);
+  const odooGenericRecordResult = normalizeOdooGenericRecordResult(response);
   const candidates = normalizeCandidates(response);
-  const responseData = response?.data || {};
-  const selectedAgent =
-    response?.agent ||
-    response?.selected_agent ||
-    response?.agent_result?.agent;
-  const selectedRisk = response?.risk || response?.risk_level;
-  const selectedTool = response?.tool_used || response?.agent_result?.tool_used;
-  const localAgentResult = response?.agent_result?.result || response?.result;
+  const approvalId = getApprovalId(response);
+  const isApprovalPending = isPendingApprovalResponse(response);
+  const canApproveInline = hasAnyPermission(currentUser, [
+    "all",
+    "approve_odoo_actions",
+  ]);
   const isApprovalRequired =
     response?.requires_approval === true ||
-    response?.approval_required === true;
+    response?.approval_required === true ||
+    response?.permission_decision === "requires_approval" ||
+    response?.status === "pending_approval";
 
-  const isOdooProductResult = Boolean(
-    response?.intent === "odoo" && odooStockResult
-  );
+  const isOdooProductResult = Boolean(odooStockResult && !odooDocumentResult);
+  const isOdooDocumentResult = Boolean(odooDocumentResult);
+  const isOdooProductSearchResult = Boolean(odooProductSearchResult);
+  const isOdooGenericRecordResult = Boolean(odooGenericRecordResult);
 
   const isSensitiveAction =
     response?.status === "pending_approval" || isApprovalRequired;
+  const isUnsupported =
+    response?.status === "unsupported" ||
+    response?.parsed_action === "unsupported_external_server" ||
+    response?.action === "unsupported_external_server";
+  const isAccessDenied =
+    response?.status === "access_denied" ||
+    (response?.permission_decision === "denied" && !isUnsupported);
+  const isSecurityBlocked =
+    response?.status === "blocked" ||
+    response?.risk_level === "blocked" ||
+    response?.risk === "blocked" ||
+    response?.agent === "security_agent" ||
+    response?.parsed_action === "blocked_sensitive_path";
+  const needsClarification =
+    response?.needs_clarification === true ||
+    response?.status === "needs_clarification";
 
   const statusLabel = useMemo(() => {
     if (!response) return "En attente";
 
-    if (response.status === "completed") return "Terminé";
-    if (response.status === "pending_approval") return "Validation requise";
-    if (response.status === "not_found") return "Introuvable";
-    if (response.status === "failed") return "Échec";
-
-    return response.status || "Traité";
+    return formatStatus(response.status);
   }, [response]);
+
+  const mainAnswer = response
+    ? getMainAnswer(response, {
+        odooStockResult,
+        odooDocumentResult,
+        odooProductSearchResult,
+        odooGenericRecordResult,
+        statusLabel,
+      })
+    : null;
+  const showAnswerTitle = Boolean(
+    mainAnswer?.title &&
+      !["Réponse", "Résultat", "Terminé"].includes(mainAnswer.title)
+  );
 
   useEffect(() => {
     if (!response) return;
@@ -177,17 +280,25 @@ export default function ChatPage() {
       <aside className="sidebar">
         <div>
           <div className="brand">
-            <div className="brandMark">JB</div>
+            <div className="brandMark">
+              <Image
+                className="brandLogo"
+                src="/jamain-baco-logo.png"
+                alt="Jamain Baco"
+                width={48}
+                height={48}
+              />
+            </div>
             <div>
               <p>Jamain Baco</p>
-              <h1>AI Orchestrator</h1>
+              <h1>Orchestrateur IA</h1>
             </div>
           </div>
 
           <nav className="nav">
             <Link href="/">Tableau de bord</Link>
             <Link href="/chat" className="active">
-              Console Chat
+              Console de chat
             </Link>
             <Link href="/odoo">Odoo</Link>
             {hasAnyPermission(currentUser, ["all", "view_approvals", "approve_odoo_actions"]) && (
@@ -201,7 +312,7 @@ export default function ChatPage() {
 
         <div className="sidebarFooter">
           <p>{currentUser?.email || "Utilisateur connecté"}</p>
-          <span>Rôle : {currentUser?.role_label || "Lecture seule"}</span>
+          <span>Rôle : {getRoleLabel(currentUser)}</span>
           <button className="logoutButton" type="button" onClick={handleLogout}>
             Se déconnecter
           </button>
@@ -212,12 +323,7 @@ export default function ChatPage() {
         <header className="header">
           <div>
             <p className="eyebrow">Console Orchestrateur</p>
-            <h2>Chat opérationnel</h2>
-            <p className="subtitle">
-              Posez une demande métier. L’orchestrateur identifie le système
-              cible, le niveau de risque, l’agent à utiliser et la nécessité
-              d’une validation humaine.
-            </p>
+            <h2>Chat</h2>
           </div>
 
           <div className="headerBadge">
@@ -228,7 +334,6 @@ export default function ChatPage() {
 
         <section className="promptPanel">
           <form onSubmit={handleSubmit}>
-            <label htmlFor="message">Demande utilisateur</label>
             <textarea
               id="message"
               value={message}
@@ -241,25 +346,11 @@ export default function ChatPage() {
               <button type="submit" disabled={loading}>
                 {loading ? "Traitement..." : "Envoyer"}
               </button>
-
-              <button
-                type="button"
-                className="secondary"
-                onClick={() =>
-                  setMessage("Change price of BACO CLEAN to 25 DH")
-                }
-              >
-                Tester validation Odoo
-              </button>
             </div>
           </form>
         </section>
 
-        {error && (
-          <div className="errorBox">
-            {error === ACCESS_DENIED_MESSAGE ? ACCESS_DENIED_MESSAGE : error}
-          </div>
-        )}
+        {error && <div className="errorBox">{error}</div>}
 
         {response && (
           <>
@@ -267,133 +358,120 @@ export default function ChatPage() {
               ref={resultRef}
               className={isSensitiveAction ? "approvalPanel resultAnchor" : "resultPanel resultAnchor"}
             >
-              <div className="panelHeader">
-                <div>
-                  <p className="eyebrow">Réponse de l’orchestrateur</p>
-                  <h3>{mainResultTitle(response, odooStockResult, statusLabel)}</h3>
+              {showAnswerTitle && (
+                <div className="panelHeader">
+                  <div>
+                    <h3>{mainAnswer?.title}</h3>
+                  </div>
                 </div>
+              )}
 
-                {isOdooProductResult && !isSensitiveAction && (
-                  <span className="sourceBadge">
-                    {formatValue(odooStockResult?.source || "real_odoo")}
-                  </span>
-                )}
+              {isAccessDenied && (
+                <p className="genericMessage">{mainAnswer?.message}</p>
+              )}
 
-                {isSensitiveAction && <span className="warningBadge">Bloquée</span>}
-              </div>
+              {isSecurityBlocked && !isAccessDenied && !isUnsupported && (
+                <p className="genericMessage">{mainAnswer?.message}</p>
+              )}
 
-              {response.needs_clarification && (
+              {isUnsupported && !isAccessDenied && !isSecurityBlocked && (
+                <p className="genericMessage">{mainAnswer?.message}</p>
+              )}
+
+              {needsClarification && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
                 <p className="genericMessage">
-                  {response.message || "Des informations sont nécessaires pour continuer."}
+                  {mainAnswer?.message}
                 </p>
               )}
 
-              {isOdooProductResult && !isSensitiveAction && (
-                <>
-                  <div className="productGrid">
-                    <Metric
-                      label="Stock disponible"
-                      value={formatNumber(odooStockResult?.available_stock)}
-                    />
-                    <Metric
-                      label="Stock prévisionnel"
-                      value={formatNumber(odooStockResult?.forecast_stock)}
-                    />
-                    <Metric
-                      label="Prix de vente"
-                      value={formatPrice(odooStockResult?.sale_price)}
-                    />
-                    <Metric
-                      label="Référence"
-                      value={formatValue(odooStockResult?.internal_reference)}
-                    />
-                  </div>
-
-                  <div className="detailsTable">
-                    <Detail
-                      label="Produit"
-                      value={formatValue(odooStockResult?.product)}
-                    />
-                    <Detail
-                      label="Référence interne"
-                      value={formatValue(odooStockResult?.internal_reference)}
-                    />
-                    <Detail
-                      label="Stock disponible"
-                      value={formatNumber(odooStockResult?.available_stock)}
-                    />
-                    <Detail
-                      label="Stock prévisionnel"
-                      value={formatNumber(odooStockResult?.forecast_stock)}
-                    />
-                    <Detail
-                      label="Prix de vente"
-                      value={formatPrice(odooStockResult?.sale_price)}
-                    />
-                    <Detail
-                      label="Unité"
-                      value={formatValue(odooStockResult?.unit)}
-                    />
-                    <Detail
-                      label="Source"
-                      value={formatValue(odooStockResult?.source || "real_odoo")}
-                    />
-                  </div>
-                </>
+              {isOdooProductResult && !isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
+                <p className="genericMessage">{mainAnswer?.message}</p>
               )}
 
-              {isSensitiveAction && (
-                <>
-                  <p className="approvalMessage">
-                    {response.message ||
-                      "Cette action nécessite une validation humaine avant exécution."}
-                  </p>
+              {isOdooProductSearchResult && !isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
+                <p className="genericMessage">{mainAnswer?.message}</p>
+              )}
 
+              {isOdooGenericRecordResult && !isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
+                <p className="genericMessage">{mainAnswer?.message}</p>
+              )}
+
+              {isOdooDocumentResult && !isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
+                <p className="genericMessage">{mainAnswer?.message}</p>
+              )}
+
+              {isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
+                <>
                   <div className="detailsTable">
                     <Detail
                       label="Action"
-                      value={translateAction(
-                        response.parsed_action || formatValue(responseData.action)
-                      )}
+                      value={getApprovalActionLabel(response)}
                     />
                     <Detail
-                      label="Produit"
-                      value={formatValue(responseData.product || response.product_name)}
+                      label="Élément concerné"
+                      value={getApprovalTarget(response)}
                     />
                     <Detail
                       label="Valeur demandée"
-                      value={formatValue(responseData.requested_value || response.new_value)}
+                      value={getApprovalRequestedValue(response)}
                     />
-                    <Detail
-                      label="ID validation"
-                      value={response.approval_id || "-"}
-                    />
-                    <Detail label="Exécuté dans Odoo" value="Non" />
+                    <Detail label="Statut" value={getApprovalStatusLabel(response)} />
+                    {getApprovalCreatedDate(response) && (
+                      <Detail label="Date" value={getApprovalCreatedDate(response)} />
+                    )}
                   </div>
 
-                  <div className="approvalActions">
-                    <Link href="/approvals">Voir les validations</Link>
-                    <Link href="/logs">Voir les logs d’audit</Link>
-                  </div>
-                </>
-              )}
+                  {approvalActionMessage && (
+                    <p className="approvalNotice success">{approvalActionMessage}</p>
+                  )}
 
-              {!isOdooProductResult && !isSensitiveAction && !response.needs_clarification && (
-                <>
-                  <p className="genericMessage">
-                    {response.message || "Réponse traitée par l’orchestrateur."}
-                  </p>
+                  {approvalActionError && (
+                    <p className="approvalNotice danger">{approvalActionError}</p>
+                  )}
 
-                  {localAgentResult && (
-                    <AgentResultDetails
-                      agent={selectedAgent}
-                      result={localAgentResult}
-                    />
+                  {approvalId && isApprovalPending && canApproveInline && (
+                    <div className="approvalActions">
+                      <button
+                        type="button"
+                        disabled={approvalActionLoading !== null}
+                        onClick={() => void handleInlineApproval("approve")}
+                      >
+                        {approvalActionLoading === "approve" ? "Validation..." : "Approuver"}
+                      </button>
+                      <button
+                        className="reject"
+                        type="button"
+                        disabled={approvalActionLoading !== null}
+                        onClick={() => void handleInlineApproval("reject")}
+                      >
+                        {approvalActionLoading === "reject" ? "Refus..." : "Refuser"}
+                      </button>
+                    </div>
+                  )}
+
+                  {approvalId && isApprovalPending && !canApproveInline && (
+                    <p className="approvalNotice">
+                      Vous n’avez pas la permission de valider cette demande.
+                    </p>
                   )}
                 </>
               )}
 
-              {candidates.length > 0 && (
+              {!isOdooProductResult &&
+                !isOdooProductSearchResult &&
+                !isOdooGenericRecordResult &&
+                !isOdooDocumentResult &&
+                !isSensitiveAction &&
+                !isUnsupported &&
+                !isAccessDenied &&
+                !isSecurityBlocked &&
+                !needsClarification && (
+                <p className="genericMessage">
+                  {mainAnswer?.message}
+                </p>
+              )}
+
+              {candidates.length > 0 && !isOdooProductSearchResult && (
                 <div className="candidateBlock">
                   <p className="eyebrow">Candidats</p>
                   <div className="candidateList">
@@ -429,76 +507,12 @@ export default function ChatPage() {
               )}
             </section>
 
-            <section className="decisionGrid">
-              <InfoCard
-                label="Intention"
-                value={response.intent || "Non détecté"}
-              />
-              <InfoCard
-                label="Agent"
-                value={formatAgentName(selectedAgent)}
-              />
-              <InfoCard
-                label="Risque"
-                value={translateRisk(selectedRisk)}
-              />
-              <InfoCard
-                label="Validation"
-                value={
-                  isApprovalRequired ? "Requise" : "Non requise"
-                }
-                tone={isApprovalRequired ? "warning" : "success"}
-              />
-            </section>
-
-            {response.parser_source && (
-              <section className="analysisPanel">
-                <div className="panelHeader">
-                  <div>
-                    <p className="eyebrow">Debug</p>
-                    <h3>Détails d’analyse</h3>
-                  </div>
-                </div>
-
-                <div className="detailsTable">
-                  <Detail
-                    label="Source d’analyse"
-                    value={formatParserSource(response.parser_source)}
-                  />
-                  <Detail
-                    label="Action détectée"
-                    value={translateAction(response.parsed_action)}
-                  />
-                  <Detail
-                    label="Validation requise"
-                    value={isApprovalRequired ? "Oui" : "Non"}
-                  />
-                  <Detail
-                    label="Document"
-                    value={
-                      response.document_reference ||
-                      formatValue(response.document_id)
-                    }
-                  />
-                  <Detail
-                    label="Produit"
-                    value={formatValue(
-                      response.product_name || response.line_product
-                    )}
-                  />
-                  <Detail
-                    label="Outil utilisé"
-                    value={selectedTool || response.tool_used || "Aucun"}
-                  />
-                  <Detail label="Statut" value={statusLabel} />
-                </div>
-              </section>
+            {SHOW_TECHNICAL_DETAILS && (
+              <details className="rawPanel">
+                <summary>Détails techniques</summary>
+                <TechnicalDetails response={response} />
+              </details>
             )}
-
-            <details className="rawPanel">
-              <summary>Réponse brute</summary>
-              <pre>{JSON.stringify(sanitizeForDisplay(response), null, 2)}</pre>
-            </details>
           </>
         )}
       </section>
@@ -543,14 +557,19 @@ export default function ChatPage() {
         }
 
         .brandMark {
-          width: 44px;
-          height: 44px;
+          width: 56px;
+          height: 56px;
           background: #ffffff;
-          color: #101827;
           display: grid;
           place-items: center;
-          font-weight: 900;
-          letter-spacing: -0.04em;
+          flex: 0 0 56px;
+        }
+
+        .brandLogo {
+          width: 48px;
+          height: 48px;
+          object-fit: contain;
+          display: block;
         }
 
         .brand p {
@@ -795,6 +814,10 @@ export default function ChatPage() {
           border-left: 4px solid #b7791f;
         }
 
+        .infoCard.danger {
+          border-left: 4px solid #9f1d1d;
+        }
+
         .panelHeader {
           display: flex;
           align-items: flex-start;
@@ -811,7 +834,8 @@ export default function ChatPage() {
         }
 
         .sourceBadge,
-        .warningBadge {
+        .warningBadge,
+        .dangerBadge {
           border-radius: 999px;
           padding: 8px 11px;
           font-size: 12px;
@@ -829,6 +853,12 @@ export default function ChatPage() {
           background: #fff7df;
           color: #8a5a00;
           border: 1px solid #f2d38b;
+        }
+
+        .dangerBadge {
+          background: #fff1f1;
+          color: #9f1d1d;
+          border: 1px solid #f2c0c0;
         }
 
         .productGrid {
@@ -862,6 +892,36 @@ export default function ChatPage() {
 
         .detailsTable {
           border-top: 1px solid #e5e7eb;
+        }
+
+        .lineTable {
+          margin-top: 18px;
+          border: 1px solid #d9dee7;
+          overflow: hidden;
+        }
+
+        .lineHeader,
+        .lineRow {
+          display: grid;
+          grid-template-columns: 2fr 1fr 1fr;
+          gap: 12px;
+          padding: 12px 14px;
+        }
+
+        .lineHeader {
+          background: #f8fafc;
+          color: #647084;
+          font-size: 12px;
+          font-weight: 900;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+        }
+
+        .lineRow {
+          border-top: 1px solid #e5e7eb;
+          color: #172033;
+          font-size: 13px;
+          font-weight: 800;
         }
 
         .detail {
@@ -899,11 +959,12 @@ export default function ChatPage() {
 
         .approvalActions {
           display: flex;
+          flex-wrap: wrap;
           gap: 10px;
           margin-top: 18px;
         }
 
-        .approvalActions a {
+        .approvalActions button {
           height: 40px;
           display: inline-flex;
           align-items: center;
@@ -915,6 +976,34 @@ export default function ChatPage() {
           text-decoration: none;
           font-size: 14px;
           font-weight: 800;
+        }
+
+        .approvalActions button.reject {
+          background: #ffffff;
+          color: #9f1d1d;
+          border-color: #f2c0c0;
+        }
+
+        .approvalNotice {
+          margin: 14px 0 0;
+          border: 1px solid #d9dee7;
+          background: #f8fafc;
+          color: #475569;
+          padding: 12px;
+          font-size: 14px;
+          font-weight: 800;
+        }
+
+        .approvalNotice.success {
+          border-color: #b8e0cb;
+          background: #eef8f3;
+          color: #13754a;
+        }
+
+        .approvalNotice.danger {
+          border-color: #f2c0c0;
+          background: #fff1f1;
+          color: #9f1d1d;
         }
 
         .candidateList {
@@ -1026,38 +1115,17 @@ export default function ChatPage() {
             gap: 4px;
           }
 
+          .lineHeader,
+          .lineRow {
+            grid-template-columns: 1fr;
+          }
+
           .nav {
             grid-template-columns: 1fr;
           }
         }
       `}</style>
     </main>
-  );
-}
-
-function InfoCard({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone?: "success" | "warning";
-}) {
-  return (
-    <div className={`infoCard ${tone || ""}`}>
-      <p>{label}</p>
-      <h3>{value}</h3>
-    </div>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="metric">
-      <p>{label}</p>
-      <h4>{value}</h4>
-    </div>
   );
 }
 
@@ -1096,73 +1164,225 @@ function Detail({ label, value }: { label: string; value: string }) {
   );
 }
 
-function AgentResultDetails({
-  agent,
-  result,
-}: {
-  agent?: string;
-  result: unknown;
-}) {
-  const record = isLooseRecord(result) ? result : null;
-
-  if (agent === "support_agent" && record) {
-    const steps = Array.isArray(record.steps)
-      ? record.steps
-      : Array.isArray(record.suggested_steps)
-        ? record.suggested_steps
-        : [];
-
-    return (
-      <div className="detailsTable">
-        <Detail label="Titre" value={formatValue(record.title || record.diagnosis)} />
-        {steps.length > 0 && (
-          <div className="stepList">
-            {steps.map((step, index) => (
-              <div className="stepItem" key={`${index}-${String(step)}`}>
-                <span>{index + 1}</span>
-                <p>{formatValue(step)}</p>
-              </div>
-            ))}
-          </div>
-        )}
-        <Detail label="Escalade" value={formatValue(record.escalation)} />
-      </div>
-    );
-  }
-
-  if (agent === "server_agent" && record) {
-    return (
-      <div className="detailsTable">
-        {"files" in record && Array.isArray(record.files) && (
-          <Detail
-            label="Fichiers"
-            value={
-              record.files.length > 0
-                ? record.files.map((item) => String(item)).join(", ")
-                : "Aucun fichier"
-            }
-          />
-        )}
-        {"filename" in record && (
-          <Detail label="Fichier" value={formatValue(record.filename)} />
-        )}
-        {"content" in record && (
-          <Detail label="Contenu" value={formatValue(record.content)} />
-        )}
-        <Detail label="Message" value={formatValue(record.message)} />
-      </div>
-    );
-  }
+function TechnicalDetails({ response }: { response: ChatResponse }) {
+  const selectedAgent =
+    response.agent ||
+    response.selected_agent ||
+    response.agent_result?.agent;
+  const technicalPayload = sanitizeForDisplay({
+    status: response.status,
+    intent: response.intent,
+    agent: selectedAgent,
+    risk: response.risk || response.risk_level,
+    approval_status: response.approval_status,
+    parser_source: response.parser_source,
+    parsed_action: response.parsed_action || response.action,
+    tool_used: response.tool_used || response.agent_result?.tool_used,
+    result: response.result || response.agent_result?.result || response.data,
+    candidates: response.candidates,
+  });
 
   return (
     <div className="detailsTable">
-      <Detail label="Résultat" value={formatAgentResult(result)} />
+      <Detail label="Statut" value={formatStatus(response.status)} />
+      <Detail label="Agent" value={formatAgentName(selectedAgent)} />
+      <Detail label="Risque" value={formatRisk(response.risk || response.risk_level)} />
+      <Detail
+        label="Validation"
+        value={
+          response.requires_approval || response.approval_required
+            ? "Validation requise"
+            : "Non requise"
+        }
+      />
+      <Detail
+        label="Source"
+        value={formatParserSource(response.parser_source)}
+      />
+      <Detail
+        label="Action"
+        value={translateAction(response.parsed_action || response.action)}
+      />
+      <Detail
+        label="Données"
+        value={formatTechnicalPayload(technicalPayload)}
+      />
     </div>
   );
 }
 
 function isLooseRecord(value: unknown): value is LooseRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getStringValue(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function getNestedRecord(record: LooseRecord, key: string): LooseRecord {
+  const value = record[key];
+  return isLooseRecord(value) ? value : {};
+}
+
+function getApprovalRecord(response: ChatResponse | null): LooseRecord {
+  if (!response) return {};
+
+  const result = isLooseRecord(response.result) ? response.result : {};
+  const data = isLooseRecord(response.data) ? response.data : {};
+
+  if (isLooseRecord(result.approval)) return result.approval;
+  if (isLooseRecord(data.approval)) return data.approval;
+
+  return {};
+}
+
+function getApprovalMetadata(response: ChatResponse | null): LooseRecord {
+  const approval = getApprovalRecord(response);
+  return getNestedRecord(approval, "metadata");
+}
+
+function getApprovalId(response: ChatResponse | null) {
+  if (!response) return "";
+
+  const data = isLooseRecord(response.data) ? response.data : {};
+  const approval = getApprovalRecord(response);
+
+  return (
+    response.approval_id ||
+    getStringValue(data.approval_id) ||
+    getStringValue(approval.id)
+  );
+}
+
+function getApprovalStatus(response: ChatResponse | null) {
+  if (!response) return "";
+
+  const approval = getApprovalRecord(response);
+
+  return (
+    response.approval_status ||
+    getStringValue(approval.status) ||
+    response.status ||
+    ""
+  );
+}
+
+function isPendingApprovalStatus(status?: string) {
+  const normalized = (status || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]/g, " ");
+
+  return [
+    "pending",
+    "pending approval",
+    "requires approval",
+    "en attente",
+    "en attente de validation",
+  ].includes(normalized);
+}
+
+function isPendingApprovalResponse(response: ChatResponse | null) {
+  return Boolean(getApprovalId(response)) && isPendingApprovalStatus(getApprovalStatus(response));
+}
+
+function getApprovalActionLabel(response: ChatResponse) {
+  const data = isLooseRecord(response.data) ? response.data : {};
+  const approval = getApprovalRecord(response);
+
+  return translateAction(
+    getStringValue(approval.action) ||
+      response.parsed_action ||
+      getStringValue(data.action) ||
+      response.action
+  );
+}
+
+function getApprovalTarget(response: ChatResponse) {
+  const data = isLooseRecord(response.data) ? response.data : {};
+  const approval = getApprovalRecord(response);
+  const metadata = getApprovalMetadata(response);
+  const documentId = response.document_id || data.document_id || metadata.document_id;
+  const documentLabel = documentId ? `ID ${formatValue(documentId)}` : "";
+
+  return formatValue(
+    data.product ||
+      response.product_name ||
+      approval.entity_name ||
+      metadata.product_name ||
+      metadata.record_query ||
+      data.document ||
+      data.document_query ||
+      metadata.document_query ||
+      response.document_reference ||
+      documentLabel
+  );
+}
+
+function getApprovalRequestedValue(response: ChatResponse) {
+  const data = isLooseRecord(response.data) ? response.data : {};
+  const result = isLooseRecord(response.result) ? response.result : {};
+  const approval = getApprovalRecord(response);
+  const metadata = getApprovalMetadata(response);
+
+  return formatValue(
+    approval.requested_change ||
+      data.requested_value ||
+      data.new_value ||
+      response.new_value ||
+      result.new_value ||
+      result.new_price ||
+      metadata.new_price ||
+      metadata.new_value
+  );
+}
+
+function getApprovalStatusLabel(response: ChatResponse) {
+  return translateStatus(getApprovalStatus(response));
+}
+
+function getApprovalCreatedDate(response: ChatResponse) {
+  const data = isLooseRecord(response.data) ? response.data : {};
+  const approval = getApprovalRecord(response);
+  const timestamp =
+    getStringValue(approval.timestamp) ||
+    response.timestamp ||
+    getStringValue(data.timestamp);
+
+  return formatDateTime(timestamp);
+}
+
+function mergeApprovalResult(currentResult: unknown, updatedApproval: LooseRecord) {
+  const current = isLooseRecord(currentResult) ? currentResult : {};
+
+  return {
+    ...current,
+    approval: sanitizeForDisplay(updatedApproval),
+  };
+}
+
+function formatApprovalActionError(error: unknown) {
+  if (error instanceof ApiRequestError) {
+    if (error.status === 401) return "Session expirée. Veuillez vous reconnecter.";
+    if (error.status === 403) return "Accès refusé. Votre rôle ne permet pas cette action.";
+    return API_ERROR_MESSAGE;
+  }
+
+  if (error instanceof TypeError) return BACKEND_UNREACHABLE_MESSAGE;
+
+  return API_ERROR_MESSAGE;
+}
+
+function formatDateTime(value?: string) {
+  if (!value) return "";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
+  return new Intl.DateTimeFormat("fr-FR", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }
 
 function normalizeOdooStockResult(response: ChatResponse | null): OdooStockResult | null {
@@ -1173,15 +1393,13 @@ function normalizeOdooStockResult(response: ChatResponse | null): OdooStockResul
     result &&
     ("stock_quantity" in result ||
       "forecast_quantity" in result ||
-      "sale_price" in result ||
-      "product" in result);
+      "sale_price" in result);
 
   const hasDataStock =
     data &&
     ("available_stock" in data ||
       "forecast_stock" in data ||
-      "sale_price" in data ||
-      "product" in data);
+      "sale_price" in data);
 
   if (!hasResultStock && !hasDataStock) {
     return null;
@@ -1197,6 +1415,123 @@ function normalizeOdooStockResult(response: ChatResponse | null): OdooStockResul
     unit: result?.unit ?? data?.unit,
     source: result?.source ?? data?.source,
   };
+}
+
+function normalizeOdooProductSearchResult(
+  response: ChatResponse | null
+): OdooProductSearchResult | null {
+  const result = isLooseRecord(response?.result) ? response.result : null;
+  const data = isLooseRecord(response?.data) ? response.data : null;
+  const action = response?.parsed_action || response?.action;
+  const toolUsed = response?.tool_used || response?.agent_result?.tool_used;
+  const products = normalizeCandidates(response);
+  const looksLikeProductSearch =
+    action === "inventory_product_search" ||
+    action === "product_search" ||
+    toolUsed === "odoo_search_product" ||
+    Boolean(result && Array.isArray(result.results)) ||
+    Boolean(data && Array.isArray(data.results));
+
+  if (!looksLikeProductSearch) return null;
+
+  return {
+    keyword: result?.product ?? data?.product ?? response?.product_name,
+    found: Boolean(result?.found ?? data?.found ?? products.length > 0),
+    products,
+  };
+}
+
+function normalizeOdooGenericRecordResult(
+  response: ChatResponse | null
+): OdooGenericRecordResult | null {
+  const result = isLooseRecord(response?.result) ? response.result : null;
+  const data = isLooseRecord(response?.data) ? response.data : null;
+  const action = response?.parsed_action || response?.action;
+  const toolUsed = response?.tool_used || response?.agent_result?.tool_used;
+  const records = Array.isArray(result?.records)
+    ? (result.records as Candidate[])
+    : Array.isArray(data?.records)
+      ? (data.records as Candidate[])
+      : [];
+  const record = isLooseRecord(result?.record)
+    ? result.record
+    : isLooseRecord(data?.record)
+      ? data.record
+      : null;
+  const looksGeneric =
+    action === "odoo_search_records" ||
+    action === "odoo_get_record_details" ||
+    toolUsed === "odoo_search_records" ||
+    toolUsed === "odoo_get_record_details" ||
+    Boolean(result && ("records" in result || "record" in result));
+
+  if (!looksGeneric) return null;
+
+  return {
+    model: result?.model ?? data?.model,
+    keyword: result?.keyword ?? data?.keyword,
+    found: Boolean(result?.found ?? data?.found ?? (records.length > 0 || Boolean(record))),
+    ambiguous: Boolean(result?.ambiguous ?? data?.ambiguous),
+    records,
+    record,
+  };
+}
+
+function normalizeOdooDocumentResult(response: ChatResponse | null): OdooDocumentResult | null {
+  const result = isLooseRecord(response?.result) ? response.result : null;
+  const data = isLooseRecord(response?.data) ? response.data : null;
+  const record = isLooseRecord(result?.record)
+    ? result.record
+    : isLooseRecord(result?.document)
+      ? result.document
+      : isLooseRecord(data?.record)
+        ? data.record
+        : isLooseRecord(data?.document)
+          ? data.document
+          : null;
+
+  const model = result?.model ?? data?.model ?? record?.model ?? response?.document_type;
+  const document =
+    result?.name ??
+    data?.name ??
+    record?.name ??
+    response?.document_reference ??
+    result?.document_reference;
+  const id =
+    result?.record_id ??
+    data?.record_id ??
+    record?.id ??
+    response?.document_id;
+  const partner =
+    result?.partner ??
+    data?.partner ??
+    record?.partner ??
+    response?.partner_name;
+  const status = result?.state ?? data?.state ?? record?.state;
+  const date = result?.date ?? data?.date ?? record?.date;
+  const lines = normalizeDocumentLines(result?.lines ?? data?.lines ?? record?.lines);
+  const looksLikeDocument =
+    response?.intent?.includes("document") ||
+    response?.parsed_action?.includes("document") ||
+    Boolean(document || id || partner || lines.length > 0);
+
+  if (!looksLikeDocument) return null;
+
+  return {
+    document,
+    type: model,
+    id,
+    partner,
+    status,
+    date,
+    lines,
+  };
+}
+
+function normalizeDocumentLines(value: unknown): LooseRecord[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.filter(isLooseRecord);
 }
 
 function normalizeCandidates(response: ChatResponse | null): Candidate[] {
@@ -1227,13 +1562,29 @@ function normalizeCandidates(response: ChatResponse | null): Candidate[] {
 }
 
 const SENSITIVE_DISPLAY_KEYS = new Set([
+  "db",
+  "database_name",
+  "dbname",
   "url",
+  "odoo_url",
   "database",
   "username",
+  "user",
   "uid",
+  "error",
+  "errors",
+  "exception",
+  "traceback",
+  "provider_error",
+  "raw_error",
+  "xmlrpc",
+  "xml_rpc",
+  "diagnostics",
   "database_configured",
   "username_configured",
   "password_or_api_key_configured",
+  "password_configured",
+  "api_key_configured",
   "api_key",
   "password",
   "token",
@@ -1242,19 +1593,45 @@ const SENSITIVE_DISPLAY_KEYS = new Set([
 
 function isSensitiveDisplayKey(key: string) {
   const normalized = key.toLowerCase();
+  const compact = normalized.replace(/[\s_-]/g, "");
 
   return (
     SENSITIVE_DISPLAY_KEYS.has(normalized) ||
+    compact.includes("url") ||
+    (compact.includes("odoo") && compact.includes("url")) ||
+    compact.includes("database") ||
+    compact.includes("dbname") ||
+    compact.includes("apikey") ||
     normalized.includes("api_key") ||
     normalized.includes("password") ||
     normalized.includes("token") ||
-    normalized.includes("secret")
+    normalized.includes("secret") ||
+    normalized.includes("traceback") ||
+    normalized.includes("xmlrpc") ||
+    normalized.includes("xml-rpc") ||
+    normalized.includes("provider_error")
   );
+}
+
+function sanitizeTextForDisplay(value: string) {
+  if (
+    /api key|api_key|password|secret|token|\.env|xml-?rpc|traceback|odoo url|database name|username|uid/i.test(
+      value
+    )
+  ) {
+    return "[information masquée]";
+  }
+
+  return value;
 }
 
 function sanitizeForDisplay(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map((item) => sanitizeForDisplay(item));
+  }
+
+  if (typeof value === "string") {
+    return sanitizeTextForDisplay(value);
   }
 
   if (!isLooseRecord(value)) {
@@ -1266,6 +1643,46 @@ function sanitizeForDisplay(value: unknown): unknown {
       .filter(([key]) => !isSensitiveDisplayKey(key))
       .map(([key, entry]) => [key, sanitizeForDisplay(entry)])
   );
+}
+
+function formatTechnicalPayload(value: unknown): string {
+  const sanitized = sanitizeForDisplay(value);
+
+  if (!isLooseRecord(sanitized)) {
+    return formatValue(sanitized);
+  }
+
+  const lines = Object.entries(sanitized)
+    .filter(([, entry]) => entry !== undefined && entry !== null && entry !== "")
+    .map(([key, entry]) => `${formatTechnicalKey(key)}: ${formatTechnicalValue(entry)}`);
+
+  return lines.length > 0 ? lines.join("\n") : "-";
+}
+
+function formatTechnicalKey(key: string) {
+  const labels: Record<string, string> = {
+    approval_status: "validation",
+    parser_source: "source",
+    parsed_action: "action",
+    tool_used: "outil",
+  };
+
+  return labels[key] || key;
+}
+
+function formatTechnicalValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.map((item) => formatTechnicalValue(item)).join("; ");
+  }
+
+  if (isLooseRecord(value)) {
+    return Object.entries(value)
+      .filter(([, entry]) => entry !== undefined && entry !== null && entry !== "")
+      .map(([key, entry]) => `${formatTechnicalKey(key)}=${formatTechnicalValue(entry)}`)
+      .join(", ");
+  }
+
+  return formatValue(value);
 }
 
 function formatSafeOdooStatus(record: LooseRecord) {
@@ -1289,11 +1706,26 @@ function mainResultTitle(
   odooStockResult: OdooStockResult | null,
   statusLabel: string
 ) {
+  if (response.status === "access_denied") return "Accès refusé";
+  if (
+    response.risk === "blocked" ||
+    response.risk_level === "blocked" ||
+    response.agent === "security_agent" ||
+    response.parsed_action === "blocked_sensitive_path"
+  ) {
+    return "Requête bloquée";
+  }
   if (response.needs_clarification) return "Information requise";
-  if (response.status === "pending_approval") return "Validation humaine requise";
+  if (response.status === "pending_approval") return "Action nécessitant validation humaine";
 
   if (odooStockResult?.product) {
     return formatValue(odooStockResult.product);
+  }
+
+  const documentResult = normalizeOdooDocumentResult(response);
+
+  if (documentResult?.document) {
+    return formatValue(documentResult.document);
   }
 
   if (response.parsed_action === "inventory_summary") {
@@ -1316,6 +1748,265 @@ function mainResultTitle(
   return statusLabel;
 }
 
+function getMainAnswer(
+  response: ChatResponse,
+  {
+    odooStockResult,
+    odooDocumentResult,
+    odooProductSearchResult,
+    odooGenericRecordResult,
+    statusLabel,
+  }: {
+    odooStockResult: OdooStockResult | null;
+    odooDocumentResult: OdooDocumentResult | null;
+    odooProductSearchResult: OdooProductSearchResult | null;
+    odooGenericRecordResult: OdooGenericRecordResult | null;
+    statusLabel: string;
+  }
+): MainAnswer {
+  const safeMessage = cleanBusinessMessage(response.message);
+
+  if (
+    response.status === "unsupported" ||
+    response.parsed_action === "unsupported_external_server" ||
+    response.action === "unsupported_external_server"
+  ) {
+    return {
+      title: "Action non disponible",
+      message:
+        "Action non disponible. Cette demande n’est pas encore connectée à un outil backend sécurisé.",
+    };
+  }
+
+  if (
+    response.status === "access_denied" ||
+    response.permission_decision === "denied"
+  ) {
+    return {
+      title: "Accès refusé",
+      message: "Accès refusé. Votre rôle ne permet pas cette action.",
+    };
+  }
+
+  if (
+    response.status === "blocked" ||
+    response.risk === "blocked" ||
+    response.risk_level === "blocked" ||
+    response.agent === "security_agent" ||
+    response.parsed_action === "blocked_sensitive_path"
+  ) {
+    return {
+      title: "Requête bloquée",
+      message: "Demande bloquée pour des raisons de sécurité.",
+    };
+  }
+
+  if (response.needs_clarification || response.status === "needs_clarification") {
+    return {
+      title: "Précision requise",
+      message:
+        safeMessage || "Des informations sont nécessaires pour continuer.",
+    };
+  }
+
+  if (
+    response.status === "pending_approval" ||
+    response.requires_approval === true ||
+    response.approval_required === true ||
+    response.permission_decision === "requires_approval"
+  ) {
+    return {
+      title: "Validation requise",
+      message: "Validation requise",
+    };
+  }
+
+  if (odooStockResult) {
+    return {
+      title: "Réponse",
+      message: formatOdooStockAnswer(odooStockResult),
+    };
+  }
+
+  if (odooProductSearchResult) {
+    return {
+      title: "Réponse",
+      message: formatOdooProductSearchAnswer(odooProductSearchResult),
+    };
+  }
+
+  if (odooGenericRecordResult) {
+    return {
+      title: "Réponse",
+      message: formatOdooGenericRecordAnswer(odooGenericRecordResult),
+    };
+  }
+
+  if (odooDocumentResult) {
+    return {
+      title: odooDocumentResult.document
+        ? formatValue(odooDocumentResult.document)
+        : "Détails du document Odoo",
+      message:
+        safeMessage ||
+        "Le document Odoo a été consulté avec succès. Les champs principaux sont affichés ci-dessous.",
+    };
+  }
+
+  if (isServerDiagnosticResponse(response)) {
+    return {
+      title: "Réponse",
+      message: formatServerDiagnosticAnswer(response),
+    };
+  }
+
+  return {
+    title: isNormalTextAnswer(response) ? "Réponse" : mainResultTitle(response, odooStockResult, statusLabel),
+    message:
+      safeMessage ||
+      formatAgentResult(response.agent_result?.result || response.result),
+  };
+}
+
+function isNormalTextAnswer(response: ChatResponse) {
+  const selectedAgent =
+    response.agent ||
+    response.selected_agent ||
+    response.agent_result?.agent;
+  const action = response.parsed_action || response.tool_used || "";
+  const textActions = new Set([
+    "answer_question",
+    "answer_general_question",
+    "answer_knowledge_question",
+    "knowledge_project_answer",
+  ]);
+
+  return (
+    response.status === "completed" &&
+    response.requires_approval !== true &&
+    response.approval_required !== true &&
+    (selectedAgent === "knowledge_agent" ||
+      selectedAgent === "general_agent" ||
+      textActions.has(action))
+  );
+}
+
+function isServerDiagnosticResponse(response: ChatResponse) {
+  const selectedAgent =
+    response.agent ||
+    response.selected_agent ||
+    response.agent_result?.agent;
+  const result = getResultRecord(response);
+
+  return (
+    selectedAgent === "server_agent" &&
+    Boolean(result) &&
+    ("cpu_usage" in result ||
+      "ram_usage" in result ||
+      "disk_usage" in result ||
+      "uptime" in result)
+  );
+}
+
+function getResultRecord(response: ChatResponse): LooseRecord {
+  if (isLooseRecord(response.result)) return response.result;
+
+  if (isLooseRecord(response.agent_result?.result)) {
+    return response.agent_result.result;
+  }
+
+  if (isLooseRecord(response.data)) return response.data;
+
+  return {};
+}
+
+function formatServerDiagnosticAnswer(response: ChatResponse) {
+  const result = getResultRecord(response);
+
+  return [
+    "Serveur local de l’orchestrateur actif.",
+    `CPU: ${formatValue(result.cpu_usage)}`,
+    `RAM: ${formatValue(result.ram_usage)}`,
+    `disque: ${formatValue(result.disk_usage)}`,
+    `disponibilité: ${formatValue(result.uptime)}`,
+  ].join(" ");
+}
+
+function formatOdooStockAnswer(stock: OdooStockResult) {
+  return [
+    `Produit: ${formatValue(stock.product)}`,
+    `Stock disponible: ${formatNumber(stock.available_stock)}`,
+    `Stock prévu: ${formatNumber(stock.forecast_stock)}`,
+    `Prix: ${formatPrice(stock.sale_price)}`,
+  ].join("\n");
+}
+
+function formatOdooProductSearchAnswer(search: OdooProductSearchResult) {
+  const keyword = formatValue(search.keyword);
+
+  if (!search.found || search.products.length === 0) {
+    return `Aucun produit correspondant à "${keyword}" n’a été trouvé dans l’inventaire Odoo.`;
+  }
+
+  const lines = search.products.slice(0, 5).map((product) => {
+    const name = formatValue(product.name || product.product || product.product_name);
+    const details = [
+      product.default_code || product.internal_reference
+        ? `Référence interne: ${formatValue(product.default_code || product.internal_reference)}`
+        : "",
+      product.qty_available !== undefined || product.available_stock !== undefined || product.quantity !== undefined
+        ? `Stock disponible: ${formatNumber(product.qty_available ?? product.available_stock ?? product.quantity)}`
+        : "",
+    ].filter(Boolean);
+
+    return details.length > 0 ? `- ${name} | ${details.join(" | ")}` : `- ${name}`;
+  });
+
+  return [
+    `Produits correspondant à "${keyword}" trouvés dans l’inventaire Odoo:`,
+    ...lines,
+  ].join("\n");
+}
+
+function formatOdooGenericRecordAnswer(result: OdooGenericRecordResult) {
+  if (result.ambiguous) {
+    return "Plusieurs enregistrements correspondent à votre demande. Veuillez préciser lequel choisir.";
+  }
+
+  if (!result.found) {
+    return "Aucun enregistrement correspondant trouvé dans Odoo.";
+  }
+
+  const records = result.record ? [result.record] : result.records;
+  const lines = records.slice(0, 5).map(formatGenericRecordLine);
+
+  return ["Enregistrements Odoo trouvés:", ...lines].join("\n");
+}
+
+function formatGenericRecordLine(record: LooseRecord) {
+  const name = formatValue(
+    record.name ||
+      record.document ||
+      record.reference ||
+      record.record ||
+      record.id
+  );
+  const details = [
+    record.internal_reference ? `Référence interne: ${formatValue(record.internal_reference)}` : "",
+    record.stock_quantity !== undefined ? `Stock: ${formatNumber(record.stock_quantity)}` : "",
+    record.forecast_quantity !== undefined ? `Stock prévu: ${formatNumber(record.forecast_quantity)}` : "",
+    record.price !== undefined ? `Prix: ${formatPrice(record.price)}` : "",
+    record.type ? `Type: ${formatValue(record.type)}` : "",
+    record.phone ? `Téléphone: ${formatValue(record.phone)}` : "",
+    record.email ? `Email: ${formatValue(record.email)}` : "",
+    record.partner ? `Partenaire: ${formatValue(record.partner)}` : "",
+    record.status ? `Statut: ${formatValue(record.status)}` : "",
+    record.date ? `Date: ${formatValue(record.date)}` : "",
+  ].filter(Boolean);
+
+  return details.length > 0 ? `- ${name} | ${details.join(" | ")}` : `- ${name}`;
+}
+
 function formatValue(value: unknown) {
   if (value === undefined || value === null || value === "") return "-";
   return String(value);
@@ -1331,27 +2022,31 @@ function formatNumber(value: unknown) {
 
 function formatPrice(value: unknown) {
   if (value === undefined || value === null || value === "") return "-";
-  return `${value} DH`;
+  const text = formatValue(value);
+
+  if (/\b(dh|mad)\b/i.test(text)) return text;
+
+  return `${text} DH`;
 }
 
 function formatAgentName(value?: string) {
   if (!value) return "Non sélectionné";
 
   const labels: Record<string, string> = {
-    support: "Support",
-    support_agent: "Support",
-    knowledge: "Connaissance",
-    knowledge_agent: "Connaissance",
-    development: "Développement",
-    development_agent: "Développement",
-    security: "Sécurité",
-    security_agent: "Sécurité",
-    server: "Serveur",
-    server_agent: "Serveur",
-    odoo: "Odoo",
-    odoo_agent: "Odoo",
-    general: "Général",
-    general_agent: "Général",
+    support: "Agent Support",
+    support_agent: "Agent Support",
+    knowledge: "Agent Connaissance",
+    knowledge_agent: "Agent Connaissance",
+    development: "Agent Développement",
+    development_agent: "Agent Développement",
+    security: "Agent Sécurité",
+    security_agent: "Agent Sécurité",
+    server: "Agent Serveur",
+    server_agent: "Agent Serveur",
+    odoo: "Agent Odoo",
+    odoo_agent: "Agent Odoo",
+    general: "Agent Général",
+    general_agent: "Agent Général",
   };
 
   return labels[value] || value;
@@ -1360,7 +2055,7 @@ function formatAgentName(value?: string) {
 function formatAgentResult(value: unknown) {
   if (value === undefined || value === null || value === "") return "-";
 
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return sanitizeTextForDisplay(value);
 
   if (typeof value !== "object") return String(value);
 
@@ -1401,14 +2096,57 @@ function formatAgentResult(value: unknown) {
     return record.answer;
   }
 
-  return JSON.stringify(sanitized);
+  return "Réponse générée par l’orchestrateur.";
 }
 
 function translateRisk(value?: string) {
   if (value === "low") return "Faible";
   if (value === "medium") return "Moyen";
   if (value === "high") return "Élevé";
+  if (value === "blocked") return "Bloqué";
   return "Non évalué";
+}
+
+function formatRisk(value?: string) {
+  return translateRisk(value);
+}
+
+function translateStatus(status?: string) {
+  if (status === "allowed") return "Autorisé";
+  if (status === "denied") return "Refusé";
+  if (status === "requires_approval") return "Validation requise";
+  if (status === "pending") return "En attente de validation";
+  if (status === "approved") return "Approuvée";
+  if (status === "rejected") return "Refusée";
+  if (status === "completed" || status === "online") return "Terminé";
+  if (status === "pending_approval") return "En attente de validation";
+  if (status === "en attente" || status === "en attente de validation") {
+    return "En attente de validation";
+  }
+  if (status === "access_denied") return "Accès refusé";
+  if (status === "not_found") return "Introuvable";
+  if (status === "failed" || status === "error") return "Échec";
+  if (status === "blocked") return "Bloqué";
+  if (!status) return "Traité";
+  return status;
+}
+
+function formatStatus(status?: string) {
+  return translateStatus(status);
+}
+
+function cleanBusinessMessage(value?: string) {
+  if (!value) return "";
+
+  if (
+    /api key|password|secret|token|\.env|xml-rpc|traceback|Knowledge Agent received|No specific tool matched|raw|provider error/i.test(
+      value
+    )
+  ) {
+    return "Réponse générée par l’orchestrateur.";
+  }
+
+  return value;
 }
 
 function formatParserSource(value?: string) {
@@ -1422,7 +2160,27 @@ function formatParserSource(value?: string) {
 function translateAction(value?: string) {
   const labels: Record<string, string> = {
     check_product_stock: "Consultation stock",
+    odoo_check_stock: "Consultation stock Odoo",
+    odoo_get_product_details: "Consultation produit Odoo",
+    odoo_search_products: "Recherche produit Odoo",
+    inventory_product_search: "Vérification produit inventaire",
+    odoo_search_sale_order: "Recherche commande client",
+    odoo_search_purchase_order: "Recherche commande fournisseur",
+    odoo_get_document_details_by_id: "Lecture document Odoo",
+    odoo_get_purchase_order_details: "Lecture commande fournisseur",
+    odoo_get_sale_order_details: "Lecture commande client",
+    odoo_get_invoice_details: "Lecture facture",
+    odoo_get_delivery_details: "Lecture livraison",
+    support_knowledge_base: "Base de connaissance support",
+    diagnose_printer_issue: "Diagnostic imprimante",
+    diagnose_wifi_issue: "Diagnostic Wi-Fi",
+    check_ram_usage: "Diagnostic RAM",
+    check_cpu_usage: "Diagnostic CPU",
+    check_disk_usage: "Diagnostic disque",
+    check_server_health: "Diagnostic serveur",
+    server_diagnostic_summary: "Synthèse serveur",
     product_search: "Recherche produit",
+    inventory_product_lookup: "Vérification produit inventaire",
     product_details: "Détails produit",
     inventory_summary: "Résumé inventaire",
     update_product_price: "Modification du prix",

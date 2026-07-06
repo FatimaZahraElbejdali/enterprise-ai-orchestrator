@@ -10,6 +10,20 @@ export type AuthUser = {
 
 export const ACCESS_DENIED_MESSAGE =
   "Accès refusé : votre rôle ne permet pas d’effectuer cette action.";
+export const TOKEN_EXPIRED_MESSAGE = "Session expirée. Veuillez vous reconnecter.";
+export const API_ERROR_MESSAGE =
+  "Une erreur est survenue lors du traitement de la demande.";
+export const BACKEND_UNREACHABLE_MESSAGE =
+  "Impossible de joindre le serveur de l’orchestrateur.";
+
+const ROLE_LABELS: Record<string, string> = {
+  admin: "Administrateur",
+  odoo_manager: "Responsable Odoo",
+  it_manager: "Responsable IT",
+  support_agent: "Agent Support",
+  employee: "Employé",
+  readonly_viewer: "Lecture seule",
+};
 
 export function getStoredToken() {
   if (typeof window === "undefined") return "";
@@ -41,6 +55,12 @@ export function clearAuth() {
   window.localStorage.removeItem("auth_user");
 }
 
+export function getRoleLabel(user: AuthUser | null) {
+  if (!user) return "Lecture seule";
+
+  return ROLE_LABELS[user.role] || user.role_label || "Lecture seule";
+}
+
 export function authHeaders(): HeadersInit {
   const token = getStoredToken();
 
@@ -49,6 +69,73 @@ export function authHeaders(): HeadersInit {
         Authorization: `Bearer ${token}`,
       }
     : {};
+}
+
+export async function postChatMessage<T = unknown>(
+  message: string,
+  sessionId = "demo-session"
+): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(),
+    },
+    body: JSON.stringify({
+      message,
+      session_id: sessionId,
+    }),
+  });
+
+  if (!response.ok) {
+    const authMessage = handleAuthFailure(response.status);
+    throw new Error(authMessage || API_ERROR_MESSAGE);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+export class ApiRequestError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
+
+async function submitApprovalDecision<T = unknown>(
+  approvalId: string,
+  decision: "approve" | "reject"
+): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}/approvals/${approvalId}/${decision}`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      clearAuth();
+      throw new ApiRequestError(TOKEN_EXPIRED_MESSAGE, response.status);
+    }
+
+    if (response.status === 403) {
+      throw new ApiRequestError(ACCESS_DENIED_MESSAGE, response.status);
+    }
+
+    throw new ApiRequestError(API_ERROR_MESSAGE, response.status);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+export function approveApproval<T = unknown>(approvalId: string) {
+  return submitApprovalDecision<T>(approvalId, "approve");
+}
+
+export function rejectApproval<T = unknown>(approvalId: string) {
+  return submitApprovalDecision<T>(approvalId, "reject");
 }
 
 export function requireAuth() {
@@ -65,8 +152,9 @@ export function requireAuth() {
 export function handleAuthFailure(status: number) {
   if (status === 401) {
     clearAuth();
+    window.localStorage.setItem("auth_error", TOKEN_EXPIRED_MESSAGE);
     window.location.href = "/login";
-    return "Session expirée";
+    return TOKEN_EXPIRED_MESSAGE;
   }
 
   if (status === 403) {

@@ -1,13 +1,20 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { API_BASE_URL, storeAuth } from "@/lib/api";
+import Image from "next/image";
+import { API_BASE_URL, BACKEND_UNREACHABLE_MESSAGE, storeAuth } from "@/lib/api";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState(() => {
+    if (typeof window === "undefined") return "";
+
+    const authError = window.localStorage.getItem("auth_error") || "";
+    window.localStorage.removeItem("auth_error");
+    return authError;
+  });
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -27,7 +34,7 @@ export default function LoginPage() {
       });
 
       if (!response.ok) {
-        setError("Identifiants incorrects");
+        setError("Identifiants incorrects.");
         return;
       }
 
@@ -35,7 +42,7 @@ export default function LoginPage() {
       storeAuth(data.access_token, data.user);
       window.location.href = "/chat";
     } catch {
-      setError("Session expirée");
+      setError(BACKEND_UNREACHABLE_MESSAGE);
     } finally {
       setLoading(false);
     }
@@ -45,7 +52,15 @@ export default function LoginPage() {
     <main className="loginShell">
       <section className="loginPanel">
         <div className="brand">
-          <div className="brandMark">JB</div>
+          <div className="brandMark">
+            <Image
+              className="brandLogo"
+              src="/jamain-baco-logo.png"
+              alt="Jamain Baco"
+              width={44}
+              height={44}
+            />
+          </div>
           <div>
             <p>Jamain Baco</p>
             <h1>Connexion</h1>
@@ -117,13 +132,19 @@ export default function LoginPage() {
         }
 
         .brandMark {
-          width: 44px;
-          height: 44px;
-          background: #101827;
-          color: #ffffff;
+          width: 52px;
+          height: 52px;
+          background: #ffffff;
           display: grid;
           place-items: center;
-          font-weight: 900;
+          flex: 0 0 52px;
+        }
+
+        .brandLogo {
+          width: 44px;
+          height: 44px;
+          object-fit: contain;
+          display: block;
         }
 
         .brand p {

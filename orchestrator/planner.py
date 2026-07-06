@@ -2,6 +2,14 @@ def create_plan(intent: str, message: str, risk_level: str):
     text = message.lower()
 
     if intent == "odoo" or intent.startswith("odoo_"):
+        if any(term in text for term in ["search", "chercher", "rechercher", "client", "customer", "supplier", "fournisseur", "analytic", "analytique"]):
+            return [
+                "analyze_generic_odoo_request",
+                "validate_allowlisted_model_and_fields",
+                "execute_safe_read_or_prepare_approval",
+                "return_clean_business_result"
+            ]
+
         if "document" in text or "facture" in text or "invoice" in text:
             return [
                 "analyze_odoo_document_request",
@@ -44,12 +52,11 @@ def create_plan(intent: str, message: str, risk_level: str):
             "escalate_if_unresolved"
         ]
 
-    if intent == "knowledge":
+    if intent in {"knowledge", "general_information_question", "explain_orchestrator"}:
         return [
             "analyze_information_request",
-            "search_relevant_knowledge_source",
-            "summarize_answer",
-            "return_referenced_response"
+            "answer_from_configured_project_context",
+            "return_safe_informational_response"
         ]
 
     if intent == "development":

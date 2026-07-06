@@ -1,5 +1,7 @@
 from orchestrator.tool_registry import (
+    SAFE_ODOO_READ_MODELS,
     get_tool_metadata,
+    list_capabilities,
     tool_requires_approval,
     get_tool_risk_level,
 )
@@ -91,3 +93,23 @@ def test_document_write_tools_are_high_risk_and_require_approval():
 def test_unknown_tool_defaults_to_high_risk():
     assert get_tool_risk_level("unknown_tool") == "high"
     assert tool_requires_approval("unknown_tool") is True
+
+
+def test_tool_metadata_includes_structured_capability_fields():
+    tool = get_tool_metadata("odoo_search_records")
+
+    assert tool["capability"] == "odoo.generic_read_search"
+    assert tool["domain"] == "odoo"
+    assert tool["permission_category"] == "odoo_document_read"
+    assert tool["io_mode"] == "read"
+    assert tool["read_write"] == "read"
+    assert tool["required_parameters"] == ["model_name", "keyword"]
+    assert tool["executor"] == "odoo_search_records"
+    assert tool["allowed_models"] == sorted(SAFE_ODOO_READ_MODELS)
+
+
+def test_agent_capabilities_are_registered_without_fake_tools():
+    capabilities = {item["capability"]: item for item in list_capabilities()}
+
+    assert capabilities["knowledge.general_answer"]["executor"] == "agents.knowledge_agent.run"
+    assert capabilities["support.troubleshooting"]["executor"] == "agents.support_agent.run"

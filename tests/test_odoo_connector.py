@@ -27,6 +27,18 @@ def test_odoo_create_purchase_request_mock():
     assert result["action"] == "create_purchase_request"
 
 
+def test_generic_read_rejects_non_allowlisted_model():
+    connector = OdooConnector()
+    connector.mock_mode = False
+
+    result = connector.generic_search_records("res.users", "admin")
+
+    assert result["success"] is False
+    assert result["source"] == "real_odoo_error"
+    assert result["model"] is None
+    assert result["records"] == []
+
+
 class FakeProductModels:
     def __init__(self, read_back_prices):
         self.read_back_prices = (
@@ -182,6 +194,166 @@ def test_update_product_price_refuses_ambiguous_fallback_candidates():
     assert result["message"] == "Produit ambigu — aucune modification exécutée."
     assert len(result["candidates"]) == 2
     assert result["candidates"][0]["id"] == 11
+
+
+class InventoryProductSearchModels:
+    def __init__(self):
+        self.search_calls = []
+
+    def execute_kw(self, database, uid, auth_secret, model, method, args, kwargs=None):
+        if model not in {"product.product", "product.template"}:
+            raise AssertionError(f"Unexpected model: {model}")
+
+        if method == "fields_get":
+            return {
+                "id": {},
+                "name": {},
+                "default_code": {},
+                "barcode": {},
+                "qty_available": {},
+                "virtual_available": {},
+                "uom_id": {},
+                "list_price": {},
+                "sale_ok": {},
+                "active": {},
+                "product_tmpl_id": {},
+            }
+
+        if method == "search_read":
+            domain = args[0]
+            self.search_calls.append((model, domain, kwargs or {}))
+
+            if model == "product.product":
+                return [
+                    {
+                        "id": 21,
+                        "name": "NETTOYAGE SOL",
+                        "default_code": "NET-SOL",
+                        "barcode": "123456789",
+                        "product_tmpl_id": [8, "Famille nettoyage"],
+                        "list_price": 12.0,
+                        "qty_available": 18,
+                        "virtual_available": 20,
+                        "uom_id": [1, "Unité(s)"],
+                        "sale_ok": True,
+                        "active": True,
+                    }
+                ]
+
+            return []
+
+        raise AssertionError(f"Unexpected method: {method}")
+
+
+def test_inventory_product_search_uses_allowlisted_models_and_safe_fields():
+    fake_models = InventoryProductSearchModels()
+    connector = real_connector_with_models(fake_models)
+
+    result = connector.search_product("nettoyage")
+
+    assert result["success"] is True
+    assert result["found"] is True
+    assert result["model"] == "product.product"
+    assert result["results"][0]["name"] == "NETTOYAGE SOL"
+    assert result["results"][0]["default_code"] == "NET-SOL"
+    assert result["results"][0]["barcode"] == "123456789"
+    assert result["results"][0]["template_name"] == "Famille nettoyage"
+    assert {call[0] for call in fake_models.search_calls} <= {
+        "product.product",
+        "product.template",
+    }
+    assert any("barcode" in str(call[1]) for call in fake_models.search_calls)
+
+
+class GenericPartnerModels:
+    def __init__(self, records=None):
+        self.records = records if records is not None else [
+            {
+                "id": 31,
+                "name": "Atlas",
+                "display_name": "Atlas",
+                "phone": "0612345678",
+                "email": "atlas@example.com",
+                "customer_rank": 1,
+                "supplier_rank": 0,
+                "is_company": True,
+            }
+        ]
+        self.write_values = None
+
+    def execute_kw(self, database, uid, auth_secret, model, method, args, kwargs=None):
+        if model != "res.partner":
+            raise AssertionError(f"Unexpected model: {model}")
+
+        if method == "fields_get":
+            return {
+                "id": {},
+                "name": {},
+                "display_name": {},
+                "phone": {},
+                "mobile": {},
+                "email": {},
+                "customer_rank": {},
+                "supplier_rank": {},
+                "is_company": {},
+            }
+
+        if method == "search_read":
+            return self.records
+
+        if method == "read":
+            fields = (kwargs or {}).get("fields", [])
+            record = dict(self.records[0])
+            return [{field: record.get(field) for field in fields}]
+
+        if method == "write":
+            self.write_values = args[1]
+            self.records[0].update(self.write_values)
+            return True
+
+        raise AssertionError(f"Unexpected method: {method}")
+
+
+def test_generic_partner_search_returns_clean_business_fields():
+    connector = real_connector_with_models(GenericPartnerModels())
+
+    result = connector.generic_search_records("res.partner", "Atlas")
+
+    assert result["success"] is True
+    assert result["found"] is True
+    assert result["records"][0]["name"] == "Atlas"
+    assert result["records"][0]["type"] == "client"
+    assert result["records"][0]["phone"] == "0612345678"
+    assert result["records"][0]["email"] == "atlas@example.com"
+
+
+def test_generic_update_field_verifies_read_back():
+    fake_models = GenericPartnerModels()
+    connector = real_connector_with_models(fake_models)
+
+    result = connector.update_generic_field("res.partner", 31, "phone", "0600000000")
+
+    assert fake_models.write_values == {"phone": "0600000000"}
+    assert result["success"] is True
+    assert result["executed"] is True
+    assert result["verified"] is True
+    assert result["old_value"] == "0612345678"
+    assert result["new_value"] == "0600000000"
+
+
+def test_generic_update_rejects_non_allowlisted_field():
+    connector = real_connector_with_models(GenericPartnerModels())
+
+    result = connector.prepare_generic_update_field(
+        "res.partner",
+        "comment",
+        "secret note",
+        keyword="Atlas",
+    )
+
+    assert result["success"] is False
+    assert result["source"] == "policy"
+    assert result["message"] == "Unsupported Odoo write field."
 
 
 class FakeDocumentModels:

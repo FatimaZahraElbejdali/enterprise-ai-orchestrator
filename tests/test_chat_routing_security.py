@@ -132,6 +132,35 @@ def test_inventory_summary_routes_to_odoo_agent(monkeypatch):
     assert data["parsed_action"] == "inventory_summary"
 
 
+def test_inventory_product_existence_question_routes_to_odoo_agent(monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "run_odoo_agent",
+        lambda message: {
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "parsed_action": "inventory_product_search",
+            "status": "completed",
+            "approval_required": False,
+        },
+    )
+
+    response = client.post(
+        "/chat",
+        json={
+            "message": "Est-ce que des produits de nettoyage sont intégrés dans l’inventaire Odoo ?"
+        },
+        headers=auth_headers("odoo.manager@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["intent"] == "odoo"
+    assert data["agent"] == "odoo_agent"
+    assert data["parsed_action"] == "inventory_product_search"
+    assert data["approval_required"] is False
+
+
 def test_invoice_details_request_still_routes_to_odoo_agent(monkeypatch):
     monkeypatch.setattr(
         app_module,
@@ -289,9 +318,13 @@ def test_internal_server_env_path_is_blocked(monkeypatch):
 def test_frontend_sanitizes_sensitive_odoo_diagnostic_fields():
     source = open("frontend/app/chat/page.tsx", encoding="utf-8").read()
 
-    assert "sanitizeForDisplay(response)" in source
+    assert "sanitizeForDisplay" in source
     assert "formatSafeOdooStatus" in source
-    assert source.index("Réponse de l’orchestrateur") < source.index("decisionGrid")
+    assert "NEXT_PUBLIC_CHAT_DEBUG" in source
+    assert "SHOW_TECHNICAL_DETAILS &&" in source
+    assert "Détails techniques" in source
+    assert '<p className="eyebrow">Réponse</p>' not in source
+    assert '<section className="decisionGrid">' not in source
 
     for key in [
         "url",

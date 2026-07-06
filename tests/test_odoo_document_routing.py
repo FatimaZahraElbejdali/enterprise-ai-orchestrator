@@ -78,7 +78,7 @@ def test_classifier_keeps_actual_knowledge_questions(monkeypatch):
     assert approval["intent"] in allowed_knowledge_intents or approval["intent"].startswith("explain_")
 
     assert documentation["selected_agent"] == "knowledge_agent"
-    assert documentation["intent"] in allowed_knowledge_intents or documentation["intent"].startswith("explain_")
+    assert documentation["intent"] == "summarize_server_documentation"
 
 
 def test_odoo_parser_extracts_exact_document_id():

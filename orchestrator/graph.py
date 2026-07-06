@@ -335,6 +335,13 @@ def process_request(message: str, classification: dict | None = None):
         if isinstance(agent_result, dict)
         else None
     )
+    direct_knowledge_message = (
+        agent_result.get("response") or agent_result.get("message")
+        if isinstance(agent_result, dict)
+        and selected_agent == "knowledge_agent"
+        and agent_result.get("tool_used") == "knowledge_project_answer"
+        else None
+    )
 
     prompt = f"""
 Selected model route:
@@ -373,12 +380,22 @@ Approval required:
 Provide a concise final response for the user.
 """
 
-    response = call_model(
-        model_route=selected_model,
-        prompt=prompt,
-        selected_agent=selected_agent,
-        agent_result=agent_result,
-    )
+    if direct_knowledge_message:
+        response = {
+            "provider": "local_fallback",
+            "model": "static_project_knowledge",
+            "success": True,
+            "content": direct_knowledge_message,
+            "error": None,
+            "agent_result": agent_result,
+        }
+    else:
+        response = call_model(
+            model_route=selected_model,
+            prompt=prompt,
+            selected_agent=selected_agent,
+            agent_result=agent_result,
+        )
 
     log_request({
         "user_message": message,

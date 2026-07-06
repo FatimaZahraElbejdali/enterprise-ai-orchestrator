@@ -19,6 +19,7 @@ from agents.server_agent import (
     is_server_request,
     run as run_server_agent,
 )
+from agents.knowledge_agent import run as run_knowledge_agent
 from integrations.odoo_connector import OdooConnector
 from models.openai_adapter import (
     generate_response,
@@ -39,6 +40,7 @@ from orchestrator.auth import (
     require_permission,
     reset_audit_user_context,
     set_audit_user_context,
+    unsupported_action_payload,
 )
 from orchestrator.approval_store import (
     attach_execution_result,
@@ -48,6 +50,7 @@ from orchestrator.approval_store import (
 from orchestrator.conversation_memory import conversation_memory
 from orchestrator.contextual_resolver import resolve_contextual_message
 from orchestrator.tool_executor import execute_tool
+from orchestrator.permission_policy import resolve_route_permission
 
 load_dotenv()
 
@@ -79,6 +82,7 @@ AUTHORIZED_ODOO_UPDATE_TOOLS = {
     "odoo_update_delivery_quantity",
     "odoo_update_document_partner",
     "odoo_update_document_date",
+    "odoo_update_field",
 }
 
 ODOO_APPROVAL_ACTIONS = {
@@ -87,6 +91,7 @@ ODOO_APPROVAL_ACTIONS = {
     "update_document_line",
     "update_document_partner",
     "update_document_date",
+    "odoo_update_field_request",
 }
 
 
@@ -509,6 +514,24 @@ def build_odoo_approval_tool_call(approval: dict):
 
         return tool_name, without_none(tool_kwargs), None
 
+    if action == "odoo_update_field_request" and tool_name == "odoo_update_field":
+        tool_kwargs = {
+            "model_name": metadata.get("target_model"),
+            "record_id": metadata.get("record_id"),
+            "field_name": metadata.get("field_name"),
+            "new_value": metadata.get("new_value"),
+        }
+
+        if (
+            tool_kwargs["model_name"] is None
+            or tool_kwargs["record_id"] is None
+            or tool_kwargs["field_name"] is None
+            or tool_kwargs["new_value"] is None
+        ):
+            return None, {}, "Approval metadata is missing model, record, field, or requested value."
+
+        return tool_name, without_none(tool_kwargs), None
+
     return None, {}, "Approval action does not match an authorized Odoo update tool."
 
 
@@ -650,6 +673,68 @@ def build_direct_support_response(message: str):
         "message": support_message,
         "parser_source": agent_result.get("parser_source", "support_fallback") if isinstance(agent_result, dict) else "support_fallback",
         "parsed_action": agent_result.get("parsed_action", "troubleshoot_issue") if isinstance(agent_result, dict) else "troubleshoot_issue",
+        "tool_used": agent_result.get("tool_used") if isinstance(agent_result, dict) else None,
+        "agent_result": agent_result,
+        "result": result,
+    }
+
+
+def build_direct_knowledge_response(message: str):
+    agent_result = run_knowledge_agent(message)
+    result = agent_result.get("result") if isinstance(agent_result, dict) else None
+    knowledge_message = ""
+    provider = "local_policy"
+    model = "knowledge_agent"
+    reason = "Direct knowledge route handled the request."
+
+    if isinstance(agent_result, dict):
+        knowledge_message = agent_result.get("response") or agent_result.get("message") or ""
+        provider = agent_result.get("provider") or provider
+        model = agent_result.get("model") or model
+
+        if agent_result.get("tool_used") == "public_llm_answer":
+            reason = "Public knowledge question answered by the configured LLM provider."
+        elif agent_result.get("tool_used") == "internal_documents":
+            reason = "Internal knowledge question answered from configured internal documents."
+    else:
+        knowledge_message = str(agent_result)
+
+    if not knowledge_message and isinstance(result, dict):
+        knowledge_message = result.get("answer") or result.get("message")
+
+    if not knowledge_message:
+        knowledge_message = "Réponse informative générée par l’orchestrateur."
+
+    log_request({
+        "event_type": "knowledge_request",
+        "system": "knowledge",
+        "agent": "knowledge_agent",
+        "status": "completed",
+        "risk": "low",
+        "approval_status": "not_required",
+        "user_message": message,
+        "action": agent_result.get("parsed_action") if isinstance(agent_result, dict) else "answer_question",
+        "message": "Knowledge response generated.",
+    })
+
+    return {
+        "intent": "knowledge",
+        "agent": "knowledge_agent",
+        "selected_agent": "knowledge_agent",
+        "risk": "low",
+        "risk_level": "low",
+        "selected_model": {
+            "provider": provider,
+            "model": model,
+            "reason": reason,
+        },
+        "requires_approval": False,
+        "approval_required": False,
+        "approval_status": "not_required",
+        "status": "completed",
+        "message": knowledge_message,
+        "parser_source": agent_result.get("parser_source", "knowledge_fallback") if isinstance(agent_result, dict) else "knowledge_fallback",
+        "parsed_action": agent_result.get("parsed_action", "answer_knowledge_question") if isinstance(agent_result, dict) else "answer_knowledge_question",
         "tool_used": agent_result.get("tool_used") if isinstance(agent_result, dict) else None,
         "agent_result": agent_result,
         "result": result,
@@ -897,6 +982,35 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
         },
     )
     primary_agent = primary_classification.get("selected_agent")
+    route_permission = resolve_route_permission(primary_classification)
+
+    if route_permission.blocked:
+        blocked_result = process_request(
+            enriched_message,
+            classification=primary_classification,
+        )
+        blocked_result = attach_auth_metadata(blocked_result, current_user, "denied")
+        remember_chat_result(session_id, blocked_result)
+        return blocked_result
+
+    if route_permission.unsupported:
+        unsupported_result = unsupported_action_payload(primary_classification, current_user)
+        log_request({
+            "event_type": "unsupported_action",
+            "title": "Action non prise en charge",
+            "system": primary_classification.get("target_system", "orchestrator"),
+            "agent": primary_agent or "orchestrator",
+            "status": "unsupported",
+            "risk": primary_classification.get("risk_level", "low"),
+            "approval_status": "not_required",
+            "permission_decision": "denied",
+            "user_message": enriched_message,
+            "intent": primary_classification.get("intent"),
+            "action": primary_classification.get("action"),
+            "message": "Action non prise en charge. Aucun outil n’a été exécuté.",
+        })
+        remember_chat_result(session_id, unsupported_result)
+        return unsupported_result
 
     if not check_chat_permission(current_user, enriched_message, primary_classification):
         denied_result = access_denied_payload(primary_classification, current_user)
@@ -925,6 +1039,12 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
 
     if primary_agent == "server_agent":
         result = build_direct_server_response(enriched_message)
+        result = attach_auth_metadata(result, current_user, "allowed")
+        remember_chat_result(session_id, result)
+        return result
+
+    if primary_agent == "knowledge_agent":
+        result = build_direct_knowledge_response(enriched_message)
         result = attach_auth_metadata(result, current_user, "allowed")
         remember_chat_result(session_id, result)
         return result

@@ -49,6 +49,26 @@ def create_approval(
     metadata=None,
 ):
     approvals = _load_approvals()
+    metadata = dict(metadata or {})
+    audit_user_context = None
+
+    try:
+        from orchestrator.auth import get_audit_user_context
+
+        audit_user_context = get_audit_user_context()
+    except Exception:
+        audit_user_context = None
+
+    requester = (audit_user_context or {}).get("user_email")
+    requester_role = (audit_user_context or {}).get("user_role")
+
+    metadata.setdefault("original_request", user_message)
+
+    if requester:
+        metadata.setdefault("requester", requester)
+
+    if requester_role:
+        metadata.setdefault("requester_role", requester_role)
 
     approval = {
         "id": str(uuid.uuid4()),
@@ -66,7 +86,10 @@ def create_approval(
         "source_system": source_system or "orchestrator",
         "entity_name": entity_name,
         "requested_change": requested_change,
-        "metadata": metadata or {},
+        "requester": requester,
+        "requester_role": requester_role,
+        "original_request": user_message,
+        "metadata": metadata,
         "executed": False,
     }
 

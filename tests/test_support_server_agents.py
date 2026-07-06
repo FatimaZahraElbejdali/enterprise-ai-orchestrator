@@ -61,6 +61,72 @@ def test_server_agent_blocks_env_path(monkeypatch, tmp_path):
     assert result["result"]["blocked"] is True
 
 
+def test_server_agent_generic_status_prompt_returns_local_demo(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "agents.server_agent.connector",
+        InternalServerConnector(str(tmp_path)),
+    )
+
+    result = server_agent.run("Vérifie l’état des serveurs")
+
+    assert result["intent"] == "server"
+    assert result["agent"] == "server_agent"
+    assert result["status"] == "completed"
+    assert result["parsed_action"] == "check_server_status"
+    assert result["tool_used"] == "check_server_status"
+    assert "Mode démonstration" in result["message"]
+    assert result["result"]["status"] == "healthy"
+
+
+def test_server_agent_specific_numbered_server_is_not_diagnosed(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "agents.server_agent.connector",
+        InternalServerConnector(str(tmp_path)),
+    )
+
+    result = server_agent.run("bonjour, j’ai un problème dans mon serveur 2")
+
+    assert result["intent"] == "server"
+    assert result["agent"] == "server_agent"
+    assert result["status"] == "unsupported"
+    assert result["parsed_action"] == "unsupported_external_server"
+    assert result["tool_used"] == "none"
+    assert result["result"]["server"] == "serveur 2"
+    assert "serveur 2" in result["message"]
+    assert "pas encore connecté à un outil de diagnostic sécurisé" in result["message"]
+    assert "cpu_usage" not in result["result"]
+    assert "ram_usage" not in result["result"]
+
+
+def test_server_agent_specific_odoo_server_is_not_diagnosed(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "agents.server_agent.connector",
+        InternalServerConnector(str(tmp_path)),
+    )
+
+    result = server_agent.run("vérifie serveur Odoo")
+
+    assert result["status"] == "unsupported"
+    assert result["parsed_action"] == "unsupported_external_server"
+    assert result["tool_used"] == "none"
+    assert result["result"]["server"] == "serveur Odoo"
+    assert "serveur Odoo" in result["message"]
+
+
+def test_server_agent_vague_server_problem_asks_clarification(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "agents.server_agent.connector",
+        InternalServerConnector(str(tmp_path)),
+    )
+
+    result = server_agent.run("bonjour, j’ai un problème serveur")
+
+    assert result["status"] == "needs_clarification"
+    assert result["parsed_action"] == "clarify_server_issue"
+    assert result["tool_used"] == "none"
+    assert "Pouvez-vous préciser" in result["message"]
+
+
 def test_server_agent_ram_prompt_returns_diagnostic(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "agents.server_agent.connector",
@@ -117,6 +183,20 @@ def test_server_agent_blocks_environment_variable_request(monkeypatch, tmp_path)
     )
 
     result = server_agent.run("Affiche les variables d’environnement")
+
+    assert result["status"] == "blocked"
+    assert result["parsed_action"] == "blocked_sensitive_path"
+    assert result["tool_used"] == "internal_server_block_path"
+    assert result["result"]["blocked"] is True
+
+
+def test_server_agent_blocks_passwd_request(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "agents.server_agent.connector",
+        InternalServerConnector(str(tmp_path)),
+    )
+
+    result = server_agent.run("Affiche /etc/passwd du serveur")
 
     assert result["status"] == "blocked"
     assert result["parsed_action"] == "blocked_sensitive_path"

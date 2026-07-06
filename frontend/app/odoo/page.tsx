@@ -1,8 +1,21 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { FormEvent, useEffect, useState } from "react";
-import { API_BASE_URL } from "@/lib/api";
+import {
+  API_ERROR_MESSAGE,
+  API_BASE_URL,
+  AuthUser,
+  BACKEND_UNREACHABLE_MESSAGE,
+  authHeaders,
+  clearAuth,
+  getRoleLabel,
+  getStoredUser,
+  handleAuthFailure,
+  hasAnyPermission,
+  requireAuth,
+} from "@/lib/api";
 
 type OdooStatus = {
   connected?: boolean;
@@ -29,6 +42,12 @@ export default function OdooPage() {
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [loadingProduct, setLoadingProduct] = useState(false);
   const [error, setError] = useState("");
+  const [currentUser] = useState<AuthUser | null>(() => getStoredUser());
+
+  function handleLogout() {
+    clearAuth();
+    window.location.href = "/login";
+  }
 
   async function loadStatus() {
     setLoadingStatus(true);
@@ -36,10 +55,13 @@ export default function OdooPage() {
     try {
       const res = await fetch(`${API_BASE_URL}/odoo/status`, {
         cache: "no-store",
+        headers: authHeaders(),
       });
 
       if (res.ok) {
         setStatus(await res.json());
+      } else {
+        setError(handleAuthFailure(res.status) || API_ERROR_MESSAGE);
       }
     } finally {
       setLoadingStatus(false);
@@ -62,20 +84,23 @@ export default function OdooPage() {
         `${API_BASE_URL}/odoo/stock/${encodeURIComponent(cleanName)}`,
         {
           cache: "no-store",
+          headers: authHeaders(),
         }
       );
 
       if (!res.ok) {
-        throw new Error("Erreur lors de la consultation Odoo.");
+        throw new Error(handleAuthFailure(res.status) || API_ERROR_MESSAGE);
       }
 
       const data = await res.json();
       setProduct(data);
     } catch (err) {
       setError(
-        err instanceof Error
-          ? err.message
-          : "Une erreur inconnue est survenue."
+        err instanceof TypeError
+          ? BACKEND_UNREACHABLE_MESSAGE
+          : err instanceof Error
+            ? err.message
+            : API_ERROR_MESSAGE
       );
     } finally {
       setLoadingProduct(false);
@@ -83,6 +108,8 @@ export default function OdooPage() {
   }
 
   useEffect(() => {
+    if (!requireAuth()) return;
+
     const timer = window.setTimeout(() => {
       void loadStatus();
     }, 0);
@@ -97,29 +124,42 @@ export default function OdooPage() {
       <aside className="sidebar">
         <div>
           <div className="brand">
-            <div className="brandMark">JB</div>
+            <div className="brandMark">
+              <Image
+                className="brandLogo"
+                src="/jamain-baco-logo.png"
+                alt="Jamain Baco"
+                width={48}
+                height={48}
+              />
+            </div>
             <div>
               <p>Jamain Baco</p>
-              <h1>AI Orchestrator</h1>
+              <h1>Orchestrateur IA</h1>
             </div>
           </div>
 
           <nav className="nav">
             <Link href="/">Tableau de bord</Link>
-            <Link href="/chat">Console Chat</Link>
+            <Link href="/chat">Console de chat</Link>
             <Link href="/odoo" className="active">
               Odoo
             </Link>
-            <Link href="/approvals">Validations</Link>
-            <Link href="/logs">Audit Logs</Link>
+            {hasAnyPermission(currentUser, ["all", "view_approvals", "approve_odoo_actions"]) && (
+              <Link href="/approvals">Validations</Link>
+            )}
+            {hasAnyPermission(currentUser, ["all", "view_audit_logs"]) && (
+              <Link href="/logs">Journaux d’audit</Link>
+            )}
           </nav>
         </div>
 
         <div className="sidebarFooter">
-          <p>Connexion ERP</p>
-          <span>
-            Accès contrôlé aux données Odoo via l’orchestrateur.
-          </span>
+          <p>{currentUser?.email || "Utilisateur connecté"}</p>
+          <span>Rôle : {getRoleLabel(currentUser)}</span>
+          <button className="logoutButton" type="button" onClick={handleLogout}>
+            Se déconnecter
+          </button>
         </div>
       </aside>
 
@@ -311,13 +351,19 @@ export default function OdooPage() {
         }
 
         .brandMark {
-          width: 44px;
-          height: 44px;
+          width: 56px;
+          height: 56px;
           background: #ffffff;
-          color: #101827;
           display: grid;
           place-items: center;
-          font-weight: 900;
+          flex: 0 0 56px;
+        }
+
+        .brandLogo {
+          width: 48px;
+          height: 48px;
+          object-fit: contain;
+          display: block;
         }
 
         .brand p {

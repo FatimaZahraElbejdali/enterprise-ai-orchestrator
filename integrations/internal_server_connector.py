@@ -4,6 +4,27 @@ from pathlib import Path
 
 BLOCKED_FILENAMES = {".env"}
 
+SAFE_SERVER_REGISTRY = {
+    "local_orchestrator": {
+        "display_name": "serveur local de l’orchestrateur",
+        "aliases": {
+            "local_orchestrator",
+            "orchestrateur",
+            "orchestrator",
+            "serveur local",
+            "local server",
+            "serveur local de l'orchestrateur",
+            "serveur local de l’orchestrateur",
+            "orchestrator server",
+        },
+        "diagnostic_mode": "demo_local",
+    },
+}
+
+
+def _normalize_server_reference(value: str):
+    return " ".join((value or "").lower().replace("’", "'").split())
+
 
 class InternalServerConnector:
     def __init__(self, storage_path: str | None = None):
@@ -12,6 +33,24 @@ class InternalServerConnector:
             "./storage",
         )
         self.storage_path = Path(configured_path).resolve()
+        self.server_registry = SAFE_SERVER_REGISTRY
+
+    def get_server_registry(self):
+        return self.server_registry
+
+    def resolve_server_reference(self, reference: str):
+        normalized = _normalize_server_reference(reference)
+
+        for server_id, config in self.server_registry.items():
+            aliases = {
+                _normalize_server_reference(alias)
+                for alias in config.get("aliases", set())
+            }
+
+            if normalized == server_id or normalized in aliases:
+                return server_id, config
+
+        return None, None
 
     def _ensure_storage(self):
         self.storage_path.mkdir(parents=True, exist_ok=True)

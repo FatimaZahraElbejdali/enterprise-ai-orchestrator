@@ -7,6 +7,8 @@ from typing import Annotated
 
 from fastapi import Header, HTTPException, status
 
+from orchestrator.permission_policy import resolve_route_permission
+
 
 AUTH_REQUIRED_MESSAGE = "Authentification requise."
 INVALID_SESSION_MESSAGE = "Session invalide ou expirée."
@@ -235,70 +237,21 @@ def require_any_permission(user: dict, permissions: set[str]):
         _auth_error(ACCESS_DENIED_MESSAGE, status.HTTP_403_FORBIDDEN)
 
 
-def _message_contains_write(message: str) -> bool:
-    text = (message or "").lower()
-
-    return any(
-        term in text
-        for term in [
-            "modifier",
-            "changer",
-            "mettre à jour",
-            "mettre a jour",
-            "créer",
-            "creer",
-            "supprimer",
-            "update",
-            "change",
-            "create",
-            "delete",
-            "set",
-        ]
-    )
-
-
-def _odoo_write_route(message: str, classification: dict) -> bool:
-    action = str(classification.get("action") or "").lower()
-    intent = str(classification.get("intent") or "").lower()
-
-    if classification.get("requires_approval") is True:
-        return True
-
-    if any(term in action for term in ["update", "write", "create", "delete", "change", "set"]):
-        return True
-
-    if any(term in intent for term in ["update", "write", "create", "delete", "price_update"]):
-        return True
-
-    return _message_contains_write(message)
-
-
 def required_chat_permissions(message: str, classification: dict) -> set[str]:
-    selected_agent = classification.get("selected_agent") or classification.get("agent")
-    intent = str(classification.get("intent") or "")
-    action = str(classification.get("action") or "")
-    target_system = classification.get("target_system")
-
-    if selected_agent == "server_agent" or target_system == "server":
-        return {"server_diagnostics"}
-
-    if selected_agent == "support_agent" or target_system == "support":
-        return {"support_diagnostics", "support_questions"}
-
-    if selected_agent == "odoo_agent" or target_system == "odoo" or intent.startswith("odoo"):
-        if _odoo_write_route(message, classification):
-            return {"request_odoo_write"}
-
-        if "document" in intent or "document" in action:
-            return {"view_odoo_documents", "view_limited_odoo_info"}
-
-        return {"view_odoo_products", "view_limited_odoo_info"}
-
-    return {"chat_access"}
+    del message
+    return set(resolve_route_permission(classification).required_permissions)
 
 
 def check_chat_permission(user: dict, message: str, classification: dict) -> bool:
     required = required_chat_permissions(message, classification)
+    route_permission = resolve_route_permission(classification)
+
+    if route_permission.blocked:
+        return True
+
+    if route_permission.unsupported:
+        return False
+
     return has_any_permission(user, required)
 
 
@@ -330,6 +283,48 @@ def access_denied_payload(
             "result": {
                 "allowed": False,
                 "message": ACCESS_DENIED_MESSAGE,
+            },
+        },
+        "permission_decision": "denied",
+        "user": {
+            "email": user.get("email"),
+            "role": user.get("role"),
+            "role_label": user.get("role_label"),
+        }
+        if user
+        else None,
+    }
+
+
+def unsupported_action_payload(
+    classification: dict | None = None,
+    user: dict | None = None,
+) -> dict:
+    classification = classification or {}
+    agent = classification.get("selected_agent") or classification.get("agent", "general_agent")
+
+    return {
+        "intent": classification.get("intent", "unsupported"),
+        "agent": agent,
+        "selected_agent": agent,
+        "risk": classification.get("risk", classification.get("risk_level", "low")),
+        "risk_level": classification.get("risk_level", classification.get("risk", "low")),
+        "requires_approval": False,
+        "approval_required": False,
+        "approval_status": "not_required",
+        "status": "unsupported",
+        "message": "Action non prise en charge. Veuillez préciser une demande métier autorisée.",
+        "tool_used": None,
+        "result": {
+            "allowed": False,
+            "message": "Action non prise en charge. Aucun outil n’a été exécuté.",
+        },
+        "agent_result": {
+            "agent": agent,
+            "tool_used": None,
+            "result": {
+                "allowed": False,
+                "message": "Action non prise en charge. Aucun outil n’a été exécuté.",
             },
         },
         "permission_decision": "denied",

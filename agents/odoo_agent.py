@@ -30,8 +30,15 @@ CHANGE_KEYWORDS = [
 SUPPORTED_ODOO_ACTIONS = {
     "check_product_stock",
     "product_search",
+    "inventory_product_search",
     "product_details",
     "inventory_summary",
+    "odoo_search_records",
+    "odoo_get_record_details",
+    "odoo_check_inventory",
+    "odoo_update_field_request",
+    "odoo_unsupported_action",
+    "clarification_required",
     "update_product_price",
     "document_search",
     "document_details",
@@ -46,8 +53,15 @@ SUPPORTED_ODOO_ACTIONS = {
 BUSINESS_TO_INTERNAL_ACTION = {
     "check_product_stock": "check_stock",
     "product_search": "product_search",
+    "inventory_product_search": "inventory_product_search",
     "product_details": "product_details",
     "inventory_summary": "inventory_summary",
+    "odoo_search_records": "odoo_search_records",
+    "odoo_get_record_details": "odoo_get_record_details",
+    "odoo_check_inventory": "odoo_check_inventory",
+    "odoo_update_field_request": "odoo_update_field_request",
+    "odoo_unsupported_action": "unknown",
+    "clarification_required": "unknown",
     "update_product_price": "change_price",
     "document_search": "search_document",
     "document_details": "document_details",
@@ -70,7 +84,12 @@ INTERNAL_TO_BUSINESS_ACTION = {
     "update_document_date": "update_document_date",
     "update_document_partner": "update_partner",
     "inventory_summary": "inventory_summary",
+    "odoo_search_records": "odoo_search_records",
+    "odoo_get_record_details": "odoo_get_record_details",
+    "odoo_check_inventory": "odoo_check_inventory",
+    "odoo_update_field_request": "odoo_update_field_request",
     "product_search": "product_search",
+    "inventory_product_search": "inventory_product_search",
     "product_details": "product_details",
 }
 
@@ -91,8 +110,15 @@ ODOO_ACTION_SCHEMA = {
                 "enum": [
                     "check_product_stock",
                     "product_search",
+                    "inventory_product_search",
                     "product_details",
                     "inventory_summary",
+                    "odoo_search_records",
+                    "odoo_get_record_details",
+                    "odoo_check_inventory",
+                    "odoo_update_field_request",
+                    "odoo_unsupported_action",
+                    "clarification_required",
                     "update_product_price",
                     "document_search",
                     "document_details",
@@ -140,6 +166,12 @@ ODOO_ACTION_SCHEMA = {
                             "price_unit",
                             "quantity",
                             "partner",
+                            "phone",
+                            "mobile",
+                            "email",
+                            "list_price",
+                            "standard_price",
+                            "x_studio_pointage",
                             "unknown",
                             None,
                         ],
@@ -147,6 +179,9 @@ ODOO_ACTION_SCHEMA = {
                     "new_value": {
                         "type": ["string", "number", "boolean", "null"],
                     },
+                    "model": {"type": ["string", "null"]},
+                    "record_id": {"type": ["integer", "null"]},
+                    "record_keyword": {"type": ["string", "null"]},
                     "filename": {"type": ["string", "null"]},
                     "content": {"type": ["string", "null"]},
                 },
@@ -159,6 +194,9 @@ ODOO_ACTION_SCHEMA = {
                     "line_product",
                     "field",
                     "new_value",
+                    "model",
+                    "record_id",
+                    "record_keyword",
                     "filename",
                     "content",
                 ],
@@ -268,6 +306,424 @@ def extract_product_name(message: str) -> str:
     return clean_product_name(fallback)
 
 
+def is_inventory_product_existence_request(message: str) -> bool:
+    normalized = normalize_label(message)
+    has_inventory_context = any(
+        term in normalized
+        for term in [
+            "inventory",
+            "inventaire",
+            "stock",
+            "catalogue",
+            "catalog",
+        ]
+    )
+    has_product_context = any(
+        term in normalized
+        for term in [
+            "product",
+            "products",
+            "produit",
+            "produits",
+            "article",
+            "articles",
+            "reference",
+            "ref",
+        ]
+    )
+    has_existence_intent = any(
+        term in normalized
+        for term in [
+            "integr",
+            "existe",
+            "existent",
+            "present",
+            "disponible",
+            "available",
+            "found",
+            "search",
+            "chercher",
+            "rechercher",
+            "trouver",
+            "matching",
+            "correspond",
+            "contient",
+            "contenant",
+            "categorie",
+            "category",
+            "famille",
+            "keyword",
+            "mot cle",
+        ]
+    )
+
+    return (
+        (has_inventory_context or ("odoo" in normalized and has_product_context))
+        and has_existence_intent
+        and has_product_context
+    )
+
+
+def extract_inventory_product_keyword(message: str) -> str:
+    text = message.strip()
+
+    context_match = re.search(
+        r"Context:\s+the referenced product is\s+(.+?)(?:\.|\n|$)",
+        text,
+        re.IGNORECASE,
+    )
+
+    if context_match:
+        return clean_product_name(context_match.group(1))
+
+    patterns = [
+        r"(?:matching|correspond(?:ant|ants)?\s+(?:à|a|to)|contenant|contient|avec|keyword|mot\s+cl[ée]|cat[ée]gorie|category|famille)\s+(.+?)(?:\s+(?:dans|in|sur|on|est|sont|are|is)\b|[?.!,;:]|$)",
+        r"(?:produits?|products?|articles?)\s+(?:de|du|d['’]|of|type|cat[ée]gorie|category|famille)\s+(.+?)(?:\s+(?:dans|in|sur|on|est|sont|are|is)\b|[?.!,;:]|$)",
+        r"(?:produit|product|article)\s+(.+?)\s+(?:est|is|existe|exists|dans|in|int[ée]gr[ée]|integrated)",
+        r"(?:est-ce que|est ce que|is|are|check if|verify if|v[ée]rifie si|verifie si)\s+(.+?)\s+(?:est|sont|is|are|existe|exists|int[ée]gr[ée]|integrated|pr[ée]sent|present)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+
+        if match:
+            keyword = clean_inventory_keyword(match.group(1))
+            if keyword:
+                return keyword
+
+    return clean_inventory_keyword(text)
+
+
+def clean_inventory_keyword(value: str) -> str:
+    normalized = re.sub(r"[?.!,;:]+", " ", value or "")
+    normalized = re.sub(
+        r"\b([A-Za-zÀ-ÿ]+)-(?:t-)?(?:il|ils|elle|elles|on|nous|vous)\b",
+        r"\1",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    removable_terms = {
+        "a",
+        "about",
+        "already",
+        "are",
+        "article",
+        "articles",
+        "available",
+        "avec",
+        "catalog",
+        "catalogue",
+        "category",
+        "categorie",
+        "catégorie",
+        "check",
+        "chercher",
+        "client",
+        "contact",
+        "customer",
+        "dans",
+        "de",
+        "des",
+        "du",
+        "est",
+        "est-ce",
+        "est-ce-que",
+        "existe",
+        "existent",
+        "for",
+        "found",
+        "fournisseur",
+        "in",
+        "integrated",
+        "integre",
+        "integré",
+        "intégré",
+        "integree",
+        "integrees",
+        "integres",
+        "intégrés",
+        "inventory",
+        "inventaire",
+        "is",
+        "keyword",
+        "la",
+        "le",
+        "les",
+        "matching",
+        "mot",
+        "partner",
+        "partenaire",
+        "cle",
+        "clé",
+        "odoo",
+        "of",
+        "present",
+        "produit",
+        "produits",
+        "product",
+        "products",
+        "rechercher",
+        "search",
+        "si",
+        "sont",
+        "stock",
+        "the",
+        "trouver",
+        "un",
+        "une",
+        "verify",
+        "verifie",
+        "vérifie",
+    }
+    tokens = [
+        token
+        for token in normalized.split()
+        if normalize_label(token) not in removable_terms
+    ]
+
+    return clean_product_name(" ".join(tokens))
+
+
+def clean_record_keyword(value: str) -> str:
+    normalized = re.sub(r"[?!,;:]+", " ", value or "")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = re.sub(
+        r"^(?:cherche|chercher|recherche|rechercher|trouve|trouver|find|search|show|montre|affiche|donne(?:-moi)?|liste|lister)\s+",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"^(?:le|la|les|un|une|des|the|a|an)\s+",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"^(?:client|customer|fournisseur|supplier|vendor|contact|partenaire|partner|produit|product|article)\s+",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+
+    return clean_product_name(normalized)
+
+
+def is_vague_product_keyword(value: str) -> bool:
+    normalized = normalize_label(value)
+
+    return not normalized or len(normalized) < 2 or normalized in {
+        "article",
+        "articles",
+        "categorie",
+        "famille",
+        "produit",
+        "produits",
+        "product",
+        "products",
+    }
+
+
+ALLOWED_GENERIC_READ_MODELS = {
+    "product.product",
+    "product.template",
+    "res.partner",
+    "sale.order",
+    "purchase.order",
+    "account.move",
+    "stock.picking",
+}
+
+ALLOWED_GENERIC_WRITE_FIELDS = {
+    "product.template": {"list_price", "standard_price"},
+    "res.partner": {"phone", "mobile", "email"},
+    "account.analytic.account": {"x_studio_pointage"},
+}
+
+
+def normalize_odoo_model(value: str | None) -> str | None:
+    normalized = normalize_label(value or "")
+    aliases = {
+        "product": "product.product",
+        "products": "product.product",
+        "produit": "product.product",
+        "produits": "product.product",
+        "product product": "product.product",
+        "product.product": "product.product",
+        "product template": "product.template",
+        "product.template": "product.template",
+        "article": "product.product",
+        "articles": "product.product",
+        "partner": "res.partner",
+        "contact": "res.partner",
+        "client": "res.partner",
+        "customer": "res.partner",
+        "fournisseur": "res.partner",
+        "supplier": "res.partner",
+        "vendor": "res.partner",
+        "res partner": "res.partner",
+        "res.partner": "res.partner",
+        "sale order": "sale.order",
+        "sale.order": "sale.order",
+        "commande client": "sale.order",
+        "purchase order": "purchase.order",
+        "purchase.order": "purchase.order",
+        "commande fournisseur": "purchase.order",
+        "bon de commande": "purchase.order",
+        "invoice": "account.move",
+        "facture": "account.move",
+        "account move": "account.move",
+        "account.move": "account.move",
+        "delivery": "stock.picking",
+        "livraison": "stock.picking",
+        "stock picking": "stock.picking",
+        "stock.picking": "stock.picking",
+        "analytic account": "account.analytic.account",
+        "compte analytique": "account.analytic.account",
+        "account analytic account": "account.analytic.account",
+        "account.analytic.account": "account.analytic.account",
+    }
+
+    return aliases.get(normalized)
+
+
+def infer_generic_model(message: str, parsed_action: dict | None = None) -> str | None:
+    parsed_action = parsed_action or {}
+    entities = parsed_action.get("entities") if isinstance(parsed_action.get("entities"), dict) else {}
+    explicit_model = (
+        parsed_action.get("target_model")
+        or parsed_action.get("model")
+        or entities.get("model")
+    )
+    model = normalize_odoo_model(explicit_model)
+
+    if model:
+        return model
+
+    normalized = normalize_label(message)
+
+    if "pointage" in normalized or "analytique" in normalized or "analytic" in normalized:
+        return "account.analytic.account"
+
+    if any(term in normalized for term in ["client", "customer", "fournisseur", "supplier", "vendor", "contact", "partenaire", "partner"]):
+        return "res.partner"
+
+    if any(term in normalized for term in ["facture", "invoice"]):
+        return "account.move"
+
+    if any(term in normalized for term in ["livraison", "delivery", "stock picking"]):
+        return "stock.picking"
+
+    if any(term in normalized for term in ["commande fournisseur", "purchase order", "bon de commande"]):
+        return "purchase.order"
+
+    if any(term in normalized for term in ["commande client", "sale order", "devis"]):
+        return "sale.order"
+
+    if any(term in normalized for term in ["produit", "product", "article", "stock", "inventaire", "inventory", "prix", "price", "cout", "cost"]):
+        return "product.template" if any(term in normalized for term in ["prix", "price", "cout", "cost"]) else "product.product"
+
+    return None
+
+
+def normalize_generic_field(model_name: str | None, field_value: str | None, message: str = "") -> str | None:
+    normalized = normalize_label(field_value or "")
+    text = normalize_label(message)
+
+    if model_name == "product.template":
+        if normalized in {"list_price", "prix", "prix de vente", "sale price", "price", "tarif"} or "prix" in text or "sale price" in text:
+            return "list_price"
+        if normalized in {"standard_price", "cout", "coût", "cost", "cost price"} or "standard price" in text or "cout" in text:
+            return "standard_price"
+
+    if model_name == "res.partner":
+        if normalized in {"phone", "telephone", "téléphone", "tel"} or "telephone" in text or "téléphone" in text:
+            return "phone"
+        if normalized in {"mobile", "portable"} or "mobile" in text or "portable" in text:
+            return "mobile"
+        if normalized in {"email", "mail", "e-mail"} or "email" in text or "mail" in text:
+            return "email"
+
+    if model_name == "account.analytic.account":
+        if normalized in {"x_studio_pointage", "pointage"} or "pointage" in text:
+            return "x_studio_pointage"
+
+    return None
+
+
+def extract_generic_record_id(message: str, parsed_action: dict | None = None):
+    parsed_action = parsed_action or {}
+    entities = parsed_action.get("entities") if isinstance(parsed_action.get("entities"), dict) else {}
+    record_id = parsed_action.get("record_id") or entities.get("record_id")
+
+    if record_id is not None:
+        try:
+            return int(record_id)
+        except (TypeError, ValueError):
+            return None
+
+    match = re.search(r"\b(?:id|identifiant)\s+(\d+)\b", message, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def extract_generic_keyword(message: str, parsed_action: dict | None = None) -> str:
+    parsed_action = parsed_action or {}
+    entities = parsed_action.get("entities") if isinstance(parsed_action.get("entities"), dict) else {}
+    keyword = (
+        parsed_action.get("record_query")
+        or parsed_action.get("record_keyword")
+        or parsed_action.get("document_query")
+        or entities.get("record_keyword")
+        or entities.get("product_name")
+        or entities.get("partner_name")
+        or entities.get("document_reference")
+    )
+
+    if keyword:
+        return clean_record_keyword(str(keyword))
+
+    patterns = [
+        r"(?:client|customer|fournisseur|supplier|vendor|contact|partenaire|partner)\s+(.+?)(?:\s+(?:dans|in|sur|on|avec|to)\b|[?!,;:]|$)",
+        r"(?:factures?|invoices?|bons?\s+de\s+commande|purchase\s+orders?|commandes?\s+fournisseurs?)\s+(?:de|du|d['’]|for)\s+(.+?)(?:\s+(?:dans|in|sur|on|avec|to)\b|[?!,;:]|$)",
+        r"(?:nomm[ée]|appel[ée]|named|called)\s+(.+?)(?:\s+(?:dans|in|sur|on|avec|à|a|to)\b|[?!,;:]|$)",
+        r"(?:pour|for|de|du|d['’]|produit|product|article)\s+(.+?)(?:\s+(?:dans|in|sur|on|avec|à|a|to)\b|[?!,;:]|$)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if match:
+            candidate = clean_record_keyword(match.group(1))
+            if candidate:
+                return candidate
+
+    return clean_record_keyword(message)
+
+
+def coerce_generic_new_value(model_name: str, field_name: str, value):
+    if value is None or value == "":
+        return None
+
+    if model_name == "product.template" and field_name in {"list_price", "standard_price"}:
+        if isinstance(value, (int, float)):
+            return float(value)
+        match = re.search(r"\d+(?:[.,]\d+)?", str(value))
+        return float(match.group(0).replace(",", ".")) if match else None
+
+    if model_name == "account.analytic.account" and field_name == "x_studio_pointage":
+        if isinstance(value, bool):
+            return value
+        normalized = normalize_label(str(value))
+        if normalized in {"true", "vrai", "oui", "yes", "activer", "cocher", "active"}:
+            return True
+        if normalized in {"false", "faux", "non", "no", "desactiver", "decocher", "désactiver", "décocher"}:
+            return False
+        return None
+
+    return str(value).strip()
+
+
 def extract_requested_value(message: str):
     value_match = re.search(
         r"(?:to|à|a)\s+(\d+(?:[.,]\d+)?)\s*(dh|dhs|mad|dirhams?)?",
@@ -315,6 +771,14 @@ def detect_odoo_action(message: str) -> str:
 
     has_change = any(keyword in text for keyword in CHANGE_KEYWORDS)
 
+    if "price" in text or "prix" in text:
+        return "change_price" if has_change else "check_price"
+
+    if has_change and infer_generic_model(message):
+        field_name = normalize_generic_field(infer_generic_model(message), None, message)
+        if field_name:
+            return "odoo_update_field_request"
+
     if is_odoo_document_details_request(message):
         return "document_details"
 
@@ -334,8 +798,17 @@ def detect_odoo_action(message: str) -> str:
     ):
         return "inventory_summary"
 
-    if "price" in text or "prix" in text:
-        return "change_price" if has_change else "check_price"
+    if is_inventory_product_existence_request(message):
+        return "inventory_product_search"
+
+    if any(term in normalized for term in ["cherche", "chercher", "recherche", "rechercher", "trouve", "trouver", "search", "find", "liste", "lister", "montre", "show"]):
+        if infer_generic_model(message):
+            return "odoo_search_records"
+        return "product_search"
+
+    if any(term in normalized for term in ["details", "detail", "détails", "détail", "fiche", "information", "informations"]):
+        if infer_generic_model(message):
+            return "odoo_get_record_details"
 
     if "unit" in text or "unité" in text or "unite" in text:
         return "change_unit" if has_change else "check_unit"
@@ -428,10 +901,30 @@ def extract_document_reference(message: str):
     return None
 
 
+def extract_document_partner_query(message: str) -> str | None:
+    patterns = [
+        r"(?:factures?|invoices?|bons?\s+de\s+commande|purchase\s+orders?|commandes?\s+fournisseurs?|commandes?\s+client|sale\s+orders?|livraisons?|deliveries)\s+(?:de|du|d['’]|for)\s+(.+?)(?:\s+(?:dans|in|sur|on|avec|to)\b|[?!,;:]|$)",
+        r"(?:pour|for)\s+(?:le\s+|la\s+|les\s+)?(?:client|customer|fournisseur|supplier|vendor|partenaire|partner)?\s*(.+?)(?:\s+(?:dans|in|sur|on|avec|to)\b|[?!,;:]|$)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+
+        if match:
+            keyword = clean_record_keyword(match.group(1))
+            if keyword:
+                return keyword
+
+    return None
+
+
 def infer_document_type_from_message(message: str):
     normalized = normalize_label(message)
 
     if any(term in normalized for term in ["bon de commande", "commande fournisseur", "purchase order"]):
+        return "purchase_order"
+
+    if any(term in normalized for term in ["bons de commande", "commandes fournisseur", "commandes fournisseurs"]):
         return "purchase_order"
 
     if "purchase_order" in normalized:
@@ -493,8 +986,12 @@ def is_odoo_document_search_request(message: str):
         term in normalized
         for term in [
             "bon de commande",
+            "bons de commande",
             "commande fournisseur",
+            "commandes fournisseur",
+            "commandes fournisseurs",
             "bon de livraison",
+            "bons de livraison",
             "facture",
             "livraison",
             "stock picking",
@@ -613,6 +1110,88 @@ def parse_odoo_action_deterministic(message: str) -> dict:
             "parser_error": None,
         }
 
+    if action == "inventory_product_search":
+        return {
+            "intent": "odoo",
+            "action": "inventory_product_search",
+            "business_action": "inventory_product_search",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "product.template",
+            "record_query": extract_inventory_product_keyword(message),
+            "field_label": None,
+            "field_name": None,
+            "new_value": None,
+            "confidence": 0.78,
+            "parser_source": "local_rules",
+            "parser_error": None,
+        }
+
+    if action == "product_search":
+        return {
+            "intent": "odoo",
+            "action": "product_search",
+            "business_action": "product_search",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "product.template",
+            "record_query": extract_generic_keyword(message),
+            "field_label": None,
+            "field_name": None,
+            "new_value": None,
+            "confidence": 0.72,
+            "parser_source": "local_rules",
+            "parser_error": None,
+        }
+
+    if action in {"odoo_search_records", "odoo_get_record_details"}:
+        model_name = infer_generic_model(message)
+        return {
+            "intent": "odoo",
+            "action": action,
+            "business_action": action,
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": model_name,
+            "model": model_name,
+            "record_id": extract_generic_record_id(message),
+            "record_query": extract_generic_keyword(message),
+            "field_label": None,
+            "field_name": None,
+            "new_value": None,
+            "confidence": 0.72,
+            "parser_source": "local_rules",
+            "parser_error": None,
+        }
+
+    if action == "odoo_update_field_request":
+        model_name = infer_generic_model(message)
+        field_name = normalize_generic_field(model_name, None, message)
+        new_value = extract_requested_value(message)
+        coerced_value = (
+            coerce_generic_new_value(model_name, field_name, new_value)
+            if model_name and field_name
+            else None
+        )
+
+        return {
+            "intent": "odoo",
+            "action": "odoo_update_field_request",
+            "business_action": "odoo_update_field_request",
+            "risk": "high",
+            "requires_approval": True,
+            "target_model": model_name,
+            "model": model_name,
+            "record_id": extract_generic_record_id(message),
+            "record_query": extract_generic_keyword(message),
+            "field_label": field_name,
+            "field_name": field_name,
+            "new_value": coerced_value,
+            "confidence": 0.72,
+            "parser_source": "local_rules",
+            "parser_error": None,
+        }
+
     if action == "inventory_summary":
         return {
             "intent": "odoo",
@@ -649,7 +1228,12 @@ def parse_odoo_action_deterministic(message: str) -> dict:
             "requires_approval": False,
             "target_model": target_model,
             "record_query": None,
-            "document_query": None if document_id else (document_reference or extract_context_document_name(message) or message),
+            "document_query": None if document_id else (
+                document_reference
+                or extract_document_partner_query(message)
+                or extract_context_document_name(message)
+                or message
+            ),
             "product_query": None,
             "field_label": None,
             "field_name": None,
@@ -657,7 +1241,7 @@ def parse_odoo_action_deterministic(message: str) -> dict:
             "document_type": document_type or context_document_type or MODEL_TO_DOCUMENT_TYPE.get(target_model),
             "document_reference": document_reference,
             "document_id": document_id,
-            "partner_name": extract_context_document_partner(message),
+            "partner_name": extract_context_document_partner(message) or extract_document_partner_query(message),
             "line_product": None,
             "field": None,
             "technical_field": None,
@@ -771,8 +1355,14 @@ def document_action_for_field(action: str, field: str | None):
         "search_document",
         "document_details",
         "product_search",
+        "inventory_product_search",
         "product_details",
         "inventory_summary",
+        "odoo_search_records",
+        "odoo_get_record_details",
+        "odoo_check_inventory",
+        "odoo_update_field_request",
+        "clarification_required",
         "unknown",
     }:
         return action
@@ -827,7 +1417,13 @@ def normalize_openai_parse(
         "change_price",
         "toggle_boolean_field",
         "product_search",
+        "inventory_product_search",
         "product_details",
+        "odoo_search_records",
+        "odoo_get_record_details",
+        "odoo_check_inventory",
+        "odoo_update_field_request",
+        "clarification_required",
         "inventory_summary",
         "update_document_line",
         "update_document_partner",
@@ -838,7 +1434,10 @@ def normalize_openai_parse(
     }:
         return None
 
-    target_model = parsed.get("target_model") or DOCUMENT_TYPE_TO_MODEL.get(document_type or "")
+    target_model = (
+        normalize_odoo_model(parsed.get("target_model") or parsed.get("model") or entities.get("model"))
+        or DOCUMENT_TYPE_TO_MODEL.get(document_type or "")
+    )
     record_query = parsed.get("record_query") or parsed_value(parsed, entities, "product_name")
     document_query = (
         parsed.get("document_query")
@@ -865,7 +1464,9 @@ def normalize_openai_parse(
         "risk": parsed.get("risk") if parsed.get("risk") in {"low", "medium", "high"} else "low",
         "requires_approval": bool(parsed.get("requires_approval")),
         "target_model": target_model,
-        "record_query": record_query,
+        "record_query": record_query or parsed.get("record_keyword") or entities.get("record_keyword"),
+        "record_id": parsed.get("record_id") or entities.get("record_id"),
+        "model": target_model,
         "document_query": document_query,
         "product_query": product_query,
         "field_label": parsed.get("field_label"),
@@ -933,11 +1534,53 @@ def normalize_openai_parse(
             "target_model": "product.template",
         })
 
-    if action in {"product_search", "product_details"}:
+    if action in {"product_search", "inventory_product_search", "product_details"}:
         result.update({
             "risk": "low",
             "requires_approval": False,
             "target_model": "product.template",
+        })
+
+    if action in {"odoo_search_records", "odoo_get_record_details", "odoo_check_inventory"}:
+        target_model = infer_generic_model(message, result)
+
+        if target_model not in ALLOWED_GENERIC_READ_MODELS:
+            return None
+
+        result.update({
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": target_model,
+            "model": target_model,
+            "record_query": result.get("record_query") or extract_generic_keyword(message, result),
+        })
+
+        if action == "odoo_check_inventory":
+            result["action"] = "inventory_product_search"
+            result["business_action"] = "inventory_product_search"
+
+    if action == "odoo_update_field_request":
+        target_model = infer_generic_model(message, result)
+        field_name = normalize_generic_field(
+            target_model,
+            result.get("field_name") or result.get("field"),
+            message,
+        )
+
+        if target_model not in ALLOWED_GENERIC_READ_MODELS or not field_name:
+            return None
+
+        new_value = coerce_generic_new_value(target_model, field_name, result.get("new_value"))
+
+        result.update({
+            "risk": "high",
+            "requires_approval": True,
+            "target_model": target_model,
+            "model": target_model,
+            "field_name": field_name,
+            "technical_field": field_name,
+            "new_value": new_value,
+            "record_query": result.get("record_query") or extract_generic_keyword(message, result),
         })
 
     if action == "inventory_summary":
@@ -1129,6 +1772,7 @@ Parse this Odoo request into the required generic action schema.
 Supported Odoo actions:
 - check_product_stock: read stock for one named product.
 - product_search: search one product or product family.
+- inventory_product_search: check whether products matching a keyword/category are integrated in Odoo inventory. Read-only.
 - product_details: read product details for one named product.
 - inventory_summary: broad inventory count/summary questions such as "Combien de produits j’ai dans le stock ?" or "How many products do we have in inventory?". Do not treat these as product names.
 - update_product_price: change the sale price of one product. Sensitive, requires approval.
@@ -1629,6 +2273,30 @@ def build_needs_clarification_response(message: str, parsed_action: dict, missin
 
 
 def build_safe_unsupported_document_response(message: str, parsed_action: dict):
+    unsupported_message = parsed_action.get("clarification_reason")
+    audit_action = parsed_action.get("action") or "unsupported"
+
+    if parsed_action.get("understood_write") or parsed_action.get("requires_approval"):
+        unsupported_message = (
+            "Je comprends la modification demandée, mais cette opération n'est pas "
+            "encore connectée à un outil Odoo sécurisé."
+        )
+        audit_action = "unsupported_odoo_write"
+
+    log_request({
+        "event_type": "unsupported_action",
+        "title": "Action Odoo non prise en charge",
+        "system": "odoo",
+        "agent": "odoo_agent",
+        "status": "unsupported",
+        "risk": parsed_action.get("risk", "low"),
+        "approval_status": "not_required",
+        "user_message": message,
+        "action": audit_action,
+        "target_model": parsed_action.get("target_model"),
+        "message": "Action comprise mais aucun outil Odoo sécurisé ne permet l'exécution.",
+    })
+
     return with_parser_debug({
         "intent": "odoo",
         "agent": "odoo_agent",
@@ -1637,7 +2305,7 @@ def build_safe_unsupported_document_response(message: str, parsed_action: dict):
         "approval_required": False,
         "status": "unsupported",
         "message": (
-            parsed_action.get("clarification_reason")
+            unsupported_message
             or (
                 "Je comprends votre demande, mais cette action n’est pas encore disponible "
                 "dans les outils autorisés de l’orchestrateur. Vous pouvez me demander de "
@@ -1741,6 +2409,7 @@ def build_sensitive_approval_response(message: str, action: str, parsed_action: 
         "update_document_line",
         "update_document_partner",
         "update_document_date",
+        "odoo_update_field_request",
     } and risk == "low":
         risk = "medium"
 
@@ -1762,6 +2431,7 @@ def build_sensitive_approval_response(message: str, action: str, parsed_action: 
         "update_document_line": "Modification d’une ligne de document",
         "update_document_partner": "Modification du client/fournisseur",
         "update_document_date": "Modification de date document",
+        "odoo_update_field_request": "Modification d’un champ Odoo",
     }
 
     title = action_labels.get(action, "Action Odoo sensible")
@@ -1828,6 +2498,85 @@ def build_sensitive_approval_response(message: str, action: str, parsed_action: 
             "field_label": field_label,
             "field_name": field_name,
             "new_value": parsed_action.get("new_value") is True,
+        })
+
+    if action == "odoo_update_field_request":
+        target_model = parsed_action.get("target_model") or parsed_action.get("model")
+        field_name = parsed_action.get("field_name") or parsed_action.get("technical_field")
+        record_id = parsed_action.get("record_id")
+        product_name = parsed_action.get("record_query") or extract_generic_keyword(message, parsed_action)
+        requested_value = parsed_action.get("new_value")
+
+        if target_model not in ALLOWED_GENERIC_READ_MODELS or field_name not in ALLOWED_GENERIC_WRITE_FIELDS.get(target_model, set()):
+            return build_safe_unsupported_document_response(
+                message,
+                {
+                    **parsed_action,
+                    "clarification_reason": (
+                        "Action non disponible. Cette modification Odoo n’est pas dans les champs autorisés."
+                    ),
+                },
+            )
+
+        if requested_value in {None, ""}:
+            return build_needs_clarification_response(
+                message,
+                parsed_action,
+                ["nouvelle valeur"],
+            )
+
+        prepared = unwrap_tool_response(
+            execute_tool(
+                "odoo_prepare_update_field",
+                model_name=target_model,
+                field_name=field_name,
+                new_value=requested_value,
+                record_id=record_id,
+                keyword=product_name,
+            )
+        )
+
+        if isinstance(prepared, dict) and prepared.get("ambiguous"):
+            return build_ambiguous_response(
+                message,
+                parsed_action,
+                prepared.get("candidates", []),
+                entity_label="enregistrements",
+            )
+
+        if isinstance(prepared, dict) and prepared.get("found") is False:
+            return with_parser_debug({
+                "intent": "odoo",
+                "agent": "odoo_agent",
+                "risk": "low",
+                "requires_approval": False,
+                "approval_required": False,
+                "status": "not_found",
+                "message": "Aucun enregistrement correspondant trouvé dans Odoo.",
+                "tool_used": "odoo_prepare_update_field",
+                "data": prepared,
+                "result": prepared,
+            }, parsed_action, action)
+
+        if not isinstance(prepared, dict) or not prepared.get("success"):
+            return build_safe_unsupported_document_response(
+                message,
+                {
+                    **parsed_action,
+                    "clarification_reason": "Action non disponible. Cette demande n’a pas pu être préparée avec un outil Odoo sécurisé.",
+                },
+            )
+
+        product_name = prepared.get("record_name") or product_name
+        requested_value = prepared.get("new_value")
+        metadata.update({
+            "tool_name": "odoo_update_field",
+            "target_model": target_model,
+            "record_id": prepared.get("record_id"),
+            "record_query": parsed_action.get("record_query"),
+            "field_name": field_name,
+            "old_value": prepared.get("old_value"),
+            "new_value": requested_value,
         })
 
     if action in {
@@ -1989,13 +2738,14 @@ def run(message: str):
         "update_document_line",
         "update_document_partner",
         "update_document_date",
+        "odoo_update_field_request",
     }
 
     if action in sensitive_actions or requires_approval(message):
         return build_sensitive_approval_response(message, action, parsed_action)
 
     if (
-        action in {"check_stock", "product_search", "product_details"}
+        action in {"check_stock", "product_search", "inventory_product_search", "product_details"}
         and not parsed_action.get("record_query")
         and not parsed_action.get("product_query")
     ):
@@ -2037,6 +2787,94 @@ def run(message: str):
             "result": raw_result,
         }, parsed_action, action)
 
+    if action in {"odoo_search_records", "odoo_get_record_details"}:
+        target_model = parsed_action.get("target_model") or parsed_action.get("model")
+        record_id = parsed_action.get("record_id")
+        keyword = parsed_action.get("record_query") or extract_generic_keyword(message, parsed_action)
+
+        if target_model not in ALLOWED_GENERIC_READ_MODELS:
+            return build_needs_clarification_response(
+                message,
+                parsed_action,
+                ["type d’enregistrement Odoo"],
+            )
+
+        if action == "odoo_search_records" and not keyword:
+            return build_needs_clarification_response(
+                message,
+                parsed_action,
+                ["mot-clé de recherche"],
+            )
+
+        if action == "odoo_get_record_details" and record_id is None and not keyword:
+            return build_needs_clarification_response(
+                message,
+                parsed_action,
+                ["identifiant ou mot-clé"],
+            )
+
+        if action == "odoo_get_record_details":
+            raw_result = unwrap_tool_response(
+                execute_tool(
+                    "odoo_get_record_details",
+                    model_name=target_model,
+                    record_id=record_id,
+                    keyword=keyword,
+                )
+            )
+        else:
+            raw_result = unwrap_tool_response(
+                execute_tool(
+                    "odoo_search_records",
+                    model_name=target_model,
+                    keyword=keyword,
+                    limit=6,
+                )
+            )
+
+        found = bool(isinstance(raw_result, dict) and raw_result.get("found"))
+        ambiguous = bool(isinstance(raw_result, dict) and raw_result.get("ambiguous"))
+
+        log_request({
+            "event_type": "odoo_read",
+            "title": "Recherche Odoo générique",
+            "system": "odoo",
+            "agent": "odoo_agent",
+            "status": "completed" if found and not ambiguous else "not_found",
+            "risk": "low",
+            "approval_status": "not_required",
+            "user_message": message,
+            "action": action,
+            "target_model": target_model,
+            "message": "Lecture Odoo consultative sans modification.",
+            "data": raw_result,
+        })
+
+        return with_parser_debug({
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "risk": "low",
+            "risk_level": "low",
+            "requires_approval": False,
+            "approval_required": False,
+            "status": "needs_clarification" if ambiguous else ("completed" if found else "not_found"),
+            "message": (
+                "Plusieurs enregistrements correspondent à votre demande. Veuillez préciser lequel choisir."
+                if ambiguous
+                else (
+                    "Enregistrements Odoo trouvés."
+                    if found and action == "odoo_search_records"
+                    else "Détails Odoo consultés avec succès."
+                    if found
+                    else "Aucun enregistrement correspondant trouvé dans Odoo."
+                )
+            ),
+            "tool_used": "odoo_get_record_details" if action == "odoo_get_record_details" else "odoo_search_records",
+            "data": raw_result,
+            "result": raw_result,
+            "candidates": raw_result.get("candidates", []) if isinstance(raw_result, dict) else [],
+        }, parsed_action, action)
+
     if action in ["check_stock", "check_price", "check_unit", "check_product_details", "product_details"]:
         product_name = parsed_action.get("record_query") or extract_product_name(message)
         raw_result = check_stock(product_name)
@@ -2073,14 +2911,39 @@ def run(message: str):
             "result": raw_result,
         }, parsed_action, action)
 
-    if action == "product_search":
-        product_name = parsed_action.get("record_query") or extract_product_name(message)
+    if action in {"product_search", "inventory_product_search"}:
+        product_name = (
+            parsed_action.get("record_query")
+            or parsed_action.get("product_query")
+            or (
+                extract_inventory_product_keyword(message)
+                if action == "inventory_product_search"
+                else extract_product_name(message)
+            )
+        )
+
+        if is_vague_product_keyword(product_name):
+            return build_needs_clarification_response(
+                message,
+                parsed_action,
+                ["mot-clé produit"],
+            )
+
         raw_result = search_product(product_name)
         found = bool(isinstance(raw_result, dict) and raw_result.get("found"))
+        message_text = (
+            "Produits correspondants trouvés dans l’inventaire Odoo."
+            if found
+            else "Aucun produit correspondant trouvé dans l’inventaire Odoo."
+        )
 
         log_request({
             "event_type": "odoo_read",
-            "title": "Recherche produit Odoo",
+            "title": (
+                "Vérification intégration inventaire Odoo"
+                if action == "inventory_product_search"
+                else "Recherche produit Odoo"
+            ),
             "system": "odoo",
             "agent": "odoo_agent",
             "status": "completed" if found else "not_found",
@@ -2094,14 +2957,14 @@ def run(message: str):
         })
 
         return with_parser_debug({
-            "intent": parsed_action.get("intent") or "odoo_document_details",
+            "intent": parsed_action.get("intent") or "odoo",
             "agent": "odoo_agent",
             "risk": "low",
             "risk_level": "low",
             "requires_approval": False,
             "approval_required": False,
             "status": "completed" if found else "not_found",
-            "message": "Recherche produit exécutée." if found else "Produit introuvable dans Odoo.",
+            "message": message_text,
             "tool_used": "odoo_search_product",
             "data": raw_result,
             "result": raw_result,

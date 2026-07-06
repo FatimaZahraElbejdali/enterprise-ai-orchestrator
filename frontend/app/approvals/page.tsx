@@ -1,13 +1,16 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
 import {
   ACCESS_DENIED_MESSAGE,
+  API_ERROR_MESSAGE,
   API_BASE_URL,
   AuthUser,
   authHeaders,
   clearAuth,
+  getRoleLabel,
   getStoredUser,
   handleAuthFailure,
   hasAnyPermission,
@@ -34,6 +37,7 @@ type ExecutionResult = {
   found?: boolean;
   message?: string;
   candidates?: Candidate[];
+  [key: string]: unknown;
 };
 
 type Candidate = {
@@ -112,7 +116,7 @@ export default function ApprovalsPage() {
         const data = await res.json();
         setApprovals(Array.isArray(data) ? data : []);
       } else {
-        setError(handleAuthFailure(res.status) || ACCESS_DENIED_MESSAGE);
+        setError(handleAuthFailure(res.status) || API_ERROR_MESSAGE);
       }
     } finally {
       setLoading(false);
@@ -131,7 +135,7 @@ export default function ApprovalsPage() {
       if (res.ok) {
         await loadApprovals();
       } else {
-        setError(handleAuthFailure(res.status) || ACCESS_DENIED_MESSAGE);
+        setError(handleAuthFailure(res.status) || API_ERROR_MESSAGE);
       }
     } finally {
       setActionLoading(null);
@@ -174,16 +178,24 @@ export default function ApprovalsPage() {
       <aside className="sidebar">
         <div>
           <div className="brand">
-            <div className="brandMark">JB</div>
+            <div className="brandMark">
+              <Image
+                className="brandLogo"
+                src="/jamain-baco-logo.png"
+                alt="Jamain Baco"
+                width={48}
+                height={48}
+              />
+            </div>
             <div>
               <p>Jamain Baco</p>
-              <h1>AI Orchestrator</h1>
+              <h1>Orchestrateur IA</h1>
             </div>
           </div>
 
           <nav className="nav">
             <Link href="/">Tableau de bord</Link>
-            <Link href="/chat">Console Chat</Link>
+            <Link href="/chat">Console de chat</Link>
             <Link href="/odoo">Odoo</Link>
             <Link href="/approvals" className="active">
               Validations
@@ -196,7 +208,7 @@ export default function ApprovalsPage() {
 
         <div className="sidebarFooter">
           <p>{currentUser?.email || "Utilisateur connecté"}</p>
-          <span>Rôle : {currentUser?.role_label || "Lecture seule"}</span>
+          <span>Rôle : {getRoleLabel(currentUser)}</span>
           <button className="logoutButton" type="button" onClick={handleLogout}>
             Se déconnecter
           </button>
@@ -257,191 +269,42 @@ export default function ApprovalsPage() {
                   <div className="approvalTop">
                     <div>
                       <div className="titleRow">
-                        <h4>
-                          {approval.title ||
-                            translateAction(approval.action) ||
-                            "Action sensible"}
-                        </h4>
+                        <h4>{approvalSummary(approval)}</h4>
                         <span className={`status ${approval.status}`}>
                           {translateStatus(approval.status)}
                         </span>
                       </div>
 
-                      <p className="message">
-                        {approval.description ||
-                          approval.user_message ||
-                          "Demande enregistrée par l’orchestrateur."}
-                      </p>
-                    </div>
-
-                    <span className={`risk ${approval.risk || "medium"}`}>
-                      Risque {translateRisk(approval.risk)}
-                    </span>
-                  </div>
-
-                  <div className="detailsGrid">
-                    <Detail label="Système" value={approval.source_system || "odoo"} />
-                    <Detail label="Agent" value={approval.selected_agent || "-"} />
-                    <Detail label="Action" value={translateAction(approval.action)} />
-                    <Detail label="Produit" value={approval.entity_name || "-"} />
-                    <Detail
-                      label="Type document"
-                      value={documentTypeLabel(
-                        getMetadataString(approval.metadata, "target_model") ||
-                          approval.execution_result?.model
-                      )}
-                    />
-                    <Detail
-                      label="Document"
-                      value={formatValue(
-                        approval.execution_result?.document ||
-                          getMetadataString(approval.metadata, "document_query")
-                      )}
-                    />
-                    <Detail
-                      label="ID document"
-                      value={formatValue(
-                        approval.execution_result?.record_id ||
-                          getMetadataString(approval.metadata, "document_id")
-                      )}
-                    />
-                    <Detail
-                      label="Partenaire"
-                      value={formatValue(
-                        getMetadataString(approval.metadata, "partner_name")
-                      )}
-                    />
-                    <Detail
-                      label="Ligne"
-                      value={formatValue(approval.execution_result?.line_id)}
-                    />
-                    <Detail
-                      label="Champ"
-                      value={fieldLabel(
-                        approval.execution_result?.field ||
-                          getMetadataString(approval.metadata, "field_name")
-                      )}
-                    />
-                    <Detail
-                      label="Valeur demandée"
-                      value={formatValue(approval.requested_change)}
-                    />
-                    <Detail
-                      label="Exécuté dans Odoo"
-                      value={approval.executed ? "Oui" : "Non"}
-                    />
-                    <Detail
-                      label="Ancien prix"
-                      value={formatValue(approval.execution_result?.old_price)}
-                    />
-                    <Detail
-                      label="Nouveau prix"
-                      value={formatValue(approval.execution_result?.new_price)}
-                    />
-                    <Detail
-                      label="Ancienne valeur"
-                      value={formatValue(approval.execution_result?.old_value)}
-                    />
-                    <Detail
-                      label="Nouvelle valeur"
-                      value={formatValue(approval.execution_result?.new_value)}
-                    />
-                    <Detail
-                      label="Date"
-                      value={formatDate(approval.timestamp)}
-                    />
-                    <Detail
-                      label="ID validation"
-                      value={approval.id}
-                    />
-                  </div>
-
-                  {approval.user_message && (
-                    <div className="requestBox">
-                      <span>Demande originale</span>
-                      <p>{approval.user_message}</p>
-                    </div>
-                  )}
-
-                  {approval.execution_result && (
-                    <div className="requestBox">
-                      <span>Résultat d’exécution</span>
-                      <p>{formatExecutionResult(approval.execution_result)}</p>
-                    </div>
-                  )}
-
-                  {approval.execution_result?.candidates &&
-                    approval.execution_result.candidates.length > 0 && (
-                      <div className="candidateBox">
-                        <span>Candidats détectés</span>
-                        <div className="candidateList">
-                          {approval.execution_result.candidates.map((candidate) => (
-                            <div
-                              className="candidateItem"
-                              key={`${candidate.id || candidate.line_id}-${candidate.default_code || candidate.name || candidate.product}`}
-                            >
-                              <Detail
-                                label="ID"
-                                value={formatValue(candidate.id || candidate.record_id)}
-                              />
-                              <Detail
-                                label="Ligne"
-                                value={formatValue(candidate.line_id)}
-                              />
-                              <Detail
-                                label="Nom"
-                                value={formatValue(
-                                  candidate.name ||
-                                    candidate.product_name ||
-                                    candidate.product ||
-                                    candidate.partner
-                                )}
-                              />
-                              <Detail
-                                label="Référence"
-                                value={formatValue(candidate.default_code || candidate.ref)}
-                              />
-                              <Detail
-                                label="Prix"
-                                value={formatValue(candidate.list_price || candidate.price_unit)}
-                              />
-                              <Detail
-                                label="Quantité"
-                                value={formatValue(candidate.quantity)}
-                              />
-                              <Detail
-                                label="Partenaire"
-                                value={formatValue(candidate.partner)}
-                              />
-                              <Detail
-                                label="État"
-                                value={formatValue(candidate.state)}
-                              />
-                              <Detail
-                                label="Date"
-                                value={formatValue(candidate.date)}
-                              />
-                              <Detail
-                                label="Disponible"
-                                value={formatValue(candidate.qty_available)}
-                              />
-                              <Detail
-                                label="Prévu"
-                                value={formatValue(candidate.virtual_available)}
-                              />
-                              <Detail
-                                label="Vente"
-                                value={candidate.sale_ok ? "Oui" : "Non"}
-                              />
-                              <Detail
-                                label="Actif"
-                                value={candidate.active ? "Oui" : "Non"}
-                              />
-                            </div>
-                          ))}
-                        </div>
+                      <div className="businessInfo">
+                        <span>Demande originale :</span>
+                        <p>{approval.user_message || "Demande enregistrée par l’orchestrateur."}</p>
                       </div>
-                    )}
+                    </div>
+
+                    <div className="cardBadges">
+                      <span className={`risk ${approval.risk || "medium"}`}>
+                        Risque {translateRisk(approval.risk)}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="cardMeta">
+                    <span>Date : {formatDate(approval.timestamp)}</span>
+                    <span>Statut : {translateStatus(approval.status)}</span>
+                  </div>
+
+                  <details className="technicalDetails">
+                    <summary>Détails techniques</summary>
+                    <div className="technicalGrid">
+                      {technicalDetails(approval).map((item) => (
+                        <Detail
+                          key={item.label}
+                          label={item.label}
+                          value={item.value}
+                        />
+                      ))}
+                    </div>
+                  </details>
 
                   <div className="actions">
                     <button
@@ -456,7 +319,7 @@ export default function ApprovalsPage() {
                       disabled={!isPending || actionLoading === approval.id}
                       onClick={() => updateApproval(approval.id, "reject")}
                     >
-                      Rejeter
+                      Refuser
                     </button>
                   </div>
                 </article>
@@ -505,13 +368,19 @@ export default function ApprovalsPage() {
         }
 
         .brandMark {
-          width: 44px;
-          height: 44px;
+          width: 56px;
+          height: 56px;
           background: #ffffff;
-          color: #101827;
           display: grid;
           place-items: center;
-          font-weight: 900;
+          flex: 0 0 56px;
+        }
+
+        .brandLogo {
+          width: 48px;
+          height: 48px;
+          object-fit: contain;
+          display: block;
         }
 
         .brand p {
@@ -678,8 +547,8 @@ export default function ApprovalsPage() {
 
         .approvalCard {
           border: 1px solid #d9dee7;
-          padding: 22px;
-          margin-bottom: 16px;
+          padding: 18px;
+          margin-bottom: 14px;
           background: #fbfcfe;
         }
 
@@ -687,7 +556,7 @@ export default function ApprovalsPage() {
           display: flex;
           justify-content: space-between;
           gap: 18px;
-          margin-bottom: 18px;
+          margin-bottom: 14px;
         }
 
         .titleRow {
@@ -707,6 +576,45 @@ export default function ApprovalsPage() {
           margin: 0;
           color: #647084;
           line-height: 1.6;
+        }
+
+        .businessInfo {
+          background: #ffffff;
+          border: 1px solid #e5e7eb;
+          padding: 12px;
+          max-width: 860px;
+        }
+
+        .businessInfo span {
+          display: block;
+          margin-bottom: 5px;
+          color: #647084;
+          font-size: 12px;
+          font-weight: 900;
+        }
+
+        .businessInfo p {
+          margin: 0;
+          color: #172033;
+          font-size: 14px;
+          line-height: 1.5;
+          font-weight: 700;
+        }
+
+        .cardBadges {
+          display: flex;
+          align-items: flex-start;
+          justify-content: flex-end;
+        }
+
+        .cardMeta {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px 18px;
+          margin-bottom: 12px;
+          color: #647084;
+          font-size: 13px;
+          font-weight: 800;
         }
 
         .status,
@@ -739,13 +647,13 @@ export default function ApprovalsPage() {
           border: 1px solid #f2c0c0;
         }
 
-        .detailsGrid {
+        .technicalGrid {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 0 24px;
           border-top: 1px solid #e5e7eb;
           border-bottom: 1px solid #e5e7eb;
-          margin-bottom: 16px;
+          margin-top: 12px;
         }
 
         .detail {
@@ -769,48 +677,17 @@ export default function ApprovalsPage() {
           word-break: break-word;
         }
 
-        .requestBox {
+        .technicalDetails {
           background: #ffffff;
           border: 1px solid #e5e7eb;
-          padding: 14px;
-          margin-bottom: 16px;
+          padding: 12px;
+          margin-bottom: 14px;
         }
 
-        .candidateBox {
-          background: #ffffff;
-          border: 1px solid #f2d38b;
-          padding: 14px;
-          margin-bottom: 16px;
-        }
-
-        .requestBox span,
-        .candidateBox > span {
-          display: block;
-          color: #647084;
-          font-size: 12px;
-          font-weight: 900;
-          text-transform: uppercase;
-          letter-spacing: 0.08em;
-          margin-bottom: 6px;
-        }
-
-        .requestBox p {
-          margin: 0;
+        .technicalDetails summary {
+          cursor: pointer;
           color: #172033;
-          font-weight: 700;
-        }
-
-        .candidateList {
-          display: grid;
-          gap: 12px;
-        }
-
-        .candidateItem {
-          border-top: 1px solid #eef2f7;
-          display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 0 18px;
-          padding-top: 10px;
+          font-weight: 900;
         }
 
         .actions {
@@ -851,7 +728,7 @@ export default function ApprovalsPage() {
           }
 
           .metrics,
-          .detailsGrid {
+          .technicalGrid {
             grid-template-columns: 1fr;
           }
         }
@@ -894,10 +771,104 @@ function translateStatus(status?: string) {
 }
 
 function translateRisk(risk?: string) {
-  if (risk === "low") return "faible";
-  if (risk === "medium") return "moyen";
-  if (risk === "high") return "élevé";
-  return "moyen";
+  if (risk === "low") return "Faible";
+  if (risk === "medium") return "Moyen";
+  if (risk === "high") return "Élevé";
+  if (risk === "blocked") return "Bloqué";
+  return "Moyen";
+}
+
+function approvalSummary(approval: Approval) {
+  const target = approval.entity_name || approval.execution_result?.product;
+  const document =
+    approval.execution_result?.document ||
+    getMetadataString(approval.metadata, "document_query") ||
+    getMetadataString(approval.metadata, "document_id");
+  const subject = target || document;
+  const suffix = subject ? ` pour ${subject}` : "";
+
+  if (approval.action === "toggle_boolean_field") {
+    return `Modification d’un champ analytique${suffix}`;
+  }
+
+  if (approval.action === "change_price") {
+    return `Modification du prix${suffix}`;
+  }
+
+  if (approval.action === "change_stock") {
+    return `Modification du stock${suffix}`;
+  }
+
+  if (approval.action === "change_unit") {
+    return `Modification de l’unité${suffix}`;
+  }
+
+  if (approval.action === "update_document_line") {
+    return `Modification d’une ligne de document${suffix}`;
+  }
+
+  if (approval.action === "update_document_partner") {
+    return `Modification du client ou fournisseur${suffix}`;
+  }
+
+  if (approval.action === "update_document_date") {
+    return `Modification d’une date de document${suffix}`;
+  }
+
+  if (approval.action === "create_purchase_request") {
+    return `Création d’une demande d’achat${suffix}`;
+  }
+
+  return `${approval.title || translateAction(approval.action) || "Action sensible"}${suffix}`;
+}
+
+function technicalDetails(approval: Approval) {
+  const result = approval.execution_result;
+  const metadata = approval.metadata;
+  const details = [
+    ["Système", approval.source_system || "odoo"],
+    ["Agent", formatAgentName(approval.selected_agent)],
+    ["Modèle", approval.selected_model],
+    ["Action", translateAction(approval.action)],
+    ["Type document", documentTypeLabel(getMetadataString(metadata, "target_model") || result?.model)],
+    ["Document", result?.document || getMetadataString(metadata, "document_query")],
+    ["ID document", result?.record_id || getMetadataString(metadata, "document_id")],
+    ["Partenaire", getMetadataString(metadata, "partner_name")],
+    ["Ligne", result?.line_id],
+    ["Champ", fieldLabel(result?.field || getMetadataString(metadata, "field_name"))],
+    ["Valeur demandée", approval.requested_change || result?.requested_value],
+    ["Ancien prix", result?.old_price],
+    ["Nouveau prix", result?.new_price],
+    ["Ancienne valeur", result?.old_value],
+    ["Nouvelle valeur", result?.new_value],
+    ["Exécuté dans Odoo", approval.executed ? "Oui" : "Non"],
+    ["ID de validation", approval.id],
+    ["Résultat", result ? formatExecutionResult(result) : ""],
+    ["Candidats détectés", formatCandidates(result?.candidates)],
+    ["Métadonnées", formatTechnicalObject(metadata)],
+  ];
+
+  return details
+    .map(([label, value]) => ({
+      label: String(label),
+      value: formatValue(sanitizeForDisplay(value)),
+    }))
+    .filter((item) => item.value !== "-");
+}
+
+function formatAgentName(value?: string) {
+  const labels: Record<string, string> = {
+    odoo_agent: "Agent Odoo",
+    support_agent: "Agent Support",
+    server_agent: "Agent Serveur",
+    security_agent: "Agent Sécurité",
+    knowledge_agent: "Agent Connaissance",
+    development_agent: "Agent Développement",
+    general_agent: "Agent Général",
+  };
+
+  if (!value) return "-";
+  return labels[value] || value;
 }
 
 function translateAction(action?: string) {
@@ -957,15 +928,16 @@ function fieldLabel(field?: string) {
   return labels[field] || field;
 }
 
-function formatValue(value?: string | number | boolean | null) {
+function formatValue(value?: unknown): string {
   if (value === undefined || value === null || value === "") return "-";
   if (typeof value === "boolean") return value ? "Oui" : "Non";
+  if (typeof value === "object") return formatTechnicalObject(value);
   return String(value);
 }
 
-function formatExecutionResult(result: ExecutionResult) {
+function formatExecutionResult(result: ExecutionResult): string {
   const status = result.success ? "succès" : "échec";
-  const message = result.message || "Aucun message retourné.";
+  const message = sanitizeText(String(result.message || "Aucun message retourné."));
   const oldPrice = formatValue(result.old_price);
   const newPrice = formatValue(result.new_price);
   const oldValue = formatValue(result.old_value);
@@ -973,7 +945,131 @@ function formatExecutionResult(result: ExecutionResult) {
   const document = formatValue(result.document);
   const field = fieldLabel(result.field);
 
-  return `Statut: ${status}. Document: ${document}. Champ: ${field}. Ancien prix: ${oldPrice}. Nouveau prix: ${newPrice}. Ancienne valeur: ${oldValue}. Nouvelle valeur: ${newValue}. ${message}`;
+  return `Statut : ${status}. Document : ${document}. Champ : ${field}. Ancien prix : ${oldPrice}. Nouveau prix : ${newPrice}. Ancienne valeur : ${oldValue}. Nouvelle valeur : ${newValue}. ${message}`;
+}
+
+function formatCandidates(candidates?: Candidate[]): string {
+  if (!Array.isArray(candidates) || candidates.length === 0) return "";
+
+  return candidates
+    .map((candidate) => {
+      const name =
+        candidate.name ||
+        candidate.product_name ||
+        candidate.product ||
+        candidate.partner ||
+        candidate.ref ||
+        candidate.id;
+
+      return formatValue(sanitizeForDisplay(name));
+    })
+    .filter((value) => value !== "-")
+    .join(", ");
+}
+
+function formatTechnicalObject(value: unknown): string {
+  const sanitized = sanitizeForDisplay(value);
+
+  if (!sanitized || typeof sanitized !== "object" || Array.isArray(sanitized)) {
+    return "";
+  }
+
+  return Object.entries(sanitized)
+    .map(([key, entry]): string => `${technicalLabel(key)}: ${formatValue(entry)}`)
+    .filter((item) => !item.endsWith(": -"))
+    .join(" · ");
+}
+
+function technicalLabel(key: string) {
+  const labels: Record<string, string> = {
+    document_query: "Document",
+    document_id: "ID document",
+    field_name: "Champ",
+    new_value: "Nouvelle valeur",
+    old_value: "Ancienne valeur",
+    product_name: "Produit",
+    target_model: "Type document",
+  };
+
+  return labels[key] || key;
+}
+
+const SENSITIVE_DISPLAY_KEYS = new Set([
+  "db",
+  "url",
+  "odoo_url",
+  "database",
+  "database_name",
+  "dbname",
+  "username",
+  "user",
+  "uid",
+  "error",
+  "errors",
+  "exception",
+  "traceback",
+  "provider_error",
+  "raw_error",
+  "xmlrpc",
+  "xml_rpc",
+  "diagnostics",
+  "api_key",
+  "password",
+  "token",
+  "secret",
+]);
+
+function isSensitiveDisplayKey(key: string) {
+  const normalized = key.toLowerCase();
+  const compact = normalized.replace(/[\s_-]/g, "");
+
+  return (
+    SENSITIVE_DISPLAY_KEYS.has(normalized) ||
+    compact.includes("url") ||
+    compact.includes("database") ||
+    compact.includes("dbname") ||
+    compact.includes("apikey") ||
+    normalized.includes("api_key") ||
+    normalized.includes("password") ||
+    normalized.includes("token") ||
+    normalized.includes("secret") ||
+    normalized.includes("traceback") ||
+    normalized.includes("xmlrpc") ||
+    normalized.includes("xml-rpc") ||
+    normalized.includes("provider_error")
+  );
+}
+
+function sanitizeForDisplay(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeForDisplay(item));
+  }
+
+  if (typeof value === "string") {
+    return sanitizeText(value);
+  }
+
+  if (typeof value !== "object" || value === null) {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !isSensitiveDisplayKey(key))
+      .map(([key, entry]) => [key, sanitizeForDisplay(entry)])
+  );
+}
+
+function sanitizeText(value: string) {
+  if (
+    /api key|api_key|password|secret|token|\.env|xml-?rpc|traceback|odoo url|database name|username|uid|provider error/i.test(
+      value
+    )
+  ) {
+    return "[information masquée]";
+  }
+
+  return value;
 }
 
 function formatDate(value?: string) {

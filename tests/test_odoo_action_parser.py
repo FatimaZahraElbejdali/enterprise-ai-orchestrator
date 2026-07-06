@@ -350,6 +350,41 @@ def test_generic_inventory_summary_parse(monkeypatch):
     assert result["requires_approval"] is False
 
 
+def test_inventory_product_existence_parse_extracts_keyword_generically():
+    result = odoo_agent.parse_odoo_action_deterministic(
+        "Est-ce que les produits de nettoyage sont intégrés dans l’inventaire Odoo ?"
+    )
+
+    assert result["action"] == "inventory_product_search"
+    assert result["business_action"] == "inventory_product_search"
+    assert result["record_query"] == "nettoyage"
+    assert result["requires_approval"] is False
+    assert result["target_model"] == "product.template"
+
+
+def test_generic_partner_search_parse_is_category_based():
+    result = odoo_agent.parse_odoo_action_deterministic(
+        "Rechercher le client Atlas dans Odoo"
+    )
+
+    assert result["action"] == "odoo_search_records"
+    assert result["target_model"] == "res.partner"
+    assert result["record_query"] == "Atlas"
+    assert result["requires_approval"] is False
+
+
+def test_generic_allowed_field_update_parse_requires_approval():
+    result = odoo_agent.parse_odoo_action_deterministic(
+        "Modifier le téléphone du client Atlas à 0612345678"
+    )
+
+    assert result["action"] == "odoo_update_field_request"
+    assert result["target_model"] == "res.partner"
+    assert result["field_name"] == "phone"
+    assert result["new_value"] == "0612345678"
+    assert result["requires_approval"] is True
+
+
 def test_generic_update_product_price_parse(monkeypatch):
     _mock_structured_document_parse(
         monkeypatch,
@@ -384,3 +419,45 @@ def test_generic_update_product_price_parse(monkeypatch):
     assert result["record_query"] == "BACO CLEAN"
     assert result["new_value"] == 7.0
     assert result["requires_approval"] is True
+
+
+def test_supplier_search_maps_to_partner_model():
+    result = odoo_agent.parse_odoo_action_deterministic(
+        "Cherche le fournisseur P.A.N"
+    )
+
+    assert result["action"] == "odoo_search_records"
+    assert result["target_model"] == "res.partner"
+    assert result["record_query"] == "P.A.N"
+    assert result["requires_approval"] is False
+
+
+def test_invoice_search_maps_to_account_move():
+    result = odoo_agent.parse_odoo_action_deterministic(
+        "Montre les factures de P.A.N"
+    )
+
+    assert result["action"] == "search_document"
+    assert result["target_model"] == "account.move"
+    assert result["document_type"] == "invoice"
+    assert result["document_query"] == "P.A.N"
+    assert result["partner_name"] == "P.A.N"
+
+
+def test_purchase_order_search_with_plural_label_maps_safely():
+    result = odoo_agent.parse_odoo_action_deterministic(
+        "Cherche les bons de commande de P.A.N"
+    )
+
+    assert result["action"] == "search_document"
+    assert result["target_model"] == "purchase.order"
+    assert result["document_type"] == "purchase_order"
+    assert result["document_query"] == "P.A.N"
+
+
+def test_unqualified_find_defaults_to_safe_product_search():
+    result = odoo_agent.parse_odoo_action_deterministic("Trouve BACO CLEAN")
+
+    assert result["action"] == "product_search"
+    assert result["target_model"] == "product.template"
+    assert result["record_query"] == "BACO CLEAN"

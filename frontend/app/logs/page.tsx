@@ -1,8 +1,21 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
-import { API_BASE_URL } from "@/lib/api";
+import {
+  ACCESS_DENIED_MESSAGE,
+  API_ERROR_MESSAGE,
+  API_BASE_URL,
+  AuthUser,
+  authHeaders,
+  clearAuth,
+  getRoleLabel,
+  getStoredUser,
+  handleAuthFailure,
+  hasAnyPermission,
+  requireAuth,
+} from "@/lib/api";
 
 type ExecutionResult = {
   success?: boolean;
@@ -19,9 +32,13 @@ type LogEntry = {
   title?: string;
   system?: string;
   agent?: string;
+  selected_agent?: string;
   status?: string;
   risk?: string;
   approval_status?: string;
+  permission_decision?: string;
+  user_email?: string;
+  user_role?: string;
   approval_id?: string;
   user_message?: string;
   action?: string;
@@ -36,13 +53,23 @@ type LogEntry = {
 export default function LogsPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [currentUser] = useState<AuthUser | null>(() => getStoredUser());
+  const [error, setError] = useState("");
+  const accessDenied = !hasAnyPermission(currentUser, ["all", "view_audit_logs"]);
+
+  function handleLogout() {
+    clearAuth();
+    window.location.href = "/login";
+  }
 
   async function loadLogs() {
     setLoading(true);
+    setError("");
 
     try {
       const res = await fetch(`${API_BASE_URL}/logs`, {
         cache: "no-store",
+        headers: authHeaders(),
       });
 
       if (res.ok) {
@@ -59,6 +86,8 @@ export default function LogsPage() {
           : [];
 
         setLogs(cleanLogs);
+      } else {
+        setError(handleAuthFailure(res.status) || API_ERROR_MESSAGE);
       }
     } finally {
       setLoading(false);
@@ -66,6 +95,14 @@ export default function LogsPage() {
   }
 
   useEffect(() => {
+    if (!requireAuth()) return;
+
+    const user = getStoredUser();
+
+    if (!hasAnyPermission(user, ["all", "view_audit_logs"])) {
+      return;
+    }
+
     const timer = window.setTimeout(() => {
       void loadLogs();
     }, 0);
@@ -93,7 +130,10 @@ export default function LogsPage() {
       logs.filter(
         (log) =>
           log.status === "pending_approval" ||
-          log.approval_status === "pending"
+          log.status === "access_denied" ||
+          log.status === "blocked" ||
+          log.approval_status === "pending" ||
+          log.permission_decision === "denied"
       ).length,
     [logs]
   );
@@ -103,29 +143,40 @@ export default function LogsPage() {
       <aside className="sidebar">
         <div>
           <div className="brand">
-            <div className="brandMark">JB</div>
+            <div className="brandMark">
+              <Image
+                className="brandLogo"
+                src="/jamain-baco-logo.png"
+                alt="Jamain Baco"
+                width={48}
+                height={48}
+              />
+            </div>
             <div>
               <p>Jamain Baco</p>
-              <h1>AI Orchestrator</h1>
+              <h1>Orchestrateur IA</h1>
             </div>
           </div>
 
           <nav className="nav">
             <Link href="/">Tableau de bord</Link>
-            <Link href="/chat">Console Chat</Link>
+            <Link href="/chat">Console de chat</Link>
             <Link href="/odoo">Odoo</Link>
-            <Link href="/approvals">Validations</Link>
+            {hasAnyPermission(currentUser, ["all", "view_approvals", "approve_odoo_actions"]) && (
+              <Link href="/approvals">Validations</Link>
+            )}
             <Link href="/logs" className="active">
-              Audit Logs
+              Journaux d’audit
             </Link>
           </nav>
         </div>
 
         <div className="sidebarFooter">
-          <p>Traçabilité</p>
-          <span>
-            Les actions de l’orchestrateur sont enregistrées pour audit.
-          </span>
+          <p>{currentUser?.email || "Utilisateur connecté"}</p>
+          <span>Rôle : {getRoleLabel(currentUser)}</span>
+          <button className="logoutButton" type="button" onClick={handleLogout}>
+            Se déconnecter
+          </button>
         </div>
       </aside>
 
@@ -150,6 +201,12 @@ export default function LogsPage() {
           <Metric label="Actions bloquées" value={blockedActions} />
         </section>
 
+        {(error || accessDenied) && (
+          <div className="errorBox">
+            {accessDenied ? ACCESS_DENIED_MESSAGE : error}
+          </div>
+        )}
+
         <section className="panel">
           <div className="panelHeader">
             <div>
@@ -158,13 +215,14 @@ export default function LogsPage() {
             </div>
           </div>
 
-          {loading && <p className="empty">Chargement des logs...</p>}
+          {loading && !accessDenied && <p className="empty">Chargement des logs...</p>}
 
-          {!loading && logs.length === 0 && (
+          {!loading && !accessDenied && logs.length === 0 && (
             <p className="empty">Aucun événement d’audit propre à afficher.</p>
           )}
 
           {!loading &&
+            !accessDenied &&
             logs.map((log, index) => (
               <article className="logCard" key={log.id || index}>
                 <div className="logTop">
@@ -177,9 +235,7 @@ export default function LogsPage() {
                     </div>
 
                     <p className="logMessage">
-                      {log.message ||
-                        log.user_message ||
-                        "Événement enregistré par l’orchestrateur."}
+                      {summarizeLogMessage(log)}
                     </p>
                   </div>
 
@@ -189,37 +245,37 @@ export default function LogsPage() {
                 </div>
 
                 <div className="detailsGrid">
-                  <Detail label="Système" value={log.system || "-"} />
-                  <Detail label="Agent" value={log.agent || "-"} />
+                  <Detail label="Date" value={formatDate(log.timestamp)} />
+                  <Detail label="Utilisateur" value={formatValue(log.user_email)} />
+                  <Detail label="Rôle" value={translateRole(log.user_role)} />
+                  <Detail label="Agent" value={formatAgentName(log.selected_agent || log.agent)} />
                   <Detail label="Action" value={translateAction(log.action)} />
-                  <Detail label="Produit" value={log.product || "-"} />
+                  <Detail
+                    label="Décision d’accès"
+                    value={translatePermissionDecision(log.permission_decision)}
+                  />
                   <Detail
                     label="Validation"
                     value={translateApproval(log.approval_status)}
                   />
                   <Detail
-                    label="Exécuté"
-                    value={log.executed === true ? "Oui" : "Non / lecture seule"}
+                    label="Statut"
+                    value={translateStatus(log.status)}
+                  />
+                  <Detail
+                    label="Produit/document"
+                    value={formatValue(log.product)}
                   />
                   <Detail
                     label="Valeur demandée"
                     value={formatValue(log.requested_value)}
-                  />
-                  <Detail label="Date" value={formatDate(log.timestamp)} />
-                  <Detail
-                    label="Ancien prix"
-                    value={formatValue(log.execution_result?.old_price)}
-                  />
-                  <Detail
-                    label="Nouveau prix"
-                    value={formatValue(log.execution_result?.new_price)}
                   />
                 </div>
 
                 {log.user_message && (
                   <div className="requestBox">
                     <span>Demande utilisateur</span>
-                    <p>{log.user_message}</p>
+                    <p>{cleanDisplayText(log.user_message)}</p>
                   </div>
                 )}
 
@@ -273,13 +329,19 @@ export default function LogsPage() {
         }
 
         .brandMark {
-          width: 44px;
-          height: 44px;
+          width: 56px;
+          height: 56px;
           background: #ffffff;
-          color: #101827;
           display: grid;
           place-items: center;
-          font-weight: 900;
+          flex: 0 0 56px;
+        }
+
+        .brandLogo {
+          width: 48px;
+          height: 48px;
+          object-fit: contain;
+          display: block;
         }
 
         .brand p {
@@ -613,16 +675,19 @@ function translateStatus(status?: string) {
   if (status === "pending_approval") return "Validation requise";
   if (status === "approved") return "Approuvé";
   if (status === "rejected") return "Rejeté";
+  if (status === "access_denied") return "Accès refusé";
+  if (status === "blocked") return "Bloqué";
   if (status === "not_found") return "Introuvable";
   if (status === "failed") return "Échec";
   return status || "Journalisé";
 }
 
 function translateRisk(risk?: string) {
-  if (risk === "low") return "faible";
-  if (risk === "medium") return "moyen";
-  if (risk === "high") return "élevé";
-  return "faible";
+  if (risk === "low") return "Faible";
+  if (risk === "medium") return "Moyen";
+  if (risk === "high") return "Élevé";
+  if (risk === "blocked") return "Bloqué";
+  return "Faible";
 }
 
 function translateApproval(value?: string) {
@@ -630,7 +695,76 @@ function translateApproval(value?: string) {
   if (value === "pending") return "En attente";
   if (value === "approved") return "Approuvée";
   if (value === "rejected") return "Rejetée";
+  if (value === "requires_approval") return "Validation requise";
   return "-";
+}
+
+function translatePermissionDecision(value?: string) {
+  if (value === "allowed") return "Autorisé";
+  if (value === "denied") return "Refusé";
+  if (value === "requires_approval") return "Validation requise";
+  return "Autorisé";
+}
+
+function translateRole(value?: string) {
+  const labels: Record<string, string> = {
+    admin: "Administrateur",
+    odoo_manager: "Responsable Odoo",
+    it_manager: "Responsable IT",
+    support_agent: "Agent Support",
+    employee: "Employé",
+    readonly_viewer: "Lecture seule",
+  };
+
+  if (!value) return "-";
+  return labels[value] || value;
+}
+
+function formatAgentName(value?: string) {
+  const labels: Record<string, string> = {
+    odoo_agent: "Agent Odoo",
+    support_agent: "Agent Support",
+    server_agent: "Agent Serveur",
+    security_agent: "Agent Sécurité",
+    knowledge_agent: "Agent Connaissance",
+    development_agent: "Agent Développement",
+    general_agent: "Agent Général",
+  };
+
+  if (!value) return "-";
+  return labels[value] || value;
+}
+
+function summarizeLogMessage(log: LogEntry) {
+  if (log.permission_decision === "denied" || log.status === "access_denied") {
+    return "Accès refusé par la politique de rôle.";
+  }
+
+  if (log.risk === "blocked" || log.status === "blocked") {
+    return "Requête bloquée pour protéger les secrets, les accès et les systèmes.";
+  }
+
+  if (log.approval_status === "pending" || log.status === "pending_approval") {
+    return "Action sensible enregistrée en attente de validation humaine.";
+  }
+
+  if (log.event_type === "odoo_read") {
+    return "Consultation Odoo réalisée en lecture seule.";
+  }
+
+  if (log.event_type === "approval_decision") {
+    return "Décision de validation enregistrée.";
+  }
+
+  if (log.agent === "server_agent" || log.selected_agent === "server_agent") {
+    return "Diagnostic serveur enregistré.";
+  }
+
+  if (log.agent === "support_agent" || log.selected_agent === "support_agent") {
+    return "Réponse support enregistrée.";
+  }
+
+  return cleanDisplayText(log.message || log.title || "Événement enregistré par l’orchestrateur.");
 }
 
 function translateAction(action?: string) {
@@ -660,7 +794,17 @@ function formatExecutionResult(result: ExecutionResult) {
   const newPrice = formatValue(result.new_price);
   const message = result.message || "Aucun message retourné.";
 
-  return `Statut: ${status}. Ancien prix: ${oldPrice}. Nouveau prix: ${newPrice}. ${message}`;
+  return `Statut : ${status}. Ancien prix : ${oldPrice}. Nouveau prix : ${newPrice}. ${cleanDisplayText(message)}`;
+}
+
+function cleanDisplayText(value?: string) {
+  if (!value) return "";
+
+  if (/api key|password|secret|token|\.env|xml-rpc|traceback/i.test(value)) {
+    return "Information technique masquée pour protéger les accès.";
+  }
+
+  return value;
 }
 
 function formatDate(value?: string) {

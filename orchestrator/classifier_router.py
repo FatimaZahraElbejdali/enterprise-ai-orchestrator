@@ -4,6 +4,11 @@ import unicodedata
 
 from dotenv import load_dotenv
 
+from agents.knowledge_agent import is_general_information_question
+from agents.server_agent import (
+    extract_specific_server_reference,
+    is_vague_server_problem,
+)
 from models.openai_router import classify_with_openai_router
 from orchestrator.intent_classifier import classify_with_confidence
 
@@ -47,6 +52,77 @@ ODOO_WRITE_ACTIONS = {
     "create_purchase_request",
 }
 
+SUPPORT_ISSUE_TERMS = {
+    "wifi",
+    "wi-fi",
+    "vpn",
+    "imprimante",
+    "printer",
+    "ordinateur",
+    "computer",
+    "connexion",
+    "login",
+    "access",
+    "acces",
+    "lenteur",
+    "slow",
+}
+
+SERVER_DIAGNOSTIC_TERMS = {
+    "status",
+    "etat",
+    "health",
+    "cpu",
+    "ram",
+    "memoire",
+    "memory",
+    "disk",
+    "disque",
+    "uptime",
+    "backend",
+    "frontend",
+    "service",
+    "diagnostic",
+}
+
+SERVER_CONTEXT_TERMS = {
+    "server",
+    "serveur",
+    "infrastructure",
+    "service",
+    "services",
+}
+
+SERVER_METRIC_TERMS = {
+    "cpu",
+    "ram",
+    "memoire",
+    "memory",
+    "disk",
+    "disque",
+    "uptime",
+}
+
+DEVELOPMENT_HELP_TERMS = {
+    "api",
+    "backend",
+    "code",
+    "debug",
+    "endpoint",
+    "erreur",
+    "error",
+    "fastapi",
+    "frontend",
+    "nextjs",
+    "python",
+    "react",
+    "typescript",
+}
+
+INTENT_ALIASES = {
+    "server_documentation_summary": "summarize_server_documentation",
+}
+
 
 ODOO_DOCUMENT_PATTERNS = [
     r"\bdocument\s+id\b",
@@ -55,8 +131,11 @@ ODOO_DOCUMENT_PATTERNS = [
     r"\bd[ée]tails?\s+du\s+document\s+id\b",
     r"\bdetails?\s+of\s+document\s+id\b",
     r"\bbon\s+de\s+commande\b",
+    r"\bbons\s+de\s+commande\b",
     r"\bcommande\s+fournisseur\b",
+    r"\bcommandes\s+fournisseurs?\b",
     r"\bbon\s+de\s+livraison\b",
+    r"\bbons\s+de\s+livraison\b",
     r"\bfacture\b",
     r"\blivraison\b",
     r"\bstock\s+picking\b",
@@ -324,11 +403,168 @@ def _is_odoo_write_request(message: str) -> bool:
             "invoice",
             "commande",
             "document",
-            "baco",
+            "client",
+            "customer",
+            "fournisseur",
+            "supplier",
+            "partner",
+            "partenaire",
+            "telephone",
+            "téléphone",
+            "email",
+            "pointage",
+            "analytique",
         ]
     )
 
     return has_write and has_odoo_object
+
+
+def _is_odoo_read_request(message: str) -> bool:
+    text = _normalize_text(message)
+
+    if is_odoo_document_request(message):
+        return True
+
+    business_terms = {
+        "stock",
+        "inventory",
+        "inventaire",
+        "produit",
+        "product",
+        "prix",
+        "price",
+        "supplier",
+        "fournisseur",
+        "customer",
+        "client",
+        "partner",
+        "partenaire",
+        "contact",
+        "analytic",
+        "analytique",
+    }
+    inventory_existence_terms = {
+        "available",
+        "categorie",
+        "category",
+        "contient",
+        "correspond",
+        "existe",
+        "existent",
+        "found",
+        "integr",
+        "matching",
+        "mot cle",
+        "present",
+        "trouver",
+    }
+    read_terms = {
+        "available",
+        "combien",
+        "count",
+        "detail",
+        "details",
+        "disponible",
+        "how many",
+        "integr",
+        "liste",
+        "lister",
+        "montre",
+        "read",
+        "cherche",
+        "recherche",
+        "search",
+        "show",
+        "find",
+        "total",
+        "trouve",
+        "trouver",
+        "verifie",
+        "verifier",
+        "vérifie",
+        "vérifier",
+    }
+
+    if (
+        any(term in text for term in {"odoo", "inventory", "inventaire", "stock"})
+        and any(term in text for term in inventory_existence_terms)
+    ):
+        return True
+
+    return any(term in text for term in business_terms) and any(
+        term in text for term in read_terms
+    )
+
+
+def _odoo_read_route(message: str, error=None):
+    text = _normalize_text(message)
+    intent = "product_stock_check"
+    action = "read_product_stock"
+
+    if is_odoo_document_request(message):
+        intent = odoo_document_intent(message)
+        action = "search_document" if is_odoo_document_search_request(message) else "read_document"
+    elif "combien" in text or "how many" in text or "count" in text or "total" in text:
+        intent = "inventory_summary"
+        action = "inventory_summary"
+    elif (
+        any(term in text for term in {"odoo", "inventory", "inventaire", "stock"})
+        and any(
+            term in text
+            for term in {
+                "available",
+                "categorie",
+                "category",
+                "contient",
+                "correspond",
+                "existe",
+                "existent",
+                "found",
+                "integr",
+                "matching",
+                "mot cle",
+                "present",
+                "trouver",
+            }
+        )
+    ):
+        intent = "inventory_product_lookup"
+        action = "inventory_product_search"
+
+    return _route(
+        intent=intent,
+        selected_agent="odoo_agent",
+        action=action,
+        risk_level="low",
+        requires_approval=False,
+        confidence="high",
+        reason="Backend category policy detected an Odoo read request.",
+        source="local_odoo_read_rules",
+        error=error,
+    )
+
+
+def _knowledge_intent_for(message: str) -> str:
+    text = _normalize_text(message)
+
+    if "documentation" in text or "document" in text and "resume" in text:
+        if "serveur" in text or "server" in text:
+            return "summarize_server_documentation"
+        return "summarize_documentation"
+
+    if "validation" in text or "approval" in text or "approbation" in text:
+        return "explain_human_approval_benefits"
+
+    if "orchestrateur" in text or "orchestrator" in text:
+        return "explain_orchestrator"
+
+    return "general_information_question"
+
+
+def _canonical_intent(intent: str | None) -> str:
+    intent = str(intent or "general")
+    return INTENT_ALIASES.get(intent, intent)
 
 
 def _is_odoo_write_route(route: dict) -> bool:
@@ -361,6 +597,33 @@ def apply_backend_safety_overrides(message: str, route: dict | None = None) -> d
             "Request asks for a destructive or dangerous operation.",
         )
 
+    specific_server = extract_specific_server_reference(message)
+
+    if specific_server:
+        return _route(
+            intent="external_server_diagnostic",
+            selected_agent="server_agent",
+            action="unsupported_external_server",
+            risk_level="low",
+            requires_approval=False,
+            confidence="high",
+            reason="Request names a specific server that is not in the safe diagnostic registry.",
+            source="backend_safety_override",
+            entities={"server": specific_server},
+        )
+
+    if is_vague_server_problem(message):
+        return _route(
+            intent="server_issue_clarification",
+            selected_agent="server_agent",
+            action="clarify_server_issue",
+            risk_level="low",
+            requires_approval=False,
+            confidence="high",
+            reason="Request mentions a server problem without enough diagnostic detail.",
+            source="backend_safety_override",
+        )
+
     if _is_odoo_access_issue(message):
         return _route(
             intent="odoo_access_issue",
@@ -385,10 +648,26 @@ def apply_backend_safety_overrides(message: str, route: dict | None = None) -> d
             source="backend_safety_override",
         )
 
+    if _is_odoo_read_request(message):
+        return _odoo_read_route(message)
+
+    if is_general_information_question(message):
+        return _route(
+            intent=_knowledge_intent_for(message),
+            selected_agent="knowledge_agent",
+            action="answer_question",
+            risk_level="low",
+            requires_approval=False,
+            confidence="high",
+            reason="Knowledge fallback matched a general information question.",
+            source="local_knowledge_router",
+        )
+
     if not isinstance(route, dict):
         return route
 
     normalized_route = dict(route)
+    normalized_route["intent"] = _canonical_intent(normalized_route.get("intent"))
     selected_agent = normalized_route.get("selected_agent") or normalized_route.get("agent")
     normalized_route["selected_agent"] = selected_agent or "general_agent"
     normalized_route["agent"] = normalized_route["selected_agent"]
@@ -495,17 +774,10 @@ def _deterministic_fallback(message: str, error=None):
     text = _normalize_text(message)
 
     if is_odoo_document_request(message):
-        return _route(
-            intent=odoo_document_intent(message),
-            selected_agent="odoo_agent",
-            action="search_document" if is_odoo_document_search_request(message) else "read_document",
-            risk_level="low",
-            requires_approval=False,
-            confidence="high",
-            reason="Local document safety rule selected an Odoo read route.",
-            source="local_odoo_document_rules",
-            error=error,
-        )
+        return _odoo_read_route(message, error=error)
+
+    if _is_odoo_read_request(message):
+        return _odoo_read_route(message, error=error)
 
     if _is_odoo_access_issue(message):
         return _route(
@@ -519,7 +791,7 @@ def _deterministic_fallback(message: str, error=None):
             error=error,
         )
 
-    if any(term in text for term in ["wifi", "wi-fi", "vpn", "imprimante", "printer"]):
+    if any(term in text for term in SUPPORT_ISSUE_TERMS):
         return _route(
             intent="wifi_issue" if "wifi" in text or "wi-fi" in text else "support",
             selected_agent="support_agent",
@@ -531,29 +803,11 @@ def _deterministic_fallback(message: str, error=None):
             error=error,
         )
 
-    if any(
-        term in text
-        for term in [
-            "etat des serveurs",
-            "etat du serveur",
-            "server status",
-            "server health",
-            "cpu",
-            "ram",
-            "memoire",
-            "memory",
-            "disk",
-            "disque",
-            "espace disque",
-            "uptime",
-            "utilisation ram",
-            "backend",
-            "frontend",
-            "service",
-            "services actifs",
-            "diagnostic serveur",
-        ]
-    ):
+    has_server_context = any(term in text for term in SERVER_CONTEXT_TERMS)
+    has_server_metric = any(term in text for term in SERVER_METRIC_TERMS)
+    has_server_diagnostic = any(term in text for term in SERVER_DIAGNOSTIC_TERMS)
+
+    if has_server_metric or has_server_context and has_server_diagnostic:
         action = "check_server_health"
 
         if "ram" in text or "memoire" in text or "memory" in text:
@@ -564,7 +818,7 @@ def _deterministic_fallback(message: str, error=None):
             action = "check_disk_usage"
         elif "backend" in text or "frontend" in text or "service" in text:
             action = "check_service_status"
-        elif "diagnostic serveur" in text:
+        elif "diagnostic" in text and ("server" in text or "serveur" in text):
             action = "server_diagnostic_summary"
 
         return _route(
@@ -584,31 +838,31 @@ def _deterministic_fallback(message: str, error=None):
             error=error,
         )
 
-    if any(term in text for term in ["orchestrateur", "orchestrator"]):
+    if is_general_information_question(message):
         return _route(
-            intent="explain_orchestrator",
+            intent=_knowledge_intent_for(message),
             selected_agent="knowledge_agent",
             action="answer_question",
             risk_level="low",
             requires_approval=False,
             confidence="high",
-            reason="Local knowledge fallback matched an enterprise AI explanation.",
+            reason="Local knowledge fallback matched a general information question.",
             error=error,
         )
 
-    if "validation humaine" in text:
+    if "documentation" in text and ("resume" in text or "résume" in text):
         return _route(
-            intent="knowledge",
+            intent=_knowledge_intent_for(message),
             selected_agent="knowledge_agent",
             action="answer_question",
             risk_level="low",
             requires_approval=False,
             confidence="high",
-            reason="Local knowledge fallback matched a human approval explanation.",
+            reason="Local knowledge fallback matched a documentation summary request.",
             error=error,
         )
 
-    if any(term in text for term in ["fastapi", "debug", "erreur", "error", "code"]):
+    if any(term in text for term in DEVELOPMENT_HELP_TERMS):
         return _route(
             intent="development_help",
             selected_agent="development_agent",
