@@ -10,6 +10,7 @@ import {
   AuthUser,
   authHeaders,
   clearAuth,
+  getDepartmentLabel,
   getRoleLabel,
   getStoredUser,
   handleAuthFailure,
@@ -209,6 +210,7 @@ export default function ApprovalsPage() {
         <div className="sidebarFooter">
           <p>{currentUser?.email || "Utilisateur connecté"}</p>
           <span>Rôle : {getRoleLabel(currentUser)}</span>
+          <span>Département : {getDepartmentLabel(currentUser)}</span>
           <button className="logoutButton" type="button" onClick={handleLogout}>
             Se déconnecter
           </button>

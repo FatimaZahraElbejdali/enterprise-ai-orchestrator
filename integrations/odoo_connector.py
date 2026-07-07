@@ -1,6 +1,8 @@
 import os
+import time
 import unicodedata
 import xmlrpc.client
+from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
@@ -32,11 +34,206 @@ DOCUMENT_MODELS = {
     "stock.picking",
 }
 
+DYNAMIC_READ_BUSINESS_BASE_MODELS = set(ALLOWED_GENERIC_READ_MODELS) | {
+    "account.analytic.account",
+}
+
+DYNAMIC_READ_CACHE_TTL_SECONDS = 300
+DYNAMIC_READ_DEFAULT_LIMIT = 10
+DYNAMIC_READ_MAX_LIMIT = 20
+
+DENIED_DYNAMIC_READ_MODELS = {
+    "ir.config_parameter",
+    "ir.model.access",
+    "ir.rule",
+    "ir.cron",
+    "ir.mail_server",
+    "res.config.settings",
+    "res.users",
+    "res.groups",
+    "res.users.apikeys",
+    "auth.oauth.provider",
+    "auth.oauth.token",
+    "payment.provider",
+    "payment.token",
+    "fetchmail.server",
+}
+
+DENIED_DYNAMIC_READ_PREFIXES = (
+    "ir.",
+    "auth.",
+)
+
+DENIED_DYNAMIC_READ_MODEL_TOKENS = {
+    "apikey",
+    "api_key",
+    "credential",
+    "handler",
+    "password",
+    "report",
+    "secret",
+    "session",
+    "token",
+    "transient",
+    "wizard",
+}
+
+SECRET_FIELD_TOKENS = {
+    "api_key",
+    "apikey",
+    "client_secret",
+    "credential",
+    "key",
+    "oauth",
+    "passwd",
+    "password",
+    "private",
+    "secret",
+    "session",
+    "signature",
+    "token",
+}
+
+SAFE_DYNAMIC_FIELD_TYPES = {
+    "boolean",
+    "char",
+    "date",
+    "datetime",
+    "float",
+    "html",
+    "integer",
+    "many2one",
+    "monetary",
+    "selection",
+    "text",
+}
+
+MODEL_MATCH_STOPWORDS = {
+    "a",
+    "an",
+    "app",
+    "business",
+    "de",
+    "des",
+    "du",
+    "for",
+    "in",
+    "la",
+    "le",
+    "les",
+    "list",
+    "model",
+    "models",
+    "odoo",
+    "record",
+    "records",
+    "related",
+    "the",
+    "to",
+}
+
+
+@dataclass(frozen=True)
+class OdooReadPlan:
+    operation: str
+    business_object: str
+    model_hint: str | None = None
+    filters: list = field(default_factory=list)
+    requested_fields: list[str] = field(default_factory=list)
+    sort: list = field(default_factory=list)
+    limit: int = DYNAMIC_READ_DEFAULT_LIMIT
+    aggregate: dict | None = None
+    record_id: int | None = None
+    query: str | None = None
+
+    @classmethod
+    def from_mapping(cls, values: dict | None):
+        values = values or {}
+        operation = str(values.get("operation") or "list").strip().lower()
+        if operation not in {"list", "search", "details", "count", "aggregate"}:
+            operation = "list"
+
+        try:
+            limit = int(values.get("limit") or DYNAMIC_READ_DEFAULT_LIMIT)
+        except (TypeError, ValueError):
+            limit = DYNAMIC_READ_DEFAULT_LIMIT
+
+        limit = max(1, min(limit, DYNAMIC_READ_MAX_LIMIT))
+
+        record_id = values.get("record_id")
+        try:
+            record_id = int(record_id) if record_id not in {None, ""} else None
+        except (TypeError, ValueError):
+            record_id = None
+
+        def list_value(key):
+            value = values.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str) and value.strip():
+                return [
+                    item.strip()
+                    for item in value.split(",")
+                    if item.strip()
+                ]
+            return []
+
+        return cls(
+            operation=operation,
+            business_object=str(values.get("business_object") or "").strip(),
+            model_hint=str(values.get("model_hint") or values.get("model") or "").strip() or None,
+            filters=list_value("filters"),
+            requested_fields=list_value("requested_fields"),
+            sort=list_value("sort"),
+            limit=limit,
+            aggregate=values.get("aggregate") if isinstance(values.get("aggregate"), dict) else None,
+            record_id=record_id,
+            query=str(values.get("query") or values.get("record_keyword") or "").strip() or None,
+        )
+
+    def to_dict(self):
+        return {
+            "operation": self.operation,
+            "business_object": self.business_object,
+            "model_hint": self.model_hint,
+            "filters": self.filters,
+            "requested_fields": self.requested_fields,
+            "sort": self.sort,
+            "limit": self.limit,
+            "aggregate": self.aggregate,
+            "record_id": self.record_id,
+            "query": self.query,
+        }
+
 
 def _normalize_label(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value or "")
     ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
     return " ".join(ascii_value.lower().split())
+
+
+def _match_tokens(value: str) -> set[str]:
+    tokens = set()
+
+    for token in _normalize_label(value).replace(".", " ").replace("_", " ").replace("-", " ").split():
+        if len(token) <= 2 or token in MODEL_MATCH_STOPWORDS:
+            continue
+
+        tokens.add(token)
+
+        if token.endswith("ies") and len(token) > 4:
+            tokens.add(token[:-3] + "y")
+        if token.endswith("s") and len(token) > 4:
+            tokens.add(token[:-1])
+        if token.endswith("es") and len(token) > 4:
+            tokens.add(token[:-2])
+
+    return tokens
+
+
+def _contains_secret_token(value: str) -> bool:
+    normalized = _normalize_label(value).replace(" ", "_")
+    return any(token in normalized for token in SECRET_FIELD_TOKENS)
 
 
 DOCUMENT_CONFIGS = {
@@ -113,6 +310,8 @@ class OdooConnector:
 
         self.uid = None
         self._fields_cache = {}
+        self._model_catalog_cache = None
+        self._model_catalog_cached_at = 0.0
 
     def test_connection(self):
         if self.mock_mode:
@@ -940,6 +1139,502 @@ class OdooConnector:
     def _validate_generic_read_model(self, model_name: str):
         if model_name not in ALLOWED_GENERIC_READ_MODELS:
             raise ValueError("Unsupported Odoo model for generic read.")
+
+    def _is_dynamic_read_model_allowed(self, model_name: str, display_name: str = "") -> bool:
+        normalized_model = (model_name or "").strip().lower()
+        normalized_display = _normalize_label(display_name)
+
+        if not normalized_model:
+            return False
+
+        if normalized_model in DENIED_DYNAMIC_READ_MODELS:
+            return False
+
+        if any(normalized_model.startswith(prefix) for prefix in DENIED_DYNAMIC_READ_PREFIXES):
+            return False
+
+        policy_text = f"{normalized_model} {normalized_display}".replace(".", "_")
+
+        if any(token in policy_text for token in DENIED_DYNAMIC_READ_MODEL_TOKENS):
+            return False
+
+        return True
+
+    def refresh_model_catalog(self):
+        self._model_catalog_cache = None
+        self._model_catalog_cached_at = 0.0
+        return self.get_model_catalog(force_refresh=True)
+
+    def get_model_catalog(self, force_refresh: bool = False):
+        if self.mock_mode:
+            return []
+
+        now = time.time()
+
+        if (
+            not force_refresh
+            and self._model_catalog_cache is not None
+            and now - self._model_catalog_cached_at < DYNAMIC_READ_CACHE_TTL_SECONDS
+        ):
+            return list(self._model_catalog_cache)
+
+        models = self._models()
+        raw_models = models.execute_kw(
+            self.database,
+            self.uid,
+            self.auth_secret,
+            "ir.model",
+            "search_read",
+            [[]],
+            {
+                "fields": ["model", "name"],
+                "limit": 5000,
+                "context": {"active_test": False},
+            },
+        )
+
+        catalog = []
+
+        for item in raw_models:
+            model_name = item.get("model")
+            display_name = item.get("name") or model_name
+            allowed = self._is_dynamic_read_model_allowed(model_name, display_name)
+            catalog.append({
+                "model": model_name,
+                "name": display_name,
+                "allowed": allowed,
+            })
+
+        self._model_catalog_cache = catalog
+        self._model_catalog_cached_at = now
+        return list(catalog)
+
+    def _dynamic_fields_get(self, model_name: str):
+        if model_name not in self._fields_cache:
+            models = self._models()
+            self._fields_cache[model_name] = models.execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                model_name,
+                "fields_get",
+                [],
+                {"attributes": ["string", "type", "relation", "readonly", "store"]},
+            )
+
+        return self._fields_cache[model_name]
+
+    def safe_dynamic_fields(self, model_name: str):
+        fields = self._dynamic_fields_get(model_name)
+        safe_fields = {}
+
+        for field_name, metadata in fields.items():
+            field_type = metadata.get("type")
+            label = metadata.get("string") or field_name
+
+            if field_type not in SAFE_DYNAMIC_FIELD_TYPES:
+                continue
+
+            if _contains_secret_token(field_name) or _contains_secret_token(label):
+                continue
+
+            safe_fields[field_name] = {
+                "name": field_name,
+                "label": label,
+                "type": field_type,
+                "relation": metadata.get("relation"),
+                "readonly": bool(metadata.get("readonly", False)),
+                "store": metadata.get("store", True) is not False,
+            }
+
+        return safe_fields
+
+    def _score_model_candidate(self, business_object: str, model_info: dict, model_hint: str | None = None):
+        model_name = model_info.get("model") or ""
+        display_name = model_info.get("name") or model_name
+        query_tokens = _match_tokens(" ".join([business_object or "", model_hint or ""]))
+        candidate_tokens = _match_tokens(f"{model_name} {display_name}")
+        score = 0
+
+        if model_hint and model_name == model_hint:
+            score += 100
+
+        score += 10 * len(query_tokens & candidate_tokens)
+
+        for query_token in query_tokens:
+            if query_token in _normalize_label(model_name).replace(".", " "):
+                score += 4
+            if query_token in _normalize_label(display_name):
+                score += 4
+
+        if model_name in DYNAMIC_READ_BUSINESS_BASE_MODELS or score > 0:
+            try:
+                field_score = 0
+
+                for field_name, metadata in self.safe_dynamic_fields(model_name).items():
+                    field_tokens = (
+                        _match_tokens(field_name)
+                        | _match_tokens(metadata.get("label") or "")
+                    )
+                    field_score += 15 * len(query_tokens & field_tokens)
+
+                score += field_score
+            except Exception:
+                pass
+
+        return score
+
+    def discover_dynamic_read_model(self, business_object: str, model_hint: str | None = None):
+        try:
+            catalog = self.get_model_catalog()
+        except Exception as error:
+            return {
+                "status": "failed",
+                "model": None,
+                "message": str(error),
+                "candidates": [],
+            }
+
+        allowed_catalog = [
+            item
+            for item in catalog
+            if item.get("allowed")
+        ]
+        model_names = {item.get("model") for item in catalog}
+
+        if model_hint:
+            if model_hint not in model_names:
+                return {
+                    "status": "rejected",
+                    "model": None,
+                    "message": "The proposed Odoo model is not installed.",
+                    "candidates": [],
+                }
+
+            hinted = next((item for item in catalog if item.get("model") == model_hint), None)
+
+            if not hinted or not hinted.get("allowed"):
+                return {
+                    "status": "rejected",
+                    "model": None,
+                    "message": "The proposed Odoo model is not allowed by dynamic read policy.",
+                    "candidates": [],
+                }
+
+            return {
+                "status": "found",
+                "model": hinted.get("model"),
+                "display_name": hinted.get("name") or hinted.get("model"),
+                "score": 100,
+                "candidates": [hinted],
+            }
+
+        scored = []
+
+        for item in allowed_catalog:
+            score = self._score_model_candidate(business_object, item)
+
+            if score > 0:
+                scored.append((score, item))
+
+        scored.sort(key=lambda value: (-value[0], value[1].get("model") or ""))
+
+        if not scored:
+            return {
+                "status": "not_found",
+                "model": None,
+                "message": "No safe installed Odoo model matches this business object.",
+                "candidates": [],
+            }
+
+        top_score = scored[0][0]
+        top_candidates = [
+            item
+            for score, item in scored
+            if score == top_score
+        ]
+
+        if len(top_candidates) > 1:
+            return {
+                "status": "ambiguous",
+                "model": None,
+                "message": "Several safe installed Odoo models match this business object.",
+                "candidates": [
+                    {
+                        "model": item.get("model"),
+                        "label": item.get("name") or item.get("model"),
+                    }
+                    for item in top_candidates[:5]
+                ],
+            }
+
+        best = top_candidates[0]
+        return {
+            "status": "found",
+            "model": best.get("model"),
+            "display_name": best.get("name") or best.get("model"),
+            "score": top_score,
+            "candidates": [
+                {
+                    "model": item.get("model"),
+                    "label": item.get("name") or item.get("model"),
+                    "score": score,
+                }
+                for score, item in scored[:5]
+            ],
+        }
+
+    def _dynamic_summary_fields(self, model_name: str, requested_fields: list[str] | None = None):
+        safe_fields = self.safe_dynamic_fields(model_name)
+        selected = ["id"]
+
+        def add(field_name):
+            if field_name == "id" and field_name not in selected:
+                selected.append(field_name)
+            elif field_name in safe_fields and field_name not in selected:
+                selected.append(field_name)
+
+        for field_name in requested_fields or []:
+            add(field_name)
+
+        priority_names = [
+            "display_name",
+            "name",
+            "code",
+            "reference",
+            "ref",
+            "partner_id",
+            "customer_id",
+            "client_id",
+            "commercial_partner_id",
+            "stage_id",
+            "state",
+            "status",
+            "date",
+            "date_order",
+            "start_date",
+            "end_date",
+            "recurring_next_date",
+            "amount_total",
+            "recurring_total",
+            "currency_id",
+        ]
+
+        for field_name in priority_names:
+            add(field_name)
+
+        if len(selected) < 6:
+            for field_name, metadata in safe_fields.items():
+                if metadata.get("type") in {"char", "selection", "date", "datetime", "many2one", "float", "monetary", "integer", "boolean"}:
+                    add(field_name)
+                if len(selected) >= 8:
+                    break
+
+        return selected[:8] or ["id"]
+
+    def _dynamic_search_domain(self, model_name: str, query: str):
+        if not query:
+            return []
+
+        fields = self.safe_dynamic_fields(model_name)
+        searchable = [
+            field_name
+            for field_name, metadata in fields.items()
+            if metadata.get("type") in {"char", "text", "html"}
+            and field_name in {"name", "display_name", "code", "ref", "reference", "description"}
+        ]
+
+        conditions = [[field_name, "ilike", query] for field_name in searchable[:5]]
+        return self._or_domain(conditions)
+
+    def _dynamic_business_domain(self, model_name: str, business_text: str):
+        query_tokens = _match_tokens(business_text)
+
+        if not query_tokens:
+            return []
+
+        fields = self.safe_dynamic_fields(model_name)
+        conditions = []
+
+        for field_name, metadata in fields.items():
+            if metadata.get("type") != "boolean":
+                continue
+            if metadata.get("store") is False:
+                continue
+
+            field_tokens = (
+                _match_tokens(field_name)
+                | _match_tokens(metadata.get("label") or "")
+            )
+
+            if query_tokens & field_tokens:
+                conditions.append([field_name, "=", True])
+
+        return conditions[:1]
+
+    def _normalize_dynamic_record(self, model_name: str, record: dict):
+        normalized = {}
+
+        for key, value in record.items():
+            if isinstance(value, list) and len(value) >= 2:
+                normalized[key] = value[1]
+            elif isinstance(value, tuple) and len(value) >= 2:
+                normalized[key] = value[1]
+            else:
+                normalized[key] = value
+
+        normalized["model"] = model_name
+        return normalized
+
+    def dynamic_read(self, read_plan: dict | OdooReadPlan):
+        plan = read_plan if isinstance(read_plan, OdooReadPlan) else OdooReadPlan.from_mapping(read_plan)
+
+        if self.mock_mode:
+            return {
+                "success": False,
+                "source": "mock_odoo",
+                "found": False,
+                "status": "failed",
+                "read_plan": plan.to_dict(),
+                "records": [],
+                "record_count": 0,
+                "message": "Odoo credentials are missing.",
+            }
+
+        discovery = self.discover_dynamic_read_model(
+            business_object=plan.business_object,
+            model_hint=plan.model_hint,
+        )
+
+        if (
+            discovery.get("status") == "rejected"
+            and plan.model_hint
+            and plan.business_object
+        ):
+            discovery = self.discover_dynamic_read_model(
+                business_object=f"{plan.business_object} {plan.model_hint}",
+                model_hint=None,
+            )
+
+        if discovery.get("status") != "found":
+            return {
+                "success": False,
+                "source": "real_odoo",
+                "found": False,
+                "status": discovery.get("status"),
+                "read_plan": plan.to_dict(),
+                "model": None,
+                "display_name": None,
+                "records": [],
+                "record_count": 0,
+                "candidates": discovery.get("candidates", []),
+                "message": discovery.get("message") or "No safe Odoo model resolved.",
+            }
+
+        model_name = discovery["model"]
+        fields = self._dynamic_summary_fields(model_name, plan.requested_fields)
+        models = self._models()
+        domain = self._dynamic_search_domain(model_name, plan.query or "")
+
+        if not domain:
+            domain = self._dynamic_business_domain(
+                model_name,
+                f"{plan.business_object} {plan.model_hint or ''}",
+            )
+
+        try:
+            if plan.operation == "aggregate":
+                return {
+                    "success": False,
+                    "source": "real_odoo",
+                    "found": False,
+                    "status": "unsupported_operation",
+                    "read_plan": plan.to_dict(),
+                    "model": model_name,
+                    "display_name": discovery.get("display_name"),
+                    "records": [],
+                    "record_count": 0,
+                    "message": "Aggregates are not enabled for generic Odoo reads yet.",
+                }
+
+            if plan.operation == "details" and plan.record_id is not None:
+                raw_records = models.execute_kw(
+                    self.database,
+                    self.uid,
+                    self.auth_secret,
+                    model_name,
+                    "read",
+                    [[plan.record_id]],
+                    {"fields": fields},
+                )
+            elif plan.operation == "count":
+                count = models.execute_kw(
+                    self.database,
+                    self.uid,
+                    self.auth_secret,
+                    model_name,
+                    "search_count",
+                    [domain],
+                    {"context": {"active_test": False}},
+                )
+                return {
+                    "success": True,
+                    "source": "real_odoo",
+                    "found": True,
+                    "status": "completed",
+                    "read_plan": plan.to_dict(),
+                    "model": model_name,
+                    "display_name": discovery.get("display_name"),
+                    "records": [],
+                    "record_count": count,
+                    "message": "Odoo records counted.",
+                }
+            else:
+                raw_records = models.execute_kw(
+                    self.database,
+                    self.uid,
+                    self.auth_secret,
+                    model_name,
+                    "search_read",
+                    [domain],
+                    {
+                        "fields": fields,
+                        "limit": plan.limit,
+                        "context": {"active_test": False},
+                    },
+                )
+        except Exception as error:
+            return {
+                "success": False,
+                "source": "real_odoo_error",
+                "found": False,
+                "status": "failed",
+                "read_plan": plan.to_dict(),
+                "model": model_name,
+                "display_name": discovery.get("display_name"),
+                "records": [],
+                "record_count": 0,
+                "message": str(error),
+            }
+
+        records = [
+            self._normalize_dynamic_record(model_name, record)
+            for record in raw_records
+        ]
+
+        return {
+            "success": True,
+            "source": "real_odoo",
+            "found": bool(records),
+            "status": "completed" if records else "not_found",
+            "read_plan": plan.to_dict(),
+            "model": model_name,
+            "display_name": discovery.get("display_name"),
+            "fields": fields,
+            "records": records,
+            "record_count": len(records),
+            "message": "Odoo records read safely.",
+        }
 
     def _validate_generic_write_field(self, model_name: str, field_name: str):
         allowed_fields = ALLOWED_GENERIC_WRITE_FIELDS.get(model_name, set())

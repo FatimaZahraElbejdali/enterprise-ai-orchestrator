@@ -2,7 +2,9 @@ from fastapi.testclient import TestClient
 
 import app as app_module
 from app import app
+from orchestrator.approval_store import get_approvals
 from tests.auth_helpers import auth_headers
+from tests.semantic_helpers import make_semantic_request
 
 
 client = TestClient(app)
@@ -23,7 +25,25 @@ def test_login_success():
     assert data["user"]["email"] == "admin@company.local"
     assert data["user"]["role"] == "admin"
     assert data["user"]["role_label"] == "Administrateur"
+    assert data["user"]["department"] == "administration"
+    assert data["user"]["department_label"] == "Administration"
     assert "all" in data["user"]["permissions"]
+
+
+def test_login_returns_demo_user_department():
+    response = client.post(
+        "/auth/login",
+        json={
+            "email": "it.manager@company.local",
+            "password": "it123",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["user"]["role"] == "it_manager"
+    assert data["user"]["department"] == "informatique"
+    assert data["user"]["department_label"] == "Informatique"
 
 
 def test_login_failure():
@@ -59,10 +79,71 @@ def test_employee_cannot_access_server_diagnostics():
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "access_denied"
-    assert data["message"] == "Accès refusé : votre rôle ne permet pas d’effectuer cette action."
+    assert data["response"] == "Accès refusé : votre rôle ne permet pas d’effectuer cette action."
 
 
-def test_employee_cannot_request_odoo_write():
+def _price_update_semantic_route():
+    return make_semantic_request(
+        request_type="enterprise_action",
+        domain="odoo",
+        capability="odoo.product_price_update",
+        agent="odoo_agent",
+        action="update_product_price",
+        execution_mode="tool",
+        risk_level="medium",
+        requires_approval=True,
+        entities={"product_name": "BACO TOP"},
+        parameters={"new_price": 4},
+    )
+
+
+def _company_knowledge_semantic_route(topic="Jamain Baco"):
+    return make_semantic_request(
+        request_type="enterprise_knowledge",
+        domain="knowledge",
+        capability="knowledge.enterprise_answer",
+        agent="knowledge_agent",
+        action="enterprise_answer",
+        execution_mode="retrieval_grounded",
+        risk_level="low",
+        requires_approval=False,
+        topic=topic,
+    )
+
+
+def _official_company_chunk(text=None):
+    return {
+        "chunk_id": "hidden_chunk",
+        "document_id": "hidden_doc",
+        "text": text
+        or (
+            "Jamain Baco est présenté par la source officielle comme un groupe "
+            "avec une histoire, des activités et des équipes."
+        ),
+        "score": 4.0,
+        "source_type": "official_web",
+        "department_scope": "company_common",
+        "title": "Histoire du groupe Jamain Baco",
+        "canonical_url": "https://jamainbaco.com/notre-histoire/",
+        "source_domain": "jamainbaco.com",
+    }
+
+
+def test_employee_cannot_request_odoo_write(monkeypatch):
+    before_approval_ids = {item.get("id") for item in get_approvals()}
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda message, context_memory=None, user_permissions=None: _price_update_semantic_route(),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "run_odoo_agent",
+        lambda message: (_ for _ in ()).throw(
+            AssertionError("Unauthorized Odoo write must not reach approval/tool handling")
+        ),
+    )
+
     response = client.post(
         "/chat",
         json={"message": "Modifier le prix de BACO TOP à 4 DH"},
@@ -72,7 +153,11 @@ def test_employee_cannot_request_odoo_write():
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "access_denied"
-    assert data["message"] == "Accès refusé : votre rôle ne permet pas d’effectuer cette action."
+    assert data["response"] == "Accès refusé : votre rôle ne permet pas d’effectuer cette action."
+    assert data["requires_approval"] is False
+    assert data["approval_id"] is None
+    assert data["technical"]["capability"] == "odoo.product_price_update"
+    assert {item.get("id") for item in get_approvals()} == before_approval_ids
 
 
 def test_employee_can_ask_support_question(monkeypatch):
@@ -98,11 +183,37 @@ def test_employee_can_ask_support_question(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent"] == "support_agent"
+    assert data["technical"]["agent"] == "support_agent"
     assert data["status"] == "completed"
 
 
-def test_employee_company_question_returns_static_context():
+def test_employee_company_question_uses_enterprise_knowledge_rag(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda message, context_memory=None, user_permissions=None: _company_knowledge_semantic_route(
+            "Jamain Baco"
+        ),
+    )
+    monkeypatch.setattr(
+        "agents.knowledge_agent.is_openai_configured",
+        lambda *args, **kwargs: False,
+    )
+
+    def fake_search(query, allowed_scopes, limit=4):
+        calls.append({
+            "query": query,
+            "allowed_scopes": allowed_scopes,
+            "limit": limit,
+        })
+        return [_official_company_chunk()]
+
+    monkeypatch.setattr(
+        "agents.knowledge_agent.search_knowledge",
+        fake_search,
+    )
+
     response = client.post(
         "/chat",
         json={"message": "what is jamain baco"},
@@ -111,17 +222,45 @@ def test_employee_company_question_returns_static_context():
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent"] == "knowledge_agent"
+    assert data["technical"]["agent"] == "knowledge_agent"
+    assert data["technical"]["capability"] == "knowledge.enterprise_answer"
+    assert data["technical"]["execution_mode"] == "retrieval_grounded"
+    assert data["technical"]["tool_used"] == "knowledge_rag_retrieval"
     assert data["status"] == "completed"
-    assert data["approval_required"] is False
-    assert "Jamain Baco est l'entreprise" in data["message"]
-    assert "développé et testé" in data["message"]
-    assert "action n’est pas encore disponible" not in data["message"]
-    assert "Knowledge Agent received" not in data["message"]
-    assert "No specific tool matched" not in data["message"]
+    assert data["requires_approval"] is False
+    assert "source officielle" in data["response"]
+    assert "Jamain Baco" in data["response"]
+    assert data["sources"] == [
+        {
+            "source_type": "official_web",
+            "title": "Histoire du groupe Jamain Baco",
+            "url": "https://jamainbaco.com/notre-histoire/",
+            "label": "Site officiel Jamain Baco",
+        }
+    ]
+    assert calls[0]["allowed_scopes"][0] == "company_common"
+    assert "action n’est pas encore disponible" not in data["response"]
+    assert "Knowledge Agent received" not in data["response"]
+    assert "No specific tool matched" not in data["response"]
 
 
-def test_employee_french_company_question_returns_static_context():
+def test_employee_french_company_question_uses_enterprise_knowledge_rag(monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda message, context_memory=None, user_permissions=None: _company_knowledge_semantic_route(
+            "Jamain Baco"
+        ),
+    )
+    monkeypatch.setattr(
+        "agents.knowledge_agent.is_openai_configured",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "agents.knowledge_agent.search_knowledge",
+        lambda query, allowed_scopes, limit=4: [_official_company_chunk()],
+    )
+
     response = client.post(
         "/chat",
         json={"message": "c’est quoi Jamain Baco ?"},
@@ -130,9 +269,41 @@ def test_employee_french_company_question_returns_static_context():
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent"] == "knowledge_agent"
+    assert data["technical"]["agent"] == "knowledge_agent"
+    assert data["technical"]["capability"] == "knowledge.enterprise_answer"
     assert data["status"] == "completed"
-    assert "Jamain Baco est l'entreprise" in data["message"]
+    assert "Jamain Baco" in data["response"]
+    assert data["sources"][0]["source_type"] == "official_web"
+
+
+def test_employee_company_question_without_rag_context_is_careful(monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda message, context_memory=None, user_permissions=None: _company_knowledge_semantic_route(
+            "Jamain Baco"
+        ),
+    )
+    monkeypatch.setattr(
+        "agents.knowledge_agent.search_knowledge",
+        lambda query, allowed_scopes, limit=4: [],
+    )
+
+    response = client.post(
+        "/chat",
+        json={"message": "what is jamain baco"},
+        headers=auth_headers("employee@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["technical"]["capability"] == "knowledge.enterprise_answer"
+    assert data["technical"]["execution_mode"] == "retrieval_grounded"
+    assert data["response"] == (
+        "Je n'ai pas encore suffisamment d'informations internes pour répondre "
+        "précisément à cette question."
+    )
+    assert data["sources"] == []
 
 
 def test_public_knowledge_question_uses_llm(monkeypatch):
@@ -160,17 +331,17 @@ def test_public_knowledge_question_uses_llm(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent"] == "knowledge_agent"
+    assert data["technical"]["agent"] == "knowledge_agent"
     assert data["status"] == "completed"
-    assert data["approval_required"] is False
-    assert data["message"]
-    assert data["message"] == generated_answer
-    assert data["message"] != (
+    assert data["requires_approval"] is False
+    assert data["response"]
+    assert data["response"] == generated_answer
+    assert data["response"] != (
         "Je n'ai pas encore suffisamment d'informations internes pour répondre "
         "précisément à cette question."
     )
-    assert data["selected_model"]["provider"] == "openai"
-    assert data["selected_model"]["model"] == "test-model"
+    assert data["technical"]["provider"] == "openai"
+    assert data["technical"]["model"] == "test-model"
 
 
 def test_general_advice_question_uses_llm_not_internal_docs(monkeypatch):
@@ -210,16 +381,16 @@ def test_general_advice_question_uses_llm_not_internal_docs(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent"] == "knowledge_agent"
+    assert data["technical"]["agent"] == "knowledge_agent"
     assert data["status"] == "completed"
-    assert data["approval_required"] is False
-    assert data["message"] == generated_answer
-    assert data["message"] != (
+    assert data["requires_approval"] is False
+    assert data["response"] == generated_answer
+    assert data["response"] != (
         "Je n'ai pas encore suffisamment d'informations internes pour répondre "
         "précisément à cette question."
     )
-    assert data["tool_used"] == "public_llm_answer"
-    assert data["selected_model"]["provider"] == "openai"
+    assert data["technical"]["tool_used"] == "public_llm_answer"
+    assert data["technical"]["provider"] == "openai"
     assert len(calls) == 1
 
 
@@ -232,8 +403,8 @@ def test_unknown_company_details_are_answered_carefully():
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent"] == "knowledge_agent"
-    assert data["message"] == (
+    assert data["technical"]["agent"] == "knowledge_agent"
+    assert data["response"] == (
         "Je n'ai pas encore suffisamment d'informations internes pour répondre "
         "précisément à cette question."
     )
@@ -272,12 +443,12 @@ def test_public_general_definition_uses_llm(monkeypatch):
 
         assert response.status_code == 200
         data = response.json()
-        assert data["agent"] == "knowledge_agent"
-        assert data["message"] == generated_answer
-        assert "Knowledge Agent received" not in data["message"]
-        assert "No specific tool matched" not in data["message"]
-        assert "knowledge_agent" not in data["message"]
-        assert "public_llm_answer" not in data["message"]
+        assert data["technical"]["agent"] == "knowledge_agent"
+        assert data["response"] == generated_answer
+        assert "Knowledge Agent received" not in data["response"]
+        assert "No specific tool matched" not in data["response"]
+        assert "knowledge_agent" not in data["response"]
+        assert "public_llm_answer" not in data["response"]
 
     assert len(calls) == 2
 
@@ -306,11 +477,16 @@ def test_readonly_viewer_can_read_limited_odoo_product_info(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent"] == "odoo_agent"
+    assert data["technical"]["agent"] == "odoo_agent"
     assert data["status"] == "completed"
 
 
 def test_odoo_manager_can_request_write_but_still_requires_approval(monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda message, context_memory=None, user_permissions=None: _price_update_semantic_route(),
+    )
     monkeypatch.setattr(
         app_module,
         "run_odoo_agent",
@@ -321,6 +497,7 @@ def test_odoo_manager_can_request_write_but_still_requires_approval(monkeypatch)
             "status": "pending_approval",
             "approval_required": True,
             "requires_approval": True,
+            "approval_id": "approval-test-id",
             "message": "Cette action nécessite une validation humaine avant exécution dans Odoo.",
         },
     )
@@ -333,8 +510,11 @@ def test_odoo_manager_can_request_write_but_still_requires_approval(monkeypatch)
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent"] == "odoo_agent"
-    assert data["approval_required"] is True
+    assert data["technical"]["agent"] == "odoo_agent"
+    assert data["technical"]["capability"] == "odoo.product_price_update"
+    assert data["technical"]["execution_mode"] == "tool"
+    assert data["requires_approval"] is True
+    assert data["approval_id"] == "approval-test-id"
     assert data["status"] == "pending_approval"
 
 
@@ -347,7 +527,7 @@ def test_it_manager_can_access_server_diagnostics():
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent"] == "server_agent"
+    assert data["technical"]["agent"] == "server_agent"
     assert data["status"] == "completed"
 
 
@@ -390,4 +570,4 @@ def test_unknown_odoo_action_does_not_execute_tools(monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "unsupported"
-    assert data["tool_used"] is None
+    assert data["technical"].get("tool_used") is None

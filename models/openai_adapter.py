@@ -15,8 +15,11 @@ DEFAULT_MODEL = "gpt-4.1-mini"
 DEFAULT_TIMEOUT_SECONDS = 20.0
 
 
-def _get_api_key() -> str | None:
-    api_key = os.getenv("OPENAI_API_KEY")
+def _get_api_key(api_key_env: str | None = None) -> str | None:
+    api_key = os.getenv(api_key_env or "") if api_key_env else None
+
+    if not api_key:
+        api_key = os.getenv("OPENAI_API_KEY")
 
     if not api_key:
         return None
@@ -40,17 +43,19 @@ def _get_timeout() -> float:
         return DEFAULT_TIMEOUT_SECONDS
 
 
-def is_openai_configured() -> bool:
-    return bool(_get_api_key()) and OpenAI is not None
+def is_openai_configured(api_key_env: str | None = None) -> bool:
+    return bool(_get_api_key(api_key_env)) and OpenAI is not None
 
 
-def get_openai_status() -> dict:
-    configured = is_openai_configured()
+def get_openai_status(api_key_env: str | None = None) -> dict:
+    configured = is_openai_configured(api_key_env)
 
     return {
         "configured": configured,
         "model": _get_model(),
         "status": "ready" if configured else "missing_api_key",
+        "project_env": api_key_env,
+        "uses_central_fallback": bool(api_key_env and not os.getenv(api_key_env)),
     }
 
 
@@ -81,10 +86,13 @@ def generate_response(
     prompt: str,
     system_prompt: str | None = None,
     model: str | None = None,
+    api_key_env: str | None = None,
 ) -> dict:
     selected_model = _get_model(model)
 
-    if not _get_api_key() or OpenAI is None:
+    api_key = _get_api_key(api_key_env)
+
+    if not api_key or OpenAI is None:
         return {
             "provider": "openai",
             "model": selected_model,
@@ -95,7 +103,7 @@ def generate_response(
 
     try:
         client = OpenAI(
-            api_key=_get_api_key(),
+            api_key=api_key,
             timeout=_get_timeout(),
         )
 
@@ -133,10 +141,13 @@ def generate_structured_response(
     schema: dict,
     system_prompt: str | None = None,
     model: str | None = None,
+    api_key_env: str | None = None,
 ) -> dict:
     selected_model = _get_model(model)
 
-    if not _get_api_key() or OpenAI is None:
+    api_key = _get_api_key(api_key_env)
+
+    if not api_key or OpenAI is None:
         return {
             "provider": "openai",
             "model": selected_model,
@@ -148,7 +159,7 @@ def generate_structured_response(
 
     try:
         client = OpenAI(
-            api_key=_get_api_key(),
+            api_key=api_key,
             timeout=_get_timeout(),
         )
 

@@ -34,6 +34,7 @@ SUPPORTED_ODOO_ACTIONS = {
     "product_details",
     "inventory_summary",
     "odoo_search_records",
+    "odoo_generic_read",
     "odoo_get_record_details",
     "odoo_check_inventory",
     "odoo_update_field_request",
@@ -57,6 +58,7 @@ BUSINESS_TO_INTERNAL_ACTION = {
     "product_details": "product_details",
     "inventory_summary": "inventory_summary",
     "odoo_search_records": "odoo_search_records",
+    "odoo_generic_read": "odoo_generic_read",
     "odoo_get_record_details": "odoo_get_record_details",
     "odoo_check_inventory": "odoo_check_inventory",
     "odoo_update_field_request": "odoo_update_field_request",
@@ -85,6 +87,7 @@ INTERNAL_TO_BUSINESS_ACTION = {
     "update_document_partner": "update_partner",
     "inventory_summary": "inventory_summary",
     "odoo_search_records": "odoo_search_records",
+    "odoo_generic_read": "odoo_generic_read",
     "odoo_get_record_details": "odoo_get_record_details",
     "odoo_check_inventory": "odoo_check_inventory",
     "odoo_update_field_request": "odoo_update_field_request",
@@ -114,6 +117,7 @@ ODOO_ACTION_SCHEMA = {
                     "product_details",
                     "inventory_summary",
                     "odoo_search_records",
+                    "odoo_generic_read",
                     "odoo_get_record_details",
                     "odoo_check_inventory",
                     "odoo_update_field_request",
@@ -1775,6 +1779,7 @@ Supported Odoo actions:
 - inventory_product_search: check whether products matching a keyword/category are integrated in Odoo inventory. Read-only.
 - product_details: read product details for one named product.
 - inventory_summary: broad inventory count/summary questions such as "Combien de produits j’ai dans le stock ?" or "How many products do we have in inventory?". Do not treat these as product names.
+- odoo_generic_read: broad read-only Odoo business data question when no specialized safe capability applies.
 - update_product_price: change the sale price of one product. Sensitive, requires approval.
 - document_search: find a sale order, purchase order, invoice, or delivery.
 - document_details: read details/lines for a sale order, purchase order, invoice, or delivery.
@@ -2679,7 +2684,219 @@ def build_sensitive_approval_response(message: str, action: str, parsed_action: 
     }, parsed_action, action)
 
 
-def run(message: str):
+def _semantic_read_values(classification: dict | None):
+    if not isinstance(classification, dict):
+        return {}
+
+    values = {}
+    semantic = classification.get("semantic_request")
+
+    if isinstance(semantic, dict):
+        entities = semantic.get("entities") if isinstance(semantic.get("entities"), dict) else {}
+        parameters = semantic.get("parameters") if isinstance(semantic.get("parameters"), dict) else {}
+        values.update(entities)
+        values.update(parameters)
+
+    entities = classification.get("entities") if isinstance(classification.get("entities"), dict) else {}
+    parameters = classification.get("parameters") if isinstance(classification.get("parameters"), dict) else {}
+    values.update(entities)
+    values.update(parameters)
+    return values
+
+
+def build_odoo_read_plan(message: str, classification: dict | None = None):
+    values = _semantic_read_values(classification)
+    operation = values.get("operation") or "list"
+    query = (
+        values.get("query")
+        or values.get("record_keyword")
+        or values.get("keyword")
+        or values.get("document_reference")
+    )
+    business_object = (
+        values.get("business_object")
+        or values.get("target")
+        or values.get("model")
+        or values.get("record_keyword")
+        or message
+    )
+    semantic_model_hint = values.get("model_hint") or values.get("model_name") or values.get("model")
+
+    if semantic_model_hint and "." not in str(semantic_model_hint):
+        semantic_model_hint = None
+
+    return {
+        "operation": str(operation or "list").lower(),
+        "business_object": str(business_object or "").strip(),
+        "model_hint": semantic_model_hint,
+        "filters": values.get("filters") or [],
+        "requested_fields": values.get("requested_fields") or [],
+        "sort": values.get("sort") or [],
+        "limit": values.get("limit") or 10,
+        "aggregate": values.get("aggregate") if isinstance(values.get("aggregate"), dict) else None,
+        "record_id": values.get("record_id"),
+        "query": query,
+    }
+
+
+def _format_dynamic_field_label(field_name: str):
+    labels = {
+        "amount_total": "Montant",
+        "code": "Code",
+        "currency_id": "Devise",
+        "date": "Date",
+        "date_order": "Date",
+        "display_name": "Nom",
+        "end_date": "Fin",
+        "name": "Nom",
+        "partner_id": "Client/Fournisseur",
+        "recurring_next_date": "Prochaine date",
+        "recurring_total": "Récurrent",
+        "stage_id": "Étape",
+        "start_date": "Début",
+        "state": "Statut",
+        "status": "Statut",
+    }
+    return labels.get(field_name, field_name.replace("_", " ").title())
+
+
+def _format_dynamic_record(record: dict):
+    parts = []
+    primary = record.get("display_name") or record.get("name") or record.get("reference") or record.get("ref")
+
+    if primary:
+        parts.append(str(primary))
+
+    for field_name, value in record.items():
+        if field_name in {"id", "model", "display_name", "name"}:
+            continue
+        if value is None or value == "" or value is False or value == []:
+            continue
+
+        parts.append(f"{_format_dynamic_field_label(field_name)}: {value}")
+
+        if len(parts) >= 5:
+            break
+
+    if not parts:
+        parts.append(f"ID {record.get('id')}")
+
+    return " - ".join(parts)
+
+
+def build_dynamic_read_response(message: str, parsed_action: dict, raw_result: dict):
+    status = raw_result.get("status")
+
+    if status == "ambiguous":
+        return build_ambiguous_response(
+            message,
+            parsed_action,
+            raw_result.get("candidates", []),
+            entity_label="types d’enregistrements Odoo",
+        )
+
+    if status in {"not_found", "rejected", "failed"} and not raw_result.get("model"):
+        return with_parser_debug({
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "risk": "low",
+            "risk_level": "low",
+            "requires_approval": False,
+            "approval_required": False,
+            "status": "unsupported" if status == "rejected" else "not_found",
+            "message": "Je n’ai pas trouvé de modèle Odoo sécurisé correspondant à cette demande.",
+            "tool_used": "odoo_generic_read",
+            "target_system": "odoo",
+            "odoo_model": None,
+            "record_count": 0,
+            "data": raw_result,
+            "result": raw_result,
+        }, parsed_action, "odoo_generic_read")
+
+    operation = (raw_result.get("read_plan") or {}).get("operation")
+    model_label = raw_result.get("display_name") or raw_result.get("model") or "enregistrements"
+    count = raw_result.get("record_count") or 0
+
+    if operation == "count":
+        message_text = f"J’ai trouvé {count} enregistrement(s) pour {model_label} dans Odoo."
+    else:
+        records = raw_result.get("records") or []
+        if records:
+            lines = [
+                f"- {_format_dynamic_record(record)}"
+                for record in records[:10]
+            ]
+            message_text = "Voici les premiers enregistrements trouvés dans Odoo :\n" + "\n".join(lines)
+        else:
+            message_text = "Aucun enregistrement correspondant trouvé dans Odoo."
+
+    return with_parser_debug({
+        "intent": "odoo",
+        "agent": "odoo_agent",
+        "risk": "low",
+        "risk_level": "low",
+        "requires_approval": False,
+        "approval_required": False,
+        "status": "completed" if raw_result.get("success") else "not_found",
+        "message": message_text,
+        "tool_used": "odoo_generic_read",
+        "target_system": "odoo",
+        "odoo_model": raw_result.get("model"),
+        "record_count": count,
+        "data": raw_result,
+        "result": raw_result,
+    }, parsed_action, "odoo_generic_read")
+
+
+def run(message: str, classification: dict | None = None):
+    if (
+        isinstance(classification, dict)
+        and classification.get("capability") == "odoo.generic_read"
+    ):
+        read_plan = build_odoo_read_plan(message, classification)
+        parsed_action = {
+            "intent": "odoo",
+            "action": "odoo_generic_read",
+            "business_action": "odoo_generic_read",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": read_plan.get("model_hint"),
+            "record_query": read_plan.get("query") or read_plan.get("business_object"),
+            "confidence": 0.9,
+            "parser_source": classification.get("semantic_source") or classification.get("classifier_source") or "semantic_route",
+            "parser_error": classification.get("classifier_error"),
+            "entities": _semantic_read_values(classification),
+        }
+        raw_result = unwrap_tool_response(
+            execute_tool("odoo_generic_read", read_plan=read_plan)
+        )
+
+        if not isinstance(raw_result, dict):
+            raw_result = {
+                "success": False,
+                "status": "failed",
+                "records": [],
+                "record_count": 0,
+                "message": "Odoo generic read returned an invalid response.",
+            }
+
+        log_request({
+            "event_type": "odoo_read",
+            "title": "Lecture Odoo générique",
+            "system": "odoo",
+            "agent": "odoo_agent",
+            "status": "completed" if raw_result.get("success") else raw_result.get("status", "failed"),
+            "risk": "low",
+            "approval_status": "not_required",
+            "user_message": message,
+            "action": "odoo_generic_read",
+            "target_model": raw_result.get("model"),
+            "record_count": raw_result.get("record_count"),
+            "message": "Lecture Odoo consultative via découverte de modèle.",
+        })
+
+        return build_dynamic_read_response(message, parsed_action, raw_result)
+
     parsed_action = parse_odoo_action_with_openai(message)
     action = parsed_action.get("action")
     business_action = parsed_action.get("business_action") or business_action_for(action, action)

@@ -43,6 +43,11 @@ def execute_tool(tool_name: str, **kwargs):
             limit=kwargs.get("limit", 6),
         )
 
+    elif tool_name == "odoo_generic_read":
+        result = odoo.dynamic_read(
+            read_plan=kwargs.get("read_plan") or {},
+        )
+
     elif tool_name == "odoo_get_record_details":
         result = odoo.generic_get_record_details(
             model_name=kwargs.get("model_name", ""),

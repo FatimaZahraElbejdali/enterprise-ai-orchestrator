@@ -293,11 +293,18 @@ def _openai_support_response(message: str, action: str):
     return result
 
 
-def run(message: str):
-    action = classify_support_action(message)
+def run(
+    message: str,
+    action: str | None = None,
+    capability: str | None = None,
+    execution_mode: str | None = None,
+):
+    action = action or classify_support_action(message)
     openai_result = _openai_support_response(message, action)
 
     if openai_result:
+        openai_result["capability"] = capability or "support.troubleshooting"
+        openai_result["execution_mode"] = execution_mode or "llm_direct"
         return openai_result
 
     title, steps, escalation = _fallback_steps(message, action)
@@ -309,5 +316,7 @@ def run(message: str):
     )
 
     result["tool_used"] = _support_tool_for_message(message)
+    result["capability"] = capability or "support.troubleshooting"
+    result["execution_mode"] = execution_mode or "llm_direct"
 
     return result

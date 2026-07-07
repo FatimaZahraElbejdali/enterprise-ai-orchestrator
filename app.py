@@ -7,7 +7,7 @@ from typing import Literal
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agents.odoo_agent import run as run_odoo_agent
 from agents.support_agent import (
@@ -51,6 +51,15 @@ from orchestrator.conversation_memory import conversation_memory
 from orchestrator.contextual_resolver import resolve_contextual_message
 from orchestrator.tool_executor import execute_tool
 from orchestrator.permission_policy import resolve_route_permission
+from orchestrator.department_profiles import (
+    DEPARTMENT_ACCESS_DENIED_MESSAGE,
+    get_department_profile,
+    is_route_allowed_for_department,
+)
+from orchestrator.official_web_ingestion import (
+    OfficialWebIngestionError,
+    OfficialWebsiteIngestionService,
+)
 
 load_dotenv()
 
@@ -107,6 +116,58 @@ class AITestRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class OfficialWebIngestRequest(BaseModel):
+    url: str
+    scope: str = "company_common"
+    crawl: bool = True
+    max_pages: int = 20
+    max_depth: int = 2
+
+
+class PublicSource(BaseModel):
+    source_type: str | None = None
+    title: str | None = None
+    url: str | None = None
+    label: str | None = None
+
+
+class ChatTechnicalMetadata(BaseModel):
+    intent: str | None = None
+    request_type: str | None = None
+    domain: str | None = None
+    agent: str | None = None
+    capability: str | None = None
+    execution_mode: str | None = None
+    action: str | None = None
+    risk: str | None = None
+    approval_status: str | None = None
+    parser_source: str | None = None
+    tool_used: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    permission_decision: str | None = None
+    department: str | None = None
+    target_system: str | None = None
+    odoo_model: str | None = None
+    record_count: int | None = None
+    retrieval_query: str | None = None
+    classifier_source: str | None = None
+    semantic_source: str | None = None
+    knowledge_scopes: list[str] = Field(default_factory=list)
+    approval_action: str | None = None
+    approval_entity: str | None = None
+    approval_requested_change: str | None = None
+
+
+class PublicChatResponse(BaseModel):
+    status: str
+    response: str
+    requires_approval: bool
+    approval_id: str | None = None
+    sources: list[PublicSource] = Field(default_factory=list)
+    technical: ChatTechnicalMetadata = Field(default_factory=ChatTechnicalMetadata)
 
 
 DocumentEndpointType = Literal[
@@ -284,9 +345,289 @@ def attach_auth_metadata(result: dict, current_user: dict, permission_decision: 
             "email": current_user.get("email"),
             "role": current_user.get("role"),
             "role_label": current_user.get("role_label"),
+            "department": current_user.get("department"),
+            "department_label": current_user.get("department_label"),
         },
     )
     return result
+
+
+def _as_record(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _safe_public_url(value):
+    if not isinstance(value, str):
+        return None
+
+    try:
+        from orchestrator.official_web_ingestion import validate_official_url
+
+        return validate_official_url(value)
+    except Exception:
+        if value.startswith(("https://jamainbaco.com/", "https://www.jamainbaco.com/")):
+            return value
+
+    return None
+
+
+def _sanitize_public_source(source: dict):
+    if not isinstance(source, dict):
+        return None
+
+    url = _safe_public_url(source.get("url") or source.get("canonical_url"))
+    source_type = source.get("source_type")
+    sanitized = {
+        "source_type": source_type,
+        "title": source.get("title"),
+        "url": url,
+    }
+
+    label = source.get("label")
+
+    if not label and source_type == "official_web":
+        label = "Site officiel Jamain Baco"
+
+    if isinstance(label, str) and label.strip():
+        sanitized["label"] = label.strip()
+
+    return {
+        key: value
+        for key, value in sanitized.items()
+        if value not in (None, "")
+    }
+
+
+def _extract_public_sources(result: dict):
+    source_candidates = []
+    agent_result = _as_record(result.get("agent_result"))
+    nested_result = _as_record(result.get("result"))
+
+    for candidate in (
+        result.get("sources"),
+        nested_result.get("sources"),
+        agent_result.get("sources"),
+        _as_record(agent_result.get("result")).get("sources"),
+    ):
+        if isinstance(candidate, list):
+            source_candidates.extend(candidate)
+
+    sources = []
+    seen = set()
+
+    for source in source_candidates:
+        sanitized = _sanitize_public_source(source)
+
+        if not sanitized:
+            continue
+
+        key = (
+            sanitized.get("source_type"),
+            sanitized.get("title"),
+            sanitized.get("url"),
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        sources.append(sanitized)
+
+    return sources
+
+
+def _extract_public_response_text(result: dict):
+    response_value = result.get("response")
+
+    if isinstance(response_value, str) and response_value.strip():
+        return response_value.strip()
+
+    if isinstance(response_value, dict):
+        content = response_value.get("content")
+
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+    for candidate in (
+        result.get("message"),
+        _as_record(result.get("result")).get("answer"),
+        _as_record(result.get("result")).get("message"),
+        _as_record(result.get("data")).get("message"),
+        _as_record(result.get("agent_result")).get("response"),
+        _as_record(result.get("agent_result")).get("message"),
+        _as_record(_as_record(result.get("agent_result")).get("result")).get("answer"),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+
+    if result.get("requires_approval") or result.get("approval_required"):
+        return "Validation requise."
+
+    status = result.get("status")
+
+    if status == "blocked":
+        return "Demande bloquée pour des raisons de sécurité."
+
+    if status == "access_denied":
+        return ACCESS_DENIED_MESSAGE
+
+    if status == "department_access_denied":
+        return DEPARTMENT_ACCESS_DENIED_MESSAGE
+
+    if status == "unsupported":
+        return "Action non disponible. Cette demande n’est pas encore connectée à un outil backend sécurisé."
+
+    if status == "needs_clarification":
+        return "Des informations sont nécessaires pour continuer."
+
+    return "Demande traitée par l’orchestrateur."
+
+
+def _normalize_public_status(status):
+    if status == "needs_clarification":
+        return "clarification_required"
+
+    return status or "completed"
+
+
+def _extract_approval_id(result: dict):
+    result_record = _as_record(result.get("result"))
+    data_record = _as_record(result.get("data"))
+    approval = (
+        _as_record(result.get("approval"))
+        or _as_record(result_record.get("approval"))
+        or _as_record(data_record.get("approval"))
+    )
+
+    return (
+        result.get("approval_id")
+        or data_record.get("approval_id")
+        or result_record.get("approval_id")
+        or approval.get("id")
+    )
+
+
+def _extract_approval_summary(result: dict):
+    result_record = _as_record(result.get("result"))
+    data_record = _as_record(result.get("data"))
+    approval = (
+        _as_record(result.get("approval"))
+        or _as_record(result_record.get("approval"))
+        or _as_record(data_record.get("approval"))
+    )
+
+    if not approval:
+        return {}
+
+    return {
+        "action": approval.get("action") or result.get("action") or result.get("parsed_action"),
+        "entity_name": approval.get("entity_name"),
+        "requested_change": approval.get("requested_change"),
+    }
+
+
+def _build_public_technical(result: dict):
+    agent_result = _as_record(result.get("agent_result"))
+    model_response = _as_record(result.get("response"))
+    selected_model = _as_record(result.get("selected_model"))
+    nested_result = _as_record(result.get("result"))
+    user = _as_record(result.get("user"))
+
+    provider = (
+        result.get("provider")
+        or agent_result.get("provider")
+        or selected_model.get("provider")
+        or model_response.get("provider")
+    )
+    model = (
+        result.get("model")
+        or agent_result.get("model")
+        or selected_model.get("model")
+        or model_response.get("model")
+    )
+    action = (
+        result.get("parsed_action")
+        or result.get("action")
+        or agent_result.get("parsed_action")
+    )
+    approval_summary = _extract_approval_summary(result)
+    capability = result.get("capability")
+
+    if not capability:
+        agent = result.get("agent") or result.get("selected_agent") or agent_result.get("agent")
+
+        if agent == "knowledge_agent":
+            capability = "knowledge.general_answer"
+        elif agent == "support_agent":
+            capability = "support.troubleshooting"
+        elif agent == "server_agent":
+            capability = result.get("tool_used") or agent_result.get("tool_used") or "server.local_health"
+        elif agent == "odoo_agent":
+            capability = result.get("tool_used") or action
+
+    technical = {
+        "intent": result.get("intent"),
+        "request_type": result.get("request_type"),
+        "domain": result.get("domain"),
+        "agent": result.get("agent") or result.get("selected_agent") or agent_result.get("agent"),
+        "capability": capability,
+        "execution_mode": result.get("execution_mode"),
+        "action": action,
+        "risk": result.get("risk") or result.get("risk_level"),
+        "approval_status": result.get("approval_status"),
+        "parser_source": result.get("parser_source") or agent_result.get("parser_source"),
+        "tool_used": result.get("tool_used") or agent_result.get("tool_used"),
+        "provider": provider,
+        "model": model,
+        "permission_decision": result.get("permission_decision"),
+        "department": user.get("department"),
+        "knowledge_scopes": result.get("knowledge_scopes") or nested_result.get("knowledge_scopes"),
+        "target_system": result.get("target_system"),
+        "odoo_model": result.get("odoo_model") or nested_result.get("model"),
+        "record_count": result.get("record_count") or nested_result.get("record_count"),
+        "retrieval_query": result.get("retrieval_query") or nested_result.get("retrieval_query"),
+        "classifier_source": result.get("classifier_source"),
+        "semantic_source": result.get("semantic_source"),
+        "approval_action": approval_summary.get("action"),
+        "approval_entity": approval_summary.get("entity_name"),
+        "approval_requested_change": approval_summary.get("requested_change"),
+    }
+
+    return {
+        key: value
+        for key, value in technical.items()
+        if value not in (None, "", [], {})
+    }
+
+
+def serialize_chat_response(result) -> PublicChatResponse:
+    if not isinstance(result, dict):
+        return PublicChatResponse(
+            status="completed",
+            response=str(result),
+            requires_approval=False,
+            approval_id=None,
+            sources=[],
+            technical=ChatTechnicalMetadata(),
+        )
+
+    return PublicChatResponse(
+        status=_normalize_public_status(result.get("status")),
+        response=_extract_public_response_text(result),
+        requires_approval=bool(
+            result.get("requires_approval") or result.get("approval_required")
+        ),
+        approval_id=_extract_approval_id(result),
+        sources=[
+            PublicSource(**source)
+            for source in _extract_public_sources(result)
+        ],
+        technical=ChatTechnicalMetadata(**_build_public_technical(result)),
+    )
+
+
+def normalize_public_chat_response(result) -> PublicChatResponse:
+    return serialize_chat_response(result)
 
 
 def normalize_document_endpoint_response(
@@ -622,8 +963,20 @@ def is_odoo_related(message: str) -> bool:
     return any(keyword in text or keyword in normalized for keyword in keywords)
 
 
-def build_direct_support_response(message: str):
-    agent_result = run_support_agent(message)
+def build_direct_support_response(
+    message: str,
+    classification: dict | None = None,
+):
+    classification = classification or {}
+    try:
+        agent_result = run_support_agent(
+            message,
+            action=classification.get("action"),
+            capability=classification.get("capability"),
+            execution_mode=classification.get("execution_mode"),
+        )
+    except TypeError:
+        agent_result = run_support_agent(message)
     result = agent_result.get("result") if isinstance(agent_result, dict) else None
     support_message = agent_result.get("response") or agent_result.get("message")
 
@@ -651,6 +1004,12 @@ def build_direct_support_response(message: str):
         "risk": "low",
         "approval_status": "not_required",
         "user_message": message,
+        "request_type": classification.get("request_type"),
+        "domain": classification.get("domain"),
+        "capability": classification.get("capability"),
+        "execution_mode": classification.get("execution_mode"),
+        "classifier_source": classification.get("classifier_source"),
+        "semantic_source": classification.get("semantic_source"),
         "action": agent_result.get("parsed_action") if isinstance(agent_result, dict) else "troubleshoot_issue",
         "message": "Support troubleshooting response generated.",
     })
@@ -661,6 +1020,12 @@ def build_direct_support_response(message: str):
         "selected_agent": "support_agent",
         "risk": "low",
         "risk_level": "low",
+        "request_type": classification.get("request_type"),
+        "domain": classification.get("domain"),
+        "capability": classification.get("capability") or "support.troubleshooting",
+        "execution_mode": classification.get("execution_mode"),
+        "classifier_source": classification.get("classifier_source"),
+        "semantic_source": classification.get("semantic_source"),
         "selected_model": {
             "provider": "local_fallback",
             "model": "support_fallback",
@@ -679,8 +1044,144 @@ def build_direct_support_response(message: str):
     }
 
 
-def build_direct_knowledge_response(message: str):
-    agent_result = run_knowledge_agent(message)
+def build_department_access_denied_response(
+    classification: dict,
+    current_user: dict,
+    capability: str,
+):
+    agent = classification.get("selected_agent") or classification.get("agent", "orchestrator")
+
+    return {
+        "intent": classification.get("intent", "department_access_denied"),
+        "agent": agent,
+        "selected_agent": agent,
+        "risk": classification.get("risk", classification.get("risk_level", "low")),
+        "risk_level": classification.get("risk_level", classification.get("risk", "low")),
+        "requires_approval": False,
+        "approval_required": False,
+        "approval_status": "not_required",
+        "status": "department_access_denied",
+        "message": DEPARTMENT_ACCESS_DENIED_MESSAGE,
+        "tool_used": None,
+        "action": "department_access_denied",
+        "target_system": classification.get("target_system"),
+        "capability": capability,
+        "result": {
+            "allowed": False,
+            "capability": capability,
+            "department": current_user.get("department"),
+            "message": DEPARTMENT_ACCESS_DENIED_MESSAGE,
+        },
+        "agent_result": {
+            "agent": agent,
+            "tool_used": None,
+            "result": {
+                "allowed": False,
+                "capability": capability,
+                "message": DEPARTMENT_ACCESS_DENIED_MESSAGE,
+            },
+        },
+        "permission_decision": "department_denied",
+        "user": {
+            "email": current_user.get("email"),
+            "role": current_user.get("role"),
+            "role_label": current_user.get("role_label"),
+            "department": current_user.get("department"),
+            "department_label": current_user.get("department_label"),
+        },
+    }
+
+
+def build_clarification_response(classification: dict, current_user: dict):
+    missing = classification.get("missing_parameters")
+
+    if not isinstance(missing, list):
+        missing = []
+
+    missing_text = ", ".join(str(item) for item in missing if item)
+    message = (
+        f"Il me manque ces informations pour continuer : {missing_text}."
+        if missing_text
+        else "Il me manque des informations pour continuer."
+    )
+    agent = classification.get("selected_agent") or classification.get("agent", "orchestrator")
+
+    return {
+        "intent": classification.get("intent", "clarification"),
+        "request_type": classification.get("request_type"),
+        "domain": classification.get("domain"),
+        "agent": agent,
+        "selected_agent": agent,
+        "risk": classification.get("risk", classification.get("risk_level", "low")),
+        "risk_level": classification.get("risk_level", classification.get("risk", "low")),
+        "requires_approval": False,
+        "approval_required": False,
+        "approval_status": "not_required",
+        "status": "needs_clarification",
+        "message": message,
+        "tool_used": None,
+        "action": classification.get("action", "needs_clarification"),
+        "target_system": classification.get("target_system"),
+        "capability": classification.get("capability"),
+        "execution_mode": classification.get("execution_mode"),
+        "missing_parameters": missing,
+        "result": {
+            "missing_parameters": missing,
+            "message": message,
+        },
+        "agent_result": {
+            "agent": agent,
+            "tool_used": None,
+            "result": {
+                "missing_parameters": missing,
+                "message": message,
+            },
+        },
+        "permission_decision": "allowed",
+        "user": {
+            "email": current_user.get("email"),
+            "role": current_user.get("role"),
+            "role_label": current_user.get("role_label"),
+            "department": current_user.get("department"),
+            "department_label": current_user.get("department_label"),
+        },
+    }
+
+
+def build_direct_knowledge_response(
+    message: str,
+    department_profile=None,
+    knowledge_query: str | None = None,
+    classification: dict | None = None,
+):
+    classification = classification or {}
+    knowledge_scopes = (
+        department_profile.knowledge_scopes
+        if department_profile is not None
+        else ("company_common",)
+    )
+    llm_project_env = (
+        department_profile.llm_project_env
+        if department_profile is not None
+        else None
+    )
+    try:
+        agent_result = run_knowledge_agent(
+            message,
+            knowledge_scopes=knowledge_scopes,
+            llm_project_env=llm_project_env,
+            knowledge_query=knowledge_query,
+            capability=classification.get("capability"),
+            execution_mode=classification.get("execution_mode"),
+            semantic_request=classification.get("semantic_request"),
+        )
+    except TypeError:
+        agent_result = run_knowledge_agent(
+            message,
+            knowledge_scopes=knowledge_scopes,
+            llm_project_env=llm_project_env,
+            knowledge_query=knowledge_query,
+        )
     result = agent_result.get("result") if isinstance(agent_result, dict) else None
     knowledge_message = ""
     provider = "local_policy"
@@ -705,6 +1206,19 @@ def build_direct_knowledge_response(message: str):
     if not knowledge_message:
         knowledge_message = "Réponse informative générée par l’orchestrateur."
 
+    sources = []
+    retrieval_query = None
+
+    if isinstance(agent_result, dict):
+        sources = agent_result.get("sources") or []
+        retrieval_query = agent_result.get("retrieval_query")
+
+    if not sources and isinstance(result, dict):
+        sources = result.get("sources") or []
+
+    if retrieval_query is None and isinstance(result, dict):
+        retrieval_query = result.get("retrieval_query")
+
     log_request({
         "event_type": "knowledge_request",
         "system": "knowledge",
@@ -713,6 +1227,12 @@ def build_direct_knowledge_response(message: str):
         "risk": "low",
         "approval_status": "not_required",
         "user_message": message,
+        "request_type": classification.get("request_type"),
+        "domain": classification.get("domain"),
+        "capability": classification.get("capability"),
+        "execution_mode": classification.get("execution_mode"),
+        "classifier_source": classification.get("classifier_source"),
+        "semantic_source": classification.get("semantic_source"),
         "action": agent_result.get("parsed_action") if isinstance(agent_result, dict) else "answer_question",
         "message": "Knowledge response generated.",
     })
@@ -723,6 +1243,12 @@ def build_direct_knowledge_response(message: str):
         "selected_agent": "knowledge_agent",
         "risk": "low",
         "risk_level": "low",
+        "request_type": classification.get("request_type"),
+        "domain": classification.get("domain"),
+        "capability": classification.get("capability") or "knowledge.general_answer",
+        "execution_mode": classification.get("execution_mode"),
+        "classifier_source": classification.get("classifier_source"),
+        "semantic_source": classification.get("semantic_source"),
         "selected_model": {
             "provider": provider,
             "model": model,
@@ -734,10 +1260,18 @@ def build_direct_knowledge_response(message: str):
         "status": "completed",
         "message": knowledge_message,
         "parser_source": agent_result.get("parser_source", "knowledge_fallback") if isinstance(agent_result, dict) else "knowledge_fallback",
-        "parsed_action": agent_result.get("parsed_action", "answer_knowledge_question") if isinstance(agent_result, dict) else "answer_knowledge_question",
+        "parsed_action": (
+            classification.get("action")
+            or agent_result.get("parsed_action", "answer_knowledge_question")
+        )
+        if isinstance(agent_result, dict)
+        else classification.get("action", "answer_knowledge_question"),
         "tool_used": agent_result.get("tool_used") if isinstance(agent_result, dict) else None,
         "agent_result": agent_result,
         "result": result,
+        "knowledge_scopes": list(knowledge_scopes),
+        "sources": sources,
+        "retrieval_query": retrieval_query,
     }
 
 
@@ -876,7 +1410,7 @@ def auth_login(request: LoginRequest):
     return result
 
 
-@app.post("/chat")
+@app.post("/chat", response_model=PublicChatResponse)
 def chat(
     request: ChatRequest,
     current_user: dict = Depends(get_current_user),
@@ -884,7 +1418,9 @@ def chat(
     audit_token = set_audit_user_context(current_user, "allowed")
 
     try:
-        return _authenticated_chat(request, current_user)
+        return normalize_public_chat_response(
+            _authenticated_chat(request, current_user)
+        )
     finally:
         reset_audit_user_context(audit_token)
 
@@ -978,11 +1514,70 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
         user_permissions={
             "email": current_user.get("email"),
             "role": current_user.get("role"),
+            "department": current_user.get("department"),
             "permissions": current_user.get("permissions", []),
+            "department_profile": get_department_profile(
+                current_user.get("department"),
+            ).to_public_dict(),
         },
     )
     primary_agent = primary_classification.get("selected_agent")
     route_permission = resolve_route_permission(primary_classification)
+    department_profile = get_department_profile(current_user.get("department"))
+
+    if primary_classification.get("capability_validation_error"):
+        unsupported_result = unsupported_action_payload(primary_classification, current_user)
+        unsupported_result["capability"] = primary_classification.get("capability")
+        unsupported_result["execution_mode"] = primary_classification.get("execution_mode")
+        unsupported_result["request_type"] = primary_classification.get("request_type")
+        unsupported_result["domain"] = primary_classification.get("domain")
+        log_request({
+            "event_type": "unsupported_capability",
+            "title": "Capacité non enregistrée",
+            "system": primary_classification.get("target_system", "orchestrator"),
+            "agent": primary_agent or "orchestrator",
+            "status": "unsupported",
+            "risk": primary_classification.get("risk_level", "low"),
+            "approval_status": "not_required",
+            "permission_decision": "denied",
+            "user_message": enriched_message,
+            "request_type": primary_classification.get("request_type"),
+            "domain": primary_classification.get("domain"),
+            "capability": primary_classification.get("capability"),
+            "execution_mode": primary_classification.get("execution_mode"),
+            "intent": primary_classification.get("intent"),
+            "action": primary_classification.get("action"),
+            "message": primary_classification.get("capability_validation_error"),
+        })
+        remember_chat_result(session_id, unsupported_result)
+        return unsupported_result
+
+    if primary_classification.get("clarification_needed"):
+        clarification_result = build_clarification_response(
+            primary_classification,
+            current_user,
+        )
+        log_request({
+            "event_type": "clarification_required",
+            "title": "Clarification requise",
+            "system": primary_classification.get("target_system", "orchestrator"),
+            "agent": primary_agent or "orchestrator",
+            "status": "needs_clarification",
+            "risk": primary_classification.get("risk_level", "low"),
+            "approval_status": "not_required",
+            "permission_decision": "allowed",
+            "user_message": enriched_message,
+            "request_type": primary_classification.get("request_type"),
+            "domain": primary_classification.get("domain"),
+            "capability": primary_classification.get("capability"),
+            "execution_mode": primary_classification.get("execution_mode"),
+            "intent": primary_classification.get("intent"),
+            "action": primary_classification.get("action"),
+            "missing_parameters": primary_classification.get("missing_parameters"),
+            "message": "La capacité est comprise mais des paramètres sont manquants.",
+        })
+        remember_chat_result(session_id, clarification_result)
+        return clarification_result
 
     if route_permission.blocked:
         blocked_result = process_request(
@@ -1005,12 +1600,51 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
             "approval_status": "not_required",
             "permission_decision": "denied",
             "user_message": enriched_message,
+            "request_type": primary_classification.get("request_type"),
+            "domain": primary_classification.get("domain"),
+            "capability": primary_classification.get("capability"),
+            "execution_mode": primary_classification.get("execution_mode"),
             "intent": primary_classification.get("intent"),
             "action": primary_classification.get("action"),
             "message": "Action non prise en charge. Aucun outil n’a été exécuté.",
         })
         remember_chat_result(session_id, unsupported_result)
         return unsupported_result
+
+    department_allowed, capability = is_route_allowed_for_department(
+        current_user.get("department"),
+        primary_classification,
+        route_permission,
+    )
+
+    if not department_allowed:
+        denied_result = build_department_access_denied_response(
+            primary_classification,
+            current_user,
+            capability,
+        )
+        log_request({
+            "event_type": "department_access_denied",
+            "title": "Fonctionnalité indisponible pour le département",
+            "system": primary_classification.get("target_system", "orchestrator"),
+            "agent": primary_agent or "orchestrator",
+            "status": "department_access_denied",
+            "risk": primary_classification.get("risk_level", "low"),
+            "approval_status": "not_required",
+            "permission_decision": "department_denied",
+            "user_message": enriched_message,
+            "request_type": primary_classification.get("request_type"),
+            "domain": primary_classification.get("domain"),
+            "capability": primary_classification.get("capability"),
+            "execution_mode": primary_classification.get("execution_mode"),
+            "intent": primary_classification.get("intent"),
+            "action": "department_access_denied",
+            "capability": capability,
+            "department": current_user.get("department"),
+            "message": DEPARTMENT_ACCESS_DENIED_MESSAGE,
+        })
+        remember_chat_result(session_id, denied_result)
+        return denied_result
 
     if not check_chat_permission(current_user, enriched_message, primary_classification):
         denied_result = access_denied_payload(primary_classification, current_user)
@@ -1024,6 +1658,10 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
             "approval_status": "not_required",
             "permission_decision": "denied",
             "user_message": enriched_message,
+            "request_type": primary_classification.get("request_type"),
+            "domain": primary_classification.get("domain"),
+            "capability": primary_classification.get("capability"),
+            "execution_mode": primary_classification.get("execution_mode"),
             "intent": primary_classification.get("intent"),
             "action": primary_classification.get("action"),
             "message": ACCESS_DENIED_MESSAGE,
@@ -1032,7 +1670,10 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
         return denied_result
 
     if primary_agent == "support_agent":
-        result = build_direct_support_response(enriched_message)
+        result = build_direct_support_response(
+            enriched_message,
+            classification=primary_classification,
+        )
         result = attach_auth_metadata(result, current_user, "allowed")
         remember_chat_result(session_id, result)
         return result
@@ -1044,13 +1685,34 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
         return result
 
     if primary_agent == "knowledge_agent":
-        result = build_direct_knowledge_response(enriched_message)
+        entities = primary_classification.get("entities")
+
+        if not isinstance(entities, dict):
+            entities = {}
+
+        knowledge_query = (
+            entities.get("knowledge_topic")
+            or entities.get("target")
+            or entities.get("record_keyword")
+        )
+        result = build_direct_knowledge_response(
+            enriched_message,
+            department_profile,
+            knowledge_query=knowledge_query,
+            classification=primary_classification,
+        )
         result = attach_auth_metadata(result, current_user, "allowed")
         remember_chat_result(session_id, result)
         return result
 
     if primary_agent == "odoo_agent":
-        odoo_result = run_odoo_agent(enriched_message)
+        try:
+            odoo_result = run_odoo_agent(
+                enriched_message,
+                classification=primary_classification,
+            )
+        except TypeError:
+            odoo_result = run_odoo_agent(enriched_message)
 
         if isinstance(odoo_result, dict):
             odoo_result.setdefault("agent", "odoo_agent")
@@ -1065,6 +1727,11 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
                 "tool_used": odoo_result.get("tool_used"),
                 "result": odoo_result.get("result") or odoo_result.get("data"),
             })
+            odoo_result.setdefault("request_type", primary_classification.get("request_type"))
+            odoo_result.setdefault("domain", primary_classification.get("domain"))
+            odoo_result.setdefault("capability", primary_classification.get("capability"))
+            odoo_result.setdefault("execution_mode", primary_classification.get("execution_mode"))
+            odoo_result.setdefault("target_system", primary_classification.get("target_system"))
 
         odoo_result = attach_auth_metadata(
             odoo_result,
@@ -1096,6 +1763,75 @@ def debug_conversation(session_id: str):
 @app.get("/debug/routes")
 def debug_routes():
     return sorted(route.path for route in app.routes)
+
+
+@app.post("/knowledge/web/ingest")
+def ingest_official_web(
+    request: OfficialWebIngestRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    require_permission(current_user, "knowledge_manage")
+    audit_token = set_audit_user_context(current_user, "allowed")
+
+    try:
+        try:
+            result = OfficialWebsiteIngestionService().ingest(
+                url=request.url,
+                scope=request.scope,
+                crawl=request.crawl,
+                max_pages=request.max_pages,
+                max_depth=request.max_depth,
+            )
+        except OfficialWebIngestionError as error:
+            log_request({
+                "event_type": "official_web_ingestion_rejected",
+                "title": "Ingestion site officiel refusée",
+                "system": "knowledge",
+                "agent": "knowledge_agent",
+                "status": "rejected",
+                "risk": "medium",
+                "approval_status": "not_required",
+                "permission_decision": "allowed",
+                "action": "official_web_ingestion",
+                "source_type": "official_web",
+                "scope": request.scope,
+                "message": str(error),
+            })
+            raise HTTPException(status_code=400, detail=str(error))
+
+        public_result = {
+            "status": result.get("status", "completed"),
+            "source_type": result.get("source_type", "official_web"),
+            "scope": result.get("scope", "company_common"),
+            "pages_discovered": result.get("pages_discovered", 0),
+            "pages_fetched": result.get("pages_fetched", 0),
+            "pages_ingested": result.get("pages_ingested", 0),
+            "pages_unchanged": result.get("pages_unchanged", 0),
+            "pages_failed": result.get("pages_failed", 0),
+            "documents": result.get("documents", []),
+        }
+
+        log_request({
+            "event_type": "official_web_ingestion",
+            "title": "Ingestion site officiel Jamain Baco",
+            "system": "knowledge",
+            "agent": "knowledge_agent",
+            "status": public_result["status"],
+            "risk": "low",
+            "approval_status": "not_required",
+            "permission_decision": "allowed",
+            "action": "official_web_ingestion",
+            "source_type": public_result["source_type"],
+            "scope": public_result["scope"],
+            "pages_discovered": public_result["pages_discovered"],
+            "pages_ingested": public_result["pages_ingested"],
+            "pages_unchanged": public_result["pages_unchanged"],
+            "pages_failed": public_result["pages_failed"],
+        })
+
+        return public_result
+    finally:
+        reset_audit_user_context(audit_token)
 
 
 @app.get("/logs")

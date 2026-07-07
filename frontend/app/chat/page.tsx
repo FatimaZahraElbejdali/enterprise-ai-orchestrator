@@ -10,6 +10,7 @@ import {
   BACKEND_UNREACHABLE_MESSAGE,
   approveApproval,
   clearAuth,
+  getDepartmentLabel,
   getRoleLabel,
   getStoredUser,
   hasAnyPermission,
@@ -65,53 +66,42 @@ type MainAnswer = {
   message: string;
 };
 
-type ChatResponse = {
-  intent?: string;
-  agent?: string;
-  selected_agent?: string;
-  risk?: string;
-  risk_level?: string;
-  parser_source?: string;
-  language?: string | null;
-  parsed_action?: string;
-  document_type?: string | null;
-  document_reference?: string | null;
-  document_id?: number | null;
-  partner_name?: string | null;
-  product_name?: string | null;
-  line_product?: string | null;
-  field?: string | null;
-  technical_field?: string | null;
-  new_value?: unknown;
-  needs_clarification?: boolean;
-  requires_approval?: boolean;
-  approval_required?: boolean;
-  approval_status?: string;
-  status?: string;
-  message?: string;
-  approval_id?: string;
-  timestamp?: string;
-  updated_at?: string | null;
-  permission_decision?: string;
-  response_focus?: string | null;
-  target_system?: string;
+type ChatSource = {
+  source_type?: string;
+  title?: string;
+  url?: string;
+  label?: string;
+};
+
+type ChatTechnicalMetadata = {
+  intent?: string | null;
+  agent?: string | null;
+  capability?: string | null;
+  action?: string | null;
+  risk?: string | null;
+  approval_status?: string | null;
+  parser_source?: string | null;
   tool_used?: string | null;
-  action?: string;
-  data?: LooseRecord;
-  result?: unknown;
-  candidates?: Candidate[];
-  agent_result?: {
-    agent?: string;
-    tool_used?: string | null;
-    result?: unknown;
-  };
-  response?: {
-    provider?: string;
-    model?: string;
-    success?: boolean;
-    content?: string;
-    error?: string | null;
-  };
+  provider?: string | null;
+  model?: string | null;
+  permission_decision?: string | null;
+  department?: string | null;
+  target_system?: string | null;
+  retrieval_query?: string | null;
+  classifier_source?: string | null;
+  knowledge_scopes?: string[];
+  approval_action?: string | null;
+  approval_entity?: string | null;
+  approval_requested_change?: string | null;
+};
+
+type ChatResponse = {
+  status: string;
+  response: string;
+  requires_approval?: boolean;
+  approval_id?: string | null;
+  sources?: ChatSource[];
+  technical: ChatTechnicalMetadata;
 };
 
 export default function ChatPage() {
@@ -188,8 +178,10 @@ export default function ChatPage() {
         current
           ? {
               ...current,
-              approval_status: status,
-              result: mergeApprovalResult(current.result, updatedApproval),
+              technical: {
+                ...current.technical,
+                approval_status: status,
+              },
             }
           : current
       );
@@ -208,6 +200,7 @@ export default function ChatPage() {
   const odooProductSearchResult = normalizeOdooProductSearchResult(response);
   const odooGenericRecordResult = normalizeOdooGenericRecordResult(response);
   const candidates = normalizeCandidates(response);
+  const sources = normalizeSources(response);
   const approvalId = getApprovalId(response);
   const isApprovalPending = isPendingApprovalResponse(response);
   const canApproveInline = hasAnyPermission(currentUser, [
@@ -215,10 +208,7 @@ export default function ChatPage() {
     "approve_odoo_actions",
   ]);
   const isApprovalRequired =
-    response?.requires_approval === true ||
-    response?.approval_required === true ||
-    response?.permission_decision === "requires_approval" ||
-    response?.status === "pending_approval";
+    response?.requires_approval === true || response?.status === "pending_approval";
 
   const isOdooProductResult = Boolean(odooStockResult && !odooDocumentResult);
   const isOdooDocumentResult = Boolean(odooDocumentResult);
@@ -228,21 +218,17 @@ export default function ChatPage() {
   const isSensitiveAction =
     response?.status === "pending_approval" || isApprovalRequired;
   const isUnsupported =
-    response?.status === "unsupported" ||
-    response?.parsed_action === "unsupported_external_server" ||
-    response?.action === "unsupported_external_server";
+    response?.status === "unsupported";
   const isAccessDenied =
     response?.status === "access_denied" ||
-    (response?.permission_decision === "denied" && !isUnsupported);
+    response?.status === "department_access_denied";
   const isSecurityBlocked =
     response?.status === "blocked" ||
-    response?.risk_level === "blocked" ||
-    response?.risk === "blocked" ||
-    response?.agent === "security_agent" ||
-    response?.parsed_action === "blocked_sensitive_path";
+    response?.technical?.risk === "blocked" ||
+    response?.technical?.agent === "security_agent" ||
+    response?.technical?.action === "blocked_sensitive_path";
   const needsClarification =
-    response?.needs_clarification === true ||
-    response?.status === "needs_clarification";
+    response?.status === "clarification_required";
 
   const statusLabel = useMemo(() => {
     if (!response) return "En attente";
@@ -313,6 +299,7 @@ export default function ChatPage() {
         <div className="sidebarFooter">
           <p>{currentUser?.email || "Utilisateur connecté"}</p>
           <span>Rôle : {getRoleLabel(currentUser)}</span>
+          <span>Département : {getDepartmentLabel(currentUser)}</span>
           <button className="logoutButton" type="button" onClick={handleLogout}>
             Se déconnecter
           </button>
@@ -500,6 +487,27 @@ export default function ChatPage() {
                           label="Stock"
                           value={formatValue(candidate.qty_available || candidate.quantity)}
                         />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {sources.length > 0 && (
+                <div className="sourceBlock">
+                  <p className="eyebrow">Sources</p>
+                  <div className="sourceList">
+                    {sources.map((source, index) => (
+                      <div
+                        className="sourceItem"
+                        key={`${source.url || source.title || "source"}-${index}`}
+                      >
+                        <span>{formatSourceLabel(source)}</span>
+                        {source.url && (
+                          <a href={source.url} target="_blank" rel="noreferrer">
+                            Voir la source
+                          </a>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1015,6 +1023,39 @@ export default function ChatPage() {
           margin-top: 18px;
         }
 
+        .sourceBlock {
+          margin-top: 20px;
+          border-top: 1px solid #e5e7eb;
+          padding-top: 16px;
+        }
+
+        .sourceList {
+          display: grid;
+          gap: 8px;
+          margin-top: 10px;
+        }
+
+        .sourceItem {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 16px;
+          border: 1px solid #e5e7eb;
+          background: #fbfcfe;
+          padding: 11px 12px;
+          color: #334155;
+          font-size: 13px;
+          font-weight: 800;
+        }
+
+        .sourceItem a {
+          color: #13754a;
+          font-size: 12px;
+          font-weight: 900;
+          text-decoration: none;
+          white-space: nowrap;
+        }
+
         .candidateItem {
           border: 1px solid #e5e7eb;
           padding: 14px;
@@ -1165,43 +1206,34 @@ function Detail({ label, value }: { label: string; value: string }) {
 }
 
 function TechnicalDetails({ response }: { response: ChatResponse }) {
-  const selectedAgent =
-    response.agent ||
-    response.selected_agent ||
-    response.agent_result?.agent;
+  const technical = isLooseRecord(response.technical) ? response.technical : {};
+  const selectedAgent = getStringValue(technical.agent);
   const technicalPayload = sanitizeForDisplay({
+    ...technical,
     status: response.status,
-    intent: response.intent,
     agent: selectedAgent,
-    risk: response.risk || response.risk_level,
-    approval_status: response.approval_status,
-    parser_source: response.parser_source,
-    parsed_action: response.parsed_action || response.action,
-    tool_used: response.tool_used || response.agent_result?.tool_used,
-    result: response.result || response.agent_result?.result || response.data,
-    candidates: response.candidates,
   });
 
   return (
     <div className="detailsTable">
       <Detail label="Statut" value={formatStatus(response.status)} />
       <Detail label="Agent" value={formatAgentName(selectedAgent)} />
-      <Detail label="Risque" value={formatRisk(response.risk || response.risk_level)} />
+      <Detail label="Risque" value={formatRisk(getStringValue(technical.risk))} />
       <Detail
         label="Validation"
         value={
-          response.requires_approval || response.approval_required
+          response.requires_approval
             ? "Validation requise"
             : "Non requise"
         }
       />
       <Detail
         label="Source"
-        value={formatParserSource(response.parser_source)}
+        value={formatParserSource(getStringValue(technical.parser_source))}
       />
       <Detail
         label="Action"
-        value={translateAction(response.parsed_action || response.action)}
+        value={translateAction(getStringValue(technical.capability) || getStringValue(technical.action))}
       />
       <Detail
         label="Données"
@@ -1219,21 +1251,17 @@ function getStringValue(value: unknown) {
   return typeof value === "string" ? value : "";
 }
 
+function getCanonicalResponseText(response: ChatResponse) {
+  return response.response || "";
+}
+
 function getNestedRecord(record: LooseRecord, key: string): LooseRecord {
   const value = record[key];
   return isLooseRecord(value) ? value : {};
 }
 
 function getApprovalRecord(response: ChatResponse | null): LooseRecord {
-  if (!response) return {};
-
-  const result = isLooseRecord(response.result) ? response.result : {};
-  const data = isLooseRecord(response.data) ? response.data : {};
-
-  if (isLooseRecord(result.approval)) return result.approval;
-  if (isLooseRecord(data.approval)) return data.approval;
-
-  return {};
+  return response?.technical ? response.technical as LooseRecord : {};
 }
 
 function getApprovalMetadata(response: ChatResponse | null): LooseRecord {
@@ -1244,14 +1272,7 @@ function getApprovalMetadata(response: ChatResponse | null): LooseRecord {
 function getApprovalId(response: ChatResponse | null) {
   if (!response) return "";
 
-  const data = isLooseRecord(response.data) ? response.data : {};
-  const approval = getApprovalRecord(response);
-
-  return (
-    response.approval_id ||
-    getStringValue(data.approval_id) ||
-    getStringValue(approval.id)
-  );
+  return response.approval_id || "";
 }
 
 function getApprovalStatus(response: ChatResponse | null) {
@@ -1260,8 +1281,7 @@ function getApprovalStatus(response: ChatResponse | null) {
   const approval = getApprovalRecord(response);
 
   return (
-    response.approval_status ||
-    getStringValue(approval.status) ||
+    getStringValue(approval.approval_status) ||
     response.status ||
     ""
   );
@@ -1287,54 +1307,21 @@ function isPendingApprovalResponse(response: ChatResponse | null) {
 }
 
 function getApprovalActionLabel(response: ChatResponse) {
-  const data = isLooseRecord(response.data) ? response.data : {};
-  const approval = getApprovalRecord(response);
+  const technical = response.technical || {};
 
   return translateAction(
-    getStringValue(approval.action) ||
-      response.parsed_action ||
-      getStringValue(data.action) ||
-      response.action
+    getStringValue(technical.approval_action) ||
+      getStringValue(technical.capability) ||
+      getStringValue(technical.action)
   );
 }
 
 function getApprovalTarget(response: ChatResponse) {
-  const data = isLooseRecord(response.data) ? response.data : {};
-  const approval = getApprovalRecord(response);
-  const metadata = getApprovalMetadata(response);
-  const documentId = response.document_id || data.document_id || metadata.document_id;
-  const documentLabel = documentId ? `ID ${formatValue(documentId)}` : "";
-
-  return formatValue(
-    data.product ||
-      response.product_name ||
-      approval.entity_name ||
-      metadata.product_name ||
-      metadata.record_query ||
-      data.document ||
-      data.document_query ||
-      metadata.document_query ||
-      response.document_reference ||
-      documentLabel
-  );
+  return formatValue(response.technical?.approval_entity);
 }
 
 function getApprovalRequestedValue(response: ChatResponse) {
-  const data = isLooseRecord(response.data) ? response.data : {};
-  const result = isLooseRecord(response.result) ? response.result : {};
-  const approval = getApprovalRecord(response);
-  const metadata = getApprovalMetadata(response);
-
-  return formatValue(
-    approval.requested_change ||
-      data.requested_value ||
-      data.new_value ||
-      response.new_value ||
-      result.new_value ||
-      result.new_price ||
-      metadata.new_price ||
-      metadata.new_value
-  );
+  return formatValue(response.technical?.approval_requested_change);
 }
 
 function getApprovalStatusLabel(response: ChatResponse) {
@@ -1342,23 +1329,11 @@ function getApprovalStatusLabel(response: ChatResponse) {
 }
 
 function getApprovalCreatedDate(response: ChatResponse) {
-  const data = isLooseRecord(response.data) ? response.data : {};
-  const approval = getApprovalRecord(response);
-  const timestamp =
-    getStringValue(approval.timestamp) ||
-    response.timestamp ||
-    getStringValue(data.timestamp);
-
-  return formatDateTime(timestamp);
+  return "";
 }
 
 function mergeApprovalResult(currentResult: unknown, updatedApproval: LooseRecord) {
-  const current = isLooseRecord(currentResult) ? currentResult : {};
-
-  return {
-    ...current,
-    approval: sanitizeForDisplay(updatedApproval),
-  };
+  return sanitizeForDisplay(updatedApproval);
 }
 
 function formatApprovalActionError(error: unknown) {
@@ -1386,146 +1361,23 @@ function formatDateTime(value?: string) {
 }
 
 function normalizeOdooStockResult(response: ChatResponse | null): OdooStockResult | null {
-  const result = isLooseRecord(response?.result) ? response.result : null;
-  const data = isLooseRecord(response?.data) ? response.data : null;
-
-  const hasResultStock =
-    result &&
-    ("stock_quantity" in result ||
-      "forecast_quantity" in result ||
-      "sale_price" in result);
-
-  const hasDataStock =
-    data &&
-    ("available_stock" in data ||
-      "forecast_stock" in data ||
-      "sale_price" in data);
-
-  if (!hasResultStock && !hasDataStock) {
-    return null;
-  }
-
-  return {
-    product: result?.product ?? data?.product,
-    internal_reference:
-      result?.internal_reference ?? data?.internal_reference,
-    available_stock: result?.stock_quantity ?? data?.available_stock,
-    forecast_stock: result?.forecast_quantity ?? data?.forecast_stock,
-    sale_price: result?.sale_price ?? data?.sale_price,
-    unit: result?.unit ?? data?.unit,
-    source: result?.source ?? data?.source,
-  };
+  return null;
 }
 
 function normalizeOdooProductSearchResult(
   response: ChatResponse | null
 ): OdooProductSearchResult | null {
-  const result = isLooseRecord(response?.result) ? response.result : null;
-  const data = isLooseRecord(response?.data) ? response.data : null;
-  const action = response?.parsed_action || response?.action;
-  const toolUsed = response?.tool_used || response?.agent_result?.tool_used;
-  const products = normalizeCandidates(response);
-  const looksLikeProductSearch =
-    action === "inventory_product_search" ||
-    action === "product_search" ||
-    toolUsed === "odoo_search_product" ||
-    Boolean(result && Array.isArray(result.results)) ||
-    Boolean(data && Array.isArray(data.results));
-
-  if (!looksLikeProductSearch) return null;
-
-  return {
-    keyword: result?.product ?? data?.product ?? response?.product_name,
-    found: Boolean(result?.found ?? data?.found ?? products.length > 0),
-    products,
-  };
+  return null;
 }
 
 function normalizeOdooGenericRecordResult(
   response: ChatResponse | null
 ): OdooGenericRecordResult | null {
-  const result = isLooseRecord(response?.result) ? response.result : null;
-  const data = isLooseRecord(response?.data) ? response.data : null;
-  const action = response?.parsed_action || response?.action;
-  const toolUsed = response?.tool_used || response?.agent_result?.tool_used;
-  const records = Array.isArray(result?.records)
-    ? (result.records as Candidate[])
-    : Array.isArray(data?.records)
-      ? (data.records as Candidate[])
-      : [];
-  const record = isLooseRecord(result?.record)
-    ? result.record
-    : isLooseRecord(data?.record)
-      ? data.record
-      : null;
-  const looksGeneric =
-    action === "odoo_search_records" ||
-    action === "odoo_get_record_details" ||
-    toolUsed === "odoo_search_records" ||
-    toolUsed === "odoo_get_record_details" ||
-    Boolean(result && ("records" in result || "record" in result));
-
-  if (!looksGeneric) return null;
-
-  return {
-    model: result?.model ?? data?.model,
-    keyword: result?.keyword ?? data?.keyword,
-    found: Boolean(result?.found ?? data?.found ?? (records.length > 0 || Boolean(record))),
-    ambiguous: Boolean(result?.ambiguous ?? data?.ambiguous),
-    records,
-    record,
-  };
+  return null;
 }
 
 function normalizeOdooDocumentResult(response: ChatResponse | null): OdooDocumentResult | null {
-  const result = isLooseRecord(response?.result) ? response.result : null;
-  const data = isLooseRecord(response?.data) ? response.data : null;
-  const record = isLooseRecord(result?.record)
-    ? result.record
-    : isLooseRecord(result?.document)
-      ? result.document
-      : isLooseRecord(data?.record)
-        ? data.record
-        : isLooseRecord(data?.document)
-          ? data.document
-          : null;
-
-  const model = result?.model ?? data?.model ?? record?.model ?? response?.document_type;
-  const document =
-    result?.name ??
-    data?.name ??
-    record?.name ??
-    response?.document_reference ??
-    result?.document_reference;
-  const id =
-    result?.record_id ??
-    data?.record_id ??
-    record?.id ??
-    response?.document_id;
-  const partner =
-    result?.partner ??
-    data?.partner ??
-    record?.partner ??
-    response?.partner_name;
-  const status = result?.state ?? data?.state ?? record?.state;
-  const date = result?.date ?? data?.date ?? record?.date;
-  const lines = normalizeDocumentLines(result?.lines ?? data?.lines ?? record?.lines);
-  const looksLikeDocument =
-    response?.intent?.includes("document") ||
-    response?.parsed_action?.includes("document") ||
-    Boolean(document || id || partner || lines.length > 0);
-
-  if (!looksLikeDocument) return null;
-
-  return {
-    document,
-    type: model,
-    id,
-    partner,
-    status,
-    date,
-    lines,
-  };
+  return null;
 }
 
 function normalizeDocumentLines(value: unknown): LooseRecord[] {
@@ -1535,30 +1387,37 @@ function normalizeDocumentLines(value: unknown): LooseRecord[] {
 }
 
 function normalizeCandidates(response: ChatResponse | null): Candidate[] {
-  const result = isLooseRecord(response?.result) ? response.result : null;
-  const data = isLooseRecord(response?.data) ? response.data : null;
-
-  if (Array.isArray(response?.candidates)) {
-    return response.candidates;
-  }
-
-  if (Array.isArray(result?.candidates)) {
-    return result.candidates as Candidate[];
-  }
-
-  if (Array.isArray(data?.candidates)) {
-    return data.candidates as Candidate[];
-  }
-
-  if (Array.isArray(result?.results)) {
-    return result.results as Candidate[];
-  }
-
-  if (Array.isArray(data?.results)) {
-    return data.results as Candidate[];
-  }
-
   return [];
+}
+
+function normalizeSources(response: ChatResponse | null): ChatSource[] {
+  if (!Array.isArray(response?.sources)) return [];
+
+  return response.sources
+    .filter((source) => isLooseRecord(source))
+    .map((source) => ({
+      source_type: getStringValue(source.source_type),
+      title: getStringValue(source.title),
+      url: getStringValue(source.url),
+      label: getStringValue(source.label),
+    }))
+    .filter((source) => source.title || source.url || source.label);
+}
+
+function formatSourceLabel(source: ChatSource) {
+  if (source.label) return source.label;
+
+  const title = source.title || source.url || "Source";
+
+  if (source.source_type === "official_web") {
+    return `Site officiel Jamain Baco — ${title}`;
+  }
+
+  if (source.source_type === "internal_document") {
+    return `Document interne — ${title}`;
+  }
+
+  return title;
 }
 
 const SENSITIVE_DISPLAY_KEYS = new Set([
@@ -1580,6 +1439,7 @@ const SENSITIVE_DISPLAY_KEYS = new Set([
   "xmlrpc",
   "xml_rpc",
   "diagnostics",
+  "llm_project_env",
   "database_configured",
   "username_configured",
   "password_or_api_key_configured",
@@ -1707,15 +1567,15 @@ function mainResultTitle(
   statusLabel: string
 ) {
   if (response.status === "access_denied") return "Accès refusé";
+  if (response.status === "department_access_denied") return "Accès refusé";
   if (
-    response.risk === "blocked" ||
-    response.risk_level === "blocked" ||
-    response.agent === "security_agent" ||
-    response.parsed_action === "blocked_sensitive_path"
+    response.technical?.risk === "blocked" ||
+    response.technical?.agent === "security_agent" ||
+    response.technical?.action === "blocked_sensitive_path"
   ) {
     return "Requête bloquée";
   }
-  if (response.needs_clarification) return "Information requise";
+  if (response.status === "clarification_required") return "Information requise";
   if (response.status === "pending_approval") return "Action nécessitant validation humaine";
 
   if (odooStockResult?.product) {
@@ -1728,21 +1588,15 @@ function mainResultTitle(
     return formatValue(documentResult.document);
   }
 
-  if (response.parsed_action === "inventory_summary") {
+  if (response.technical?.action === "inventory_summary") {
     return "Résumé inventaire";
   }
 
-  const result = isLooseRecord(response.result) ? response.result : null;
-
-  if (response.agent === "support_agent" && result?.title) {
-    return formatValue(result.title);
-  }
-
-  if (response.agent === "server_agent") {
-    if (response.parsed_action === "blocked_sensitive_path") return "Accès refusé";
-    if (response.parsed_action === "list_internal_files") return "Fichiers du serveur interne";
-    if (response.parsed_action === "create_internal_file") return "Fichier créé";
-    if (response.parsed_action === "read_internal_file") return "Contenu du fichier";
+  if (response.technical?.agent === "server_agent") {
+    if (response.technical?.action === "blocked_sensitive_path") return "Accès refusé";
+    if (response.technical?.action === "list_internal_files") return "Fichiers du serveur interne";
+    if (response.technical?.action === "create_internal_file") return "Fichier créé";
+    if (response.technical?.action === "read_internal_file") return "Contenu du fichier";
   }
 
   return statusLabel;
@@ -1764,12 +1618,10 @@ function getMainAnswer(
     statusLabel: string;
   }
 ): MainAnswer {
-  const safeMessage = cleanBusinessMessage(response.message);
+  const safeMessage = cleanBusinessMessage(getCanonicalResponseText(response));
 
   if (
-    response.status === "unsupported" ||
-    response.parsed_action === "unsupported_external_server" ||
-    response.action === "unsupported_external_server"
+    response.status === "unsupported"
   ) {
     return {
       title: "Action non disponible",
@@ -1780,7 +1632,7 @@ function getMainAnswer(
 
   if (
     response.status === "access_denied" ||
-    response.permission_decision === "denied"
+    response.status === "department_access_denied"
   ) {
     return {
       title: "Accès refusé",
@@ -1790,10 +1642,9 @@ function getMainAnswer(
 
   if (
     response.status === "blocked" ||
-    response.risk === "blocked" ||
-    response.risk_level === "blocked" ||
-    response.agent === "security_agent" ||
-    response.parsed_action === "blocked_sensitive_path"
+    response.technical?.risk === "blocked" ||
+    response.technical?.agent === "security_agent" ||
+    response.technical?.action === "blocked_sensitive_path"
   ) {
     return {
       title: "Requête bloquée",
@@ -1801,7 +1652,7 @@ function getMainAnswer(
     };
   }
 
-  if (response.needs_clarification || response.status === "needs_clarification") {
+  if (response.status === "clarification_required") {
     return {
       title: "Précision requise",
       message:
@@ -1811,9 +1662,7 @@ function getMainAnswer(
 
   if (
     response.status === "pending_approval" ||
-    response.requires_approval === true ||
-    response.approval_required === true ||
-    response.permission_decision === "requires_approval"
+    response.requires_approval === true
   ) {
     return {
       title: "Validation requise",
@@ -1862,18 +1711,17 @@ function getMainAnswer(
 
   return {
     title: isNormalTextAnswer(response) ? "Réponse" : mainResultTitle(response, odooStockResult, statusLabel),
-    message:
-      safeMessage ||
-      formatAgentResult(response.agent_result?.result || response.result),
+    message: safeMessage || "Réponse générée par l’orchestrateur.",
   };
 }
 
 function isNormalTextAnswer(response: ChatResponse) {
-  const selectedAgent =
-    response.agent ||
-    response.selected_agent ||
-    response.agent_result?.agent;
-  const action = response.parsed_action || response.tool_used || "";
+  const technical = isLooseRecord(response.technical) ? response.technical : {};
+  const selectedAgent = getStringValue(technical.agent);
+  const action =
+    getStringValue(technical.action) ||
+    getStringValue(technical.tool_used) ||
+    "";
   const textActions = new Set([
     "answer_question",
     "answer_general_question",
@@ -1884,7 +1732,6 @@ function isNormalTextAnswer(response: ChatResponse) {
   return (
     response.status === "completed" &&
     response.requires_approval !== true &&
-    response.approval_required !== true &&
     (selectedAgent === "knowledge_agent" ||
       selectedAgent === "general_agent" ||
       textActions.has(action))
@@ -1892,44 +1739,16 @@ function isNormalTextAnswer(response: ChatResponse) {
 }
 
 function isServerDiagnosticResponse(response: ChatResponse) {
-  const selectedAgent =
-    response.agent ||
-    response.selected_agent ||
-    response.agent_result?.agent;
-  const result = getResultRecord(response);
-
-  return (
-    selectedAgent === "server_agent" &&
-    Boolean(result) &&
-    ("cpu_usage" in result ||
-      "ram_usage" in result ||
-      "disk_usage" in result ||
-      "uptime" in result)
-  );
+  const technical = isLooseRecord(response.technical) ? response.technical : {};
+  return getStringValue(technical.agent) === "server_agent";
 }
 
 function getResultRecord(response: ChatResponse): LooseRecord {
-  if (isLooseRecord(response.result)) return response.result;
-
-  if (isLooseRecord(response.agent_result?.result)) {
-    return response.agent_result.result;
-  }
-
-  if (isLooseRecord(response.data)) return response.data;
-
   return {};
 }
 
 function formatServerDiagnosticAnswer(response: ChatResponse) {
-  const result = getResultRecord(response);
-
-  return [
-    "Serveur local de l’orchestrateur actif.",
-    `CPU: ${formatValue(result.cpu_usage)}`,
-    `RAM: ${formatValue(result.ram_usage)}`,
-    `disque: ${formatValue(result.disk_usage)}`,
-    `disponibilité: ${formatValue(result.uptime)}`,
-  ].join(" ");
+  return getCanonicalResponseText(response);
 }
 
 function formatOdooStockAnswer(stock: OdooStockResult) {

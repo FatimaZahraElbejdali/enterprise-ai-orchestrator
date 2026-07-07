@@ -1,6 +1,7 @@
 import os
 
 from models.openai_adapter import generate_structured_response, is_openai_configured
+from orchestrator.tool_registry import SAFE_ODOO_READ_MODELS, get_capability_metadata
 
 
 VALID_AGENTS = {
@@ -25,252 +26,238 @@ VALID_TARGET_SYSTEMS = {
 
 VALID_RISK_LEVELS = {"low", "medium", "high", "blocked"}
 VALID_CONFIDENCE = {"high", "medium", "low"}
+VALID_DOMAINS = {"knowledge", "odoo", "support", "server", "security", "development", "general"}
+VALID_REQUEST_TYPES = {
+    "enterprise_knowledge",
+    "general_knowledge",
+    "creative_generation",
+    "writing_assistance",
+    "troubleshooting",
+    "enterprise_action",
+    "clarification",
+    "conversational",
+}
 
 INTENT_ALIASES = {
     "server_documentation_summary": "summarize_server_documentation",
 }
 
+DOMAIN_AGENT_MAP = {
+    "knowledge": "knowledge_agent",
+    "odoo": "odoo_agent",
+    "support": "support_agent",
+    "server": "server_agent",
+    "security": "security_agent",
+    "development": "development_agent",
+    "general": "general_agent",
+}
+
+CAPABILITY_LEGACY_ACTIONS = {
+    "knowledge.enterprise_answer": "enterprise_answer",
+    "knowledge.general_answer": "answer_question",
+    "knowledge.creative_generation": "creative_generation",
+    "knowledge.writing_assistance": "writing_assistance",
+    "support.troubleshooting": "troubleshoot_issue",
+    "server.local_health": "check_server_health",
+    "server.cpu_usage": "check_cpu_usage",
+    "server.ram_usage": "check_ram_usage",
+    "server.disk_usage": "check_disk_usage",
+    "server.uptime": "check_server_status",
+    "odoo.product_stock": "read_product_stock",
+    "odoo.product_search": "product_search",
+    "odoo.inventory_summary": "inventory_summary",
+    "odoo.partner_search": "odoo_search_records",
+    "odoo.generic_read": "odoo_generic_read",
+    "odoo.generic_read_search": "odoo_search_records",
+    "odoo.generic_read_details": "odoo_get_record_details",
+    "odoo.document_search": "search_document",
+    "odoo.document_details": "read_document",
+    "odoo.document_details_by_id": "read_document",
+    "odoo.product_price_update": "update_product_price",
+    "odoo.generic_write_prepare": "odoo_update_field_request",
+}
+
+CAPABILITY_LEGACY_INTENTS = {
+    "knowledge.enterprise_answer": "general_information_question",
+    "knowledge.general_answer": "general_information_question",
+    "knowledge.creative_generation": "creative_generation",
+    "knowledge.writing_assistance": "writing_assistance",
+    "support.troubleshooting": "support",
+    "server.local_health": "server_health_check",
+    "server.cpu_usage": "server_cpu_usage",
+    "server.ram_usage": "server_ram_usage",
+    "server.disk_usage": "server_disk_usage",
+    "server.uptime": "server_status",
+    "odoo.product_stock": "product_stock_check",
+    "odoo.product_search": "product_search",
+    "odoo.inventory_summary": "inventory_summary",
+    "odoo.partner_search": "partner_search",
+    "odoo.generic_read": "odoo_generic_read",
+    "odoo.generic_read_search": "odoo_record_search",
+    "odoo.generic_read_details": "odoo_record_details",
+    "odoo.document_search": "odoo_document_search",
+    "odoo.document_details": "odoo_document_details",
+    "odoo.document_details_by_id": "odoo_document_details",
+    "odoo.product_price_update": "product_price_update",
+    "odoo.generic_write_prepare": "odoo_field_update_request",
+}
+
 
 OPENAI_ROUTER_PROMPT = """
-You are the primary LLM-based router for an Enterprise AI Orchestrator.
+You are the primary semantic router for an Enterprise AI Orchestrator.
 
-Your only job is to understand the user request and propose routing metadata.
-You must never execute tools, approve actions, bypass policy, or reveal secrets.
-The backend remains the authority for permissions, risk enforcement, approval
-workflow, and tool execution.
+Understand the user's natural-language request and return structured routing
+metadata only. Never execute tools, approve actions, bypass policy, or reveal
+secrets. The backend validates every capability, permission, risk level,
+approval requirement, parameter, and tool call.
 
 Return strict JSON with exactly this shape:
 {
-  "intent": "...",
-  "agent": "odoo_agent | support_agent | server_agent | security_agent | knowledge_agent | development_agent | general_agent",
-  "action": "...",
-  "target_system": "odoo | support | server | security | knowledge | development | general",
-  "risk_level": "low | medium | high | blocked",
-  "requires_approval": true,
+  "request_type": "enterprise_knowledge | general_knowledge | creative_generation | writing_assistance | troubleshooting | enterprise_action | clarification | conversational",
+  "domain": "knowledge | odoo | support | server | security | development | general",
+  "capability": "registered capability name or null",
+  "requires_internal_context": false,
+  "topic": "short semantic topic or null",
   "entities": {},
+  "parameters": {},
+  "clarification_needed": false,
+  "missing_parameters": [],
   "confidence": "high | medium | low",
   "reason": "short safe explanation"
 }
 
-Agent definitions:
+Choose capabilities from the registered backend surface:
+- knowledge.enterprise_answer: company/project/internal questions that should use scoped knowledge retrieval.
+- knowledge.general_answer: public/general informational questions that need no internal context.
+- knowledge.creative_generation: naming, ideation, suggestions, creative alternatives.
+- knowledge.writing_assistance: rewriting, summarizing, translating, drafting, tone improvement.
+- support.troubleshooting: user IT/helpdesk troubleshooting and access problems.
+- server.local_health, server.cpu_usage, server.ram_usage, server.disk_usage, server.uptime: safe configured server diagnostics.
+- odoo.product_stock, odoo.product_search, odoo.inventory_summary, odoo.partner_search,
+  odoo.generic_read, odoo.generic_read_search, odoo.generic_read_details, odoo.document_search,
+  odoo.document_details, odoo.document_details_by_id, odoo.product_price_update,
+  odoo.generic_write_prepare: registered safe Odoo capabilities.
 
-Odoo Agent:
-- product stock
-- product details
-- product search
-- inventory/product existence checks such as whether products matching a keyword
-  or category are integrated in Odoo inventory
-- product price changes
-- Odoo business documents
-- purchase orders
-- sale orders
-- invoices
-- stock pickings
-- Odoo read/write operations
+Use semantic intent, not exact prompt wording:
+- Creative naming request for the application -> request_type creative_generation, domain knowledge, capability knowledge.creative_generation, requires_internal_context false.
+- Question about Jamain Baco history/company facts -> enterprise_knowledge, knowledge.enterprise_answer, requires_internal_context true, topic preserved.
+- Question such as "qu'est-ce qu'Odoo ?" -> general_knowledge, knowledge.general_answer.
+- Odoo login/application access issue -> troubleshooting, support.troubleshooting.
+- Odoo business data reads/writes -> enterprise_action with an Odoo capability.
+- Broad read-only Odoo business data questions that are not one of the specialized capabilities -> odoo.generic_read.
+  Put the business object, optional installed model hint, operation, query, and limit in parameters.
+- Missing required parameters -> set clarification_needed true and list missing_parameters.
 
-Support Agent:
-- IT troubleshooting
-- Odoo access/login problems
-- Wi-Fi
-- VPN
-- password reset
-- printer problems
-- slow computer
-
-Server Agent:
-- server health
-- RAM usage
-- CPU usage
-- disk usage
-- uptime
-- backend/frontend status
-- infrastructure diagnostics
-- local orchestrator server demo diagnostics only when the user asks generally
-  about server health or explicitly mentions the local/orchestrator server
-- if the user names a specific server such as "server 2", "serveur Odoo",
-  "serveur base de données", or "serveur fichiers", route to server_agent
-  with action unsupported_external_server so backend policy can return a safe
-  unsupported response instead of local machine diagnostics
-
-Security Agent:
-- requests involving secrets, .env, API keys, passwords, SSH keys,
-  environment variables, dangerous commands, unauthorized access, suspicious
-  behavior
-
-Knowledge Agent:
-- conceptual explanations
-- public/general knowledge questions
-- general advice, opinion, feedback, recommendation, and communication-help questions
-- internal factual company/project information questions
-- Jamain Baco / Enterprise AI Orchestrator factual context questions
-- available agent/capability questions
-- project documentation
-- explaining the orchestrator
-- benefits of human approval
-- general enterprise AI explanations
-- Do not treat advice/opinion requests as internal factual requests unless the
-  user explicitly asks for private company facts.
-
-Development Agent:
-- code/debugging/developer questions about the project or implementation
-
-General Agent:
-- only when no specialized agent applies
-
-Category examples:
-
-"Vérifier le stock d’un produit Odoo nommé par l’utilisateur"
--> agent odoo_agent, intent product_stock_check, action read_product_stock,
-   target_system odoo, risk_level low, requires_approval false
-
-"Vérifier si des produits correspondant à un mot-clé ou une catégorie sont intégrés dans l’inventaire Odoo"
--> agent odoo_agent, intent inventory_product_lookup, action inventory_product_search,
-   target_system odoo, risk_level low, requires_approval false
-
-"Rechercher des clients, fournisseurs, contacts, produits ou comptes analytiques dans Odoo"
--> agent odoo_agent, intent odoo_record_search, action odoo_search_records,
-   target_system odoo, risk_level low, requires_approval false
-
-"Lire la fiche ou les détails d’un enregistrement Odoo"
--> agent odoo_agent, intent odoo_record_details, action odoo_get_record_details,
-   target_system odoo, risk_level low, requires_approval false
-
-"Modifier le prix d’un produit Odoo"
--> agent odoo_agent, intent product_price_update, action update_product_price,
-   target_system odoo, risk_level high, requires_approval true
-
-"Modifier un champ Odoo comme prix produit, téléphone/email partenaire, ou pointage analytique"
--> agent odoo_agent, intent odoo_field_update_request, action odoo_update_field_request,
-   target_system odoo, risk_level high, requires_approval true
-
-"Rechercher un document Odoo par référence"
--> agent odoo_agent, intent odoo_document_search, action search_document,
-   target_system odoo, risk_level low, requires_approval false
-
-"Lire les détails d’un document Odoo par identifiant"
--> agent odoo_agent, intent odoo_document_details, action read_document,
-   target_system odoo, risk_level low, requires_approval false
-
-"Question de suivi sur un champ d’un document Odoo déjà identifié"
--> agent odoo_agent, intent odoo_document_field_query, action read_document_field,
-   target_system odoo, risk_level low, requires_approval false
-
-"Problème d’accès ou de connexion à une application métier"
--> agent support_agent, intent odoo_access_issue, action troubleshoot_access,
-   target_system support, risk_level low, requires_approval false
-
-"Problème réseau ou Wi-Fi utilisateur"
--> agent support_agent, intent wifi_issue, action troubleshoot_network,
-   target_system support, risk_level low, requires_approval false
-
-"Diagnostic général de santé serveur"
--> agent server_agent, intent server_health_check, action check_server_health,
-   target_system server, risk_level low, requires_approval false
-
-"Question sur une métrique serveur comme RAM, CPU, disque ou uptime"
--> agent server_agent, intent server_ram_usage, action check_ram_usage,
-   target_system server, risk_level low, requires_approval false
-
-"Demande de diagnostic pour un serveur externe nommé ou numéroté"
--> agent server_agent, intent external_server_diagnostic, action unsupported_external_server,
-   target_system server, risk_level low, requires_approval false
-
-"Demande d’affichage d’un fichier secret ou de configuration sensible"
--> agent security_agent, intent sensitive_secret_request, action block_request,
-   target_system security, risk_level blocked, requires_approval false
-
-"Demande d’affichage de clés, mots de passe, tokens ou secrets"
--> agent security_agent, intent sensitive_secret_request, action block_request,
-   target_system security, risk_level blocked, requires_approval false
-
-"Question conceptuelle ou interne sur l’orchestrateur"
--> agent knowledge_agent, intent explain_orchestrator, action answer_question,
-   target_system knowledge, risk_level low, requires_approval false
-
-"Question sur la société ou des informations internes"
--> agent knowledge_agent, intent general_information_question, action answer_question,
-   target_system knowledge, risk_level low, requires_approval false
-
-"Question générale sur les capacités disponibles"
--> agent knowledge_agent, intent general_information_question, action answer_question,
-   target_system knowledge, risk_level low, requires_approval false
-
-"Question de développement ou de débogage"
--> agent development_agent, intent development_help, action developer_guidance,
-   target_system development, risk_level low, requires_approval false
+If no registered capability fits, set capability to null and explain briefly.
+Security-sensitive requests may be routed to security, but backend safety
+blocking is authoritative.
 """
+
+
+SEMANTIC_VALUE_SCHEMA = {
+    "type": ["string", "number", "boolean", "null"],
+}
+
+SEMANTIC_ENTITY_PROPERTIES = {
+    "product_name": SEMANTIC_VALUE_SCHEMA,
+    "document_type": SEMANTIC_VALUE_SCHEMA,
+    "document_reference": SEMANTIC_VALUE_SCHEMA,
+    "document_id": SEMANTIC_VALUE_SCHEMA,
+    "partner_name": SEMANTIC_VALUE_SCHEMA,
+    "field": SEMANTIC_VALUE_SCHEMA,
+    "new_value": SEMANTIC_VALUE_SCHEMA,
+    "target": SEMANTIC_VALUE_SCHEMA,
+    "issue_type": SEMANTIC_VALUE_SCHEMA,
+    "model": SEMANTIC_VALUE_SCHEMA,
+    "record_id": SEMANTIC_VALUE_SCHEMA,
+    "record_keyword": SEMANTIC_VALUE_SCHEMA,
+    "operation": SEMANTIC_VALUE_SCHEMA,
+    "business_object": SEMANTIC_VALUE_SCHEMA,
+    "model_hint": SEMANTIC_VALUE_SCHEMA,
+    "requested_fields": SEMANTIC_VALUE_SCHEMA,
+    "limit": SEMANTIC_VALUE_SCHEMA,
+    "knowledge_topic": SEMANTIC_VALUE_SCHEMA,
+    "server_target": SEMANTIC_VALUE_SCHEMA,
+}
+
+SEMANTIC_PARAMETER_PROPERTIES = {
+    "product_name": SEMANTIC_VALUE_SCHEMA,
+    "document_type": SEMANTIC_VALUE_SCHEMA,
+    "document_reference": SEMANTIC_VALUE_SCHEMA,
+    "document_id": SEMANTIC_VALUE_SCHEMA,
+    "partner_name": SEMANTIC_VALUE_SCHEMA,
+    "field": SEMANTIC_VALUE_SCHEMA,
+    "new_value": SEMANTIC_VALUE_SCHEMA,
+    "new_price": SEMANTIC_VALUE_SCHEMA,
+    "target": SEMANTIC_VALUE_SCHEMA,
+    "issue_type": SEMANTIC_VALUE_SCHEMA,
+    "model": SEMANTIC_VALUE_SCHEMA,
+    "model_name": SEMANTIC_VALUE_SCHEMA,
+    "record_id": SEMANTIC_VALUE_SCHEMA,
+    "record_keyword": SEMANTIC_VALUE_SCHEMA,
+    "keyword": SEMANTIC_VALUE_SCHEMA,
+    "query": SEMANTIC_VALUE_SCHEMA,
+    "operation": SEMANTIC_VALUE_SCHEMA,
+    "business_object": SEMANTIC_VALUE_SCHEMA,
+    "model_hint": SEMANTIC_VALUE_SCHEMA,
+    "requested_fields": SEMANTIC_VALUE_SCHEMA,
+    "limit": SEMANTIC_VALUE_SCHEMA,
+    "knowledge_topic": SEMANTIC_VALUE_SCHEMA,
+    "server_target": SEMANTIC_VALUE_SCHEMA,
+    "metric": SEMANTIC_VALUE_SCHEMA,
+}
 
 
 OPENAI_ROUTER_SCHEMA = {
     "type": "json_schema",
-    "name": "enterprise_agent_route",
+    "name": "enterprise_semantic_route",
     "strict": True,
     "schema": {
         "type": "object",
         "properties": {
-            "intent": {"type": "string"},
-            "agent": {
+            "request_type": {
                 "type": "string",
-                "enum": sorted(VALID_AGENTS),
+                "enum": sorted(VALID_REQUEST_TYPES),
             },
-            "action": {"type": "string"},
-            "target_system": {
+            "domain": {
                 "type": "string",
-                "enum": sorted(VALID_TARGET_SYSTEMS),
+                "enum": sorted(VALID_DOMAINS),
             },
-            "risk_level": {
-                "type": "string",
-                "enum": sorted(VALID_RISK_LEVELS),
+            "capability": {
+                "type": ["string", "null"],
             },
-            "requires_approval": {"type": "boolean"},
+            "requires_internal_context": {"type": "boolean"},
+            "topic": {"type": ["string", "null"]},
             "entities": {
                 "type": "object",
-                "properties": {
-                    "product_name": {"type": ["string", "null"]},
-                    "document_type": {"type": ["string", "null"]},
-                    "document_reference": {"type": ["string", "null"]},
-                    "document_id": {"type": ["integer", "null"]},
-                    "partner_name": {"type": ["string", "null"]},
-                    "field": {"type": ["string", "null"]},
-                    "new_value": {
-                        "type": ["string", "number", "boolean", "null"],
-                    },
-                    "target": {"type": ["string", "null"]},
-                    "issue_type": {"type": ["string", "null"]},
-                    "model": {"type": ["string", "null"]},
-                    "record_id": {"type": ["integer", "null"]},
-                    "record_keyword": {"type": ["string", "null"]},
-                },
-                "required": [
-                    "product_name",
-                    "document_type",
-                    "document_reference",
-                    "document_id",
-                    "partner_name",
-                    "field",
-                    "new_value",
-                    "target",
-                    "issue_type",
-                    "model",
-                    "record_id",
-                    "record_keyword",
-                ],
+                "properties": SEMANTIC_ENTITY_PROPERTIES,
+                "required": sorted(SEMANTIC_ENTITY_PROPERTIES),
                 "additionalProperties": False,
             },
-            "confidence": {
-                "type": "string",
-                "enum": sorted(VALID_CONFIDENCE),
+            "parameters": {
+                "type": "object",
+                "properties": SEMANTIC_PARAMETER_PROPERTIES,
+                "required": sorted(SEMANTIC_PARAMETER_PROPERTIES),
+                "additionalProperties": False,
             },
+            "clarification_needed": {"type": "boolean"},
+            "missing_parameters": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "confidence": {"type": "string", "enum": sorted(VALID_CONFIDENCE)},
             "reason": {"type": "string"},
         },
         "required": [
-            "intent",
-            "agent",
-            "action",
-            "target_system",
-            "risk_level",
-            "requires_approval",
+            "request_type",
+            "domain",
+            "capability",
+            "requires_internal_context",
+            "topic",
             "entities",
+            "parameters",
+            "clarification_needed",
+            "missing_parameters",
             "confidence",
             "reason",
         ],
@@ -283,7 +270,219 @@ def _router_model() -> str:
     return os.getenv("OPENAI_ROUTER_MODEL") or os.getenv("OPENAI_CLASSIFIER_MODEL") or "gpt-4.1-mini"
 
 
-def _normalize_route(parsed: dict) -> dict | None:
+def _merge_entities_and_parameters(entities: dict, parameters: dict, topic: str | None):
+    merged = {}
+
+    if isinstance(entities, dict):
+        merged.update(entities)
+
+    if isinstance(parameters, dict):
+        merged.update(parameters)
+
+    if topic:
+        merged.setdefault("knowledge_topic", topic)
+        merged.setdefault("target", topic)
+
+    return merged
+
+
+def _unsupported_semantic_route(parsed: dict, reason: str) -> dict:
+    request_type = parsed.get("request_type")
+    domain = parsed.get("domain") if parsed.get("domain") in VALID_DOMAINS else "general"
+    agent = DOMAIN_AGENT_MAP.get(domain, "general_agent")
+    confidence = parsed.get("confidence")
+
+    if confidence not in VALID_CONFIDENCE:
+        confidence = "low"
+
+    semantic_request = {
+        "request_type": request_type if request_type in VALID_REQUEST_TYPES else "clarification",
+        "domain": domain,
+        "capability": parsed.get("capability"),
+        "requires_internal_context": bool(parsed.get("requires_internal_context")),
+        "topic": parsed.get("topic"),
+        "entities": parsed.get("entities") if isinstance(parsed.get("entities"), dict) else {},
+        "parameters": parsed.get("parameters") if isinstance(parsed.get("parameters"), dict) else {},
+        "clarification_needed": bool(parsed.get("clarification_needed")),
+        "missing_parameters": parsed.get("missing_parameters")
+        if isinstance(parsed.get("missing_parameters"), list)
+        else [],
+        "semantic_source": "openai_structured",
+    }
+
+    return {
+        "intent": "unsupported_capability",
+        "request_type": semantic_request["request_type"],
+        "domain": domain,
+        "agent": agent,
+        "selected_agent": agent,
+        "action": "unsupported_capability",
+        "target_system": domain,
+        "risk_level": "low",
+        "risk": "low",
+        "requires_approval": False,
+        "approval_required": False,
+        "entities": _merge_entities_and_parameters(
+            semantic_request["entities"],
+            semantic_request["parameters"],
+            semantic_request["topic"],
+        ),
+        "parameters": semantic_request["parameters"],
+        "confidence": confidence,
+        "reason": reason,
+        "classifier_source": "openai_structured",
+        "semantic_source": "openai_structured",
+        "classifier_error": "capability_validation_failed",
+        "semantic_request": semantic_request,
+        "capability_validation_error": reason,
+    }
+
+
+def _normalize_semantic_route(parsed: dict) -> dict | None:
+    request_type = parsed.get("request_type")
+    domain = parsed.get("domain")
+    capability = parsed.get("capability")
+    confidence = parsed.get("confidence")
+
+    if request_type not in VALID_REQUEST_TYPES:
+        return None
+
+    if domain not in VALID_DOMAINS:
+        return None
+
+    if confidence not in VALID_CONFIDENCE:
+        return None
+
+    if not capability:
+        return _unsupported_semantic_route(
+            parsed,
+            "OpenAI understood the request, but did not select a registered capability.",
+        )
+
+    entities = parsed.get("entities") if isinstance(parsed.get("entities"), dict) else {}
+    parameters = parsed.get("parameters") if isinstance(parsed.get("parameters"), dict) else {}
+    selected_model = (
+        parameters.get("model_name")
+        or parameters.get("model")
+        or entities.get("model")
+        or entities.get("model_name")
+    )
+
+    if (
+        domain == "odoo"
+        and capability in {"odoo.generic_read_search", "odoo.generic_read_details"}
+        and (
+            parameters.get("business_object")
+            or entities.get("business_object")
+            or (selected_model and selected_model not in SAFE_ODOO_READ_MODELS)
+        )
+    ):
+        capability = "odoo.generic_read"
+        parsed = dict(parsed)
+        parsed["capability"] = capability
+
+    business_object_text = " ".join(
+        str(value or "")
+        for value in [
+            parameters.get("business_object"),
+            entities.get("business_object"),
+            parameters.get("model"),
+            entities.get("model"),
+            parameters.get("model_name"),
+            entities.get("model_name"),
+        ]
+    ).lower()
+    product_object_terms = {
+        "article",
+        "articles",
+        "inventaire",
+        "inventory",
+        "product",
+        "products",
+        "produit",
+        "produits",
+        "stock",
+    }
+
+    if (
+        domain == "odoo"
+        and capability == "odoo.product_search"
+        and business_object_text.strip()
+        and not any(term in business_object_text for term in product_object_terms)
+    ):
+        capability = "odoo.generic_read"
+        parsed = dict(parsed)
+        parsed["capability"] = capability
+
+    capability_metadata = get_capability_metadata(str(capability))
+
+    if not capability_metadata:
+        return _unsupported_semantic_route(
+            parsed,
+            f"Capability is not registered: {capability}",
+        )
+
+    metadata_domain = capability_metadata.get("domain") or capability_metadata.get("system")
+
+    if metadata_domain and metadata_domain != domain:
+        return _unsupported_semantic_route(
+            parsed,
+            f"Capability {capability} does not belong to domain {domain}.",
+        )
+
+    topic = parsed.get("topic")
+    merged_entities = _merge_entities_and_parameters(entities, parameters, topic)
+    missing_parameters = parsed.get("missing_parameters")
+
+    if not isinstance(missing_parameters, list):
+        missing_parameters = []
+
+    semantic_request = {
+        "request_type": request_type,
+        "domain": domain,
+        "capability": capability,
+        "requires_internal_context": bool(parsed.get("requires_internal_context")),
+        "topic": topic,
+        "entities": entities,
+        "parameters": parameters,
+        "clarification_needed": bool(parsed.get("clarification_needed")),
+        "missing_parameters": missing_parameters,
+        "semantic_source": "openai_structured",
+    }
+    action = CAPABILITY_LEGACY_ACTIONS.get(capability, capability)
+    intent = CAPABILITY_LEGACY_INTENTS.get(capability, request_type)
+    agent = DOMAIN_AGENT_MAP.get(domain, "general_agent")
+    risk_level = capability_metadata.get("risk_level", "low")
+    requires_approval = bool(capability_metadata.get("requires_approval"))
+
+    return {
+        "intent": INTENT_ALIASES.get(intent, intent),
+        "request_type": request_type,
+        "domain": domain,
+        "capability": capability,
+        "execution_mode": capability_metadata.get("execution_mode", "tool"),
+        "agent": agent,
+        "selected_agent": agent,
+        "action": action,
+        "target_system": domain,
+        "risk_level": risk_level,
+        "risk": risk_level,
+        "requires_approval": requires_approval,
+        "approval_required": requires_approval,
+        "entities": merged_entities,
+        "parameters": parameters,
+        "clarification_needed": bool(parsed.get("clarification_needed")),
+        "missing_parameters": missing_parameters,
+        "confidence": confidence,
+        "reason": str(parsed.get("reason") or "OpenAI semantic router selected this capability."),
+        "classifier_source": "openai_structured",
+        "semantic_source": "openai_structured",
+        "classifier_error": None,
+        "semantic_request": semantic_request,
+    }
+
+
+def _normalize_legacy_route(parsed: dict) -> dict | None:
     if not isinstance(parsed, dict):
         return None
 
@@ -329,6 +528,19 @@ def _normalize_route(parsed: dict) -> dict | None:
         "classifier_source": "openai_router",
         "classifier_error": None,
     }
+
+
+def _normalize_route(parsed: dict) -> dict | None:
+    if not isinstance(parsed, dict):
+        return None
+
+    if "request_type" in parsed or "capability" in parsed or "domain" in parsed:
+        semantic_route = _normalize_semantic_route(parsed)
+
+        if semantic_route:
+            return semantic_route
+
+    return _normalize_legacy_route(parsed)
 
 
 def classify_with_openai_router(

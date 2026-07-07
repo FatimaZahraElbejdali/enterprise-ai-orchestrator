@@ -51,12 +51,12 @@ def test_odoo_access_problem_routes_to_support_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["intent"] == "support"
-    assert data["agent"] == "support_agent"
-    assert data["parsed_action"] == "troubleshoot_issue"
+    assert data["technical"]["intent"] == "support"
+    assert data["technical"]["agent"] == "support_agent"
+    assert data["technical"]["action"] == "troubleshoot_issue"
     assert data["requires_approval"] is False
     assert data["status"] == "completed"
-    assert "Vérifier la connexion internet" in data["result"]["steps"]
+    assert "Vérifier la connexion internet" in data["response"]
 
 
 def test_odoo_not_opening_routes_to_support_agent(monkeypatch):
@@ -76,9 +76,9 @@ def test_odoo_not_opening_routes_to_support_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["intent"] == "support"
-    assert data["agent"] == "support_agent"
-    assert data["parsed_action"] == "troubleshoot_issue"
+    assert data["technical"]["intent"] == "support"
+    assert data["technical"]["agent"] == "support_agent"
+    assert data["technical"]["action"] == "troubleshoot_issue"
 
 
 def test_stock_request_still_routes_to_odoo_agent(monkeypatch):
@@ -101,9 +101,9 @@ def test_stock_request_still_routes_to_odoo_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["intent"] == "odoo"
-    assert data["agent"] == "odoo_agent"
-    assert data["parsed_action"] == "check_product_stock"
+    assert data["technical"]["intent"] == "odoo"
+    assert data["technical"]["agent"] == "odoo_agent"
+    assert data["technical"]["action"] == "check_product_stock"
 
 
 def test_inventory_summary_routes_to_odoo_agent(monkeypatch):
@@ -127,9 +127,9 @@ def test_inventory_summary_routes_to_odoo_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["intent"] == "odoo"
-    assert data["agent"] == "odoo_agent"
-    assert data["parsed_action"] == "inventory_summary"
+    assert data["technical"]["intent"] == "odoo"
+    assert data["technical"]["agent"] == "odoo_agent"
+    assert data["technical"]["action"] == "inventory_summary"
 
 
 def test_inventory_product_existence_question_routes_to_odoo_agent(monkeypatch):
@@ -155,10 +155,10 @@ def test_inventory_product_existence_question_routes_to_odoo_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["intent"] == "odoo"
-    assert data["agent"] == "odoo_agent"
-    assert data["parsed_action"] == "inventory_product_search"
-    assert data["approval_required"] is False
+    assert data["technical"]["intent"] == "odoo"
+    assert data["technical"]["agent"] == "odoo_agent"
+    assert data["technical"]["action"] == "inventory_product_search"
+    assert data["requires_approval"] is False
 
 
 def test_invoice_details_request_still_routes_to_odoo_agent(monkeypatch):
@@ -181,9 +181,9 @@ def test_invoice_details_request_still_routes_to_odoo_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["intent"] == "odoo"
-    assert data["agent"] == "odoo_agent"
-    assert data["parsed_action"] == "document_details"
+    assert data["technical"]["intent"] == "odoo"
+    assert data["technical"]["agent"] == "odoo_agent"
+    assert data["technical"]["action"] == "document_details"
 
 
 def test_wifi_problem_routes_to_support_agent(monkeypatch):
@@ -198,10 +198,10 @@ def test_wifi_problem_routes_to_support_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["intent"] == "support"
-    assert data["agent"] == "support_agent"
-    assert data["parsed_action"] == "troubleshoot_issue"
-    assert data["approval_required"] is False
+    assert data["technical"]["intent"] == "support"
+    assert data["technical"]["agent"] == "support_agent"
+    assert data["technical"]["action"] == "troubleshoot_issue"
+    assert data["requires_approval"] is False
 
 
 def test_slow_computer_routes_to_support_agent(monkeypatch):
@@ -216,10 +216,10 @@ def test_slow_computer_routes_to_support_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["intent"] == "support"
-    assert data["agent"] == "support_agent"
-    assert data["parsed_action"] == "troubleshoot_issue"
-    assert data["approval_required"] is False
+    assert data["technical"]["intent"] == "support"
+    assert data["technical"]["agent"] == "support_agent"
+    assert data["technical"]["action"] == "troubleshoot_issue"
+    assert data["requires_approval"] is False
 
 
 def test_internal_server_list_routes_to_server_agent(monkeypatch):
@@ -246,10 +246,10 @@ def test_internal_server_list_routes_to_server_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["intent"] == "server"
-    assert data["agent"] == "server_agent"
-    assert data["parsed_action"] == "list_internal_files"
-    assert data["approval_required"] is False
+    assert data["technical"]["intent"] == "server"
+    assert data["technical"]["agent"] == "server_agent"
+    assert data["technical"]["action"] == "list_internal_files"
+    assert data["requires_approval"] is False
 
 
 def test_internal_server_create_routes_to_server_agent(monkeypatch):
@@ -278,10 +278,10 @@ def test_internal_server_create_routes_to_server_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["intent"] == "server"
-    assert data["agent"] == "server_agent"
-    assert data["parsed_action"] == "create_internal_file"
-    assert data["approval_required"] is False
+    assert data["technical"]["intent"] == "server"
+    assert data["technical"]["agent"] == "server_agent"
+    assert data["technical"]["action"] == "create_internal_file"
+    assert data["requires_approval"] is False
 
 
 def test_internal_server_env_path_is_blocked(monkeypatch):
@@ -308,11 +308,11 @@ def test_internal_server_env_path_is_blocked(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["intent"] == "sensitive_secret_request"
-    assert data["agent"] == "security_agent"
-    assert data["parsed_action"] == "block_request"
-    assert data["risk_level"] == "blocked"
-    assert data["approval_required"] is False
+    assert data["technical"]["intent"] == "sensitive_secret_request"
+    assert data["technical"]["agent"] == "security_agent"
+    assert data["technical"]["action"] == "block_request"
+    assert data["technical"]["risk"] == "blocked"
+    assert data["requires_approval"] is False
 
 
 def test_frontend_sanitizes_sensitive_odoo_diagnostic_fields():

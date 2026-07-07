@@ -8,6 +8,7 @@ import {
   AuthUser,
   authHeaders,
   clearAuth,
+  getDepartmentLabel,
   getRoleLabel,
   getStoredUser,
   requireAuth,
@@ -545,6 +546,8 @@ export default function Home() {
             <span>{currentUser?.email || "Utilisateur connecté"}</span>
             <br />
             <span>Rôle : {getRoleLabel(currentUser)}</span>
+            <br />
+            <span>Département : {getDepartmentLabel(currentUser)}</span>
             <button className="logout-button" type="button" onClick={handleLogout}>
               Se déconnecter
             </button>

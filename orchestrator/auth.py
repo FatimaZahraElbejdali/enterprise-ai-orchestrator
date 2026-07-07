@@ -7,6 +7,7 @@ from typing import Annotated
 
 from fastapi import Header, HTTPException, status
 
+from orchestrator.department_profiles import get_department_profile, normalize_department
 from orchestrator.permission_policy import resolve_route_permission
 
 
@@ -69,6 +70,7 @@ _audit_user_context: ContextVar[dict | None] = ContextVar(
 class DemoUser:
     email: str
     role: str
+    department: str
     password_hash: str
 
 
@@ -84,31 +86,37 @@ DEMO_USERS = {
     "admin@company.local": DemoUser(
         email="admin@company.local",
         role="admin",
+        department="administration",
         password_hash=_hash_password("admin123"),
     ),
     "odoo.manager@company.local": DemoUser(
         email="odoo.manager@company.local",
         role="odoo_manager",
+        department="administration",
         password_hash=_hash_password("manager123"),
     ),
     "it.manager@company.local": DemoUser(
         email="it.manager@company.local",
         role="it_manager",
+        department="informatique",
         password_hash=_hash_password("it123"),
     ),
     "support@company.local": DemoUser(
         email="support@company.local",
         role="support_agent",
+        department="informatique",
         password_hash=_hash_password("support123"),
     ),
     "employee@company.local": DemoUser(
         email="employee@company.local",
         role="employee",
+        department="administration",
         password_hash=_hash_password("employee123"),
     ),
     "viewer@company.local": DemoUser(
         email="viewer@company.local",
         role="readonly_viewer",
+        department="administration",
         password_hash=_hash_password("viewer123"),
     ),
 }
@@ -122,11 +130,15 @@ def _expires_at():
 
 def _serialize_user(user: DemoUser) -> dict:
     permissions = sorted(ROLE_PERMISSIONS.get(user.role, set()))
+    department = normalize_department(user.department)
+    department_profile = get_department_profile(department)
 
     return {
         "email": user.email,
         "role": user.role,
         "role_label": ROLE_LABELS.get(user.role, user.role),
+        "department": department,
+        "department_label": department_profile.display_name,
         "permissions": permissions,
     }
 
@@ -200,6 +212,8 @@ def set_audit_user_context(
         context = {
             "user_email": user.get("email"),
             "user_role": user.get("role"),
+            "user_department": user.get("department"),
+            "department": user.get("department"),
         }
 
         if permission_decision:
@@ -267,6 +281,10 @@ def access_denied_payload(
         "selected_agent": classification.get("selected_agent") or classification.get("agent", "security_agent"),
         "risk": classification.get("risk", classification.get("risk_level", "low")),
         "risk_level": classification.get("risk_level", classification.get("risk", "low")),
+        "request_type": classification.get("request_type"),
+        "domain": classification.get("domain"),
+        "capability": classification.get("capability"),
+        "execution_mode": classification.get("execution_mode"),
         "requires_approval": False,
         "approval_required": False,
         "approval_status": "not_required",
@@ -290,6 +308,8 @@ def access_denied_payload(
             "email": user.get("email"),
             "role": user.get("role"),
             "role_label": user.get("role_label"),
+            "department": user.get("department"),
+            "department_label": user.get("department_label"),
         }
         if user
         else None,
@@ -332,6 +352,8 @@ def unsupported_action_payload(
             "email": user.get("email"),
             "role": user.get("role"),
             "role_label": user.get("role_label"),
+            "department": user.get("department"),
+            "department_label": user.get("department_label"),
         }
         if user
         else None,

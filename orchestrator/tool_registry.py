@@ -41,6 +41,12 @@ CAPABILITY_OVERRIDES = {
         "required_parameters": ["model_name", "keyword"],
         "allowed_models": sorted(SAFE_ODOO_READ_MODELS),
     },
+    "odoo_generic_read": {
+        "capability": "odoo.generic_read",
+        "permission_category": "odoo_read",
+        "io_mode": "read",
+        "required_parameters": ["read_plan"],
+    },
     "odoo_get_record_details": {
         "capability": "odoo.generic_read_details",
         "permission_category": "odoo_document_read",
@@ -233,6 +239,21 @@ CAPABILITY_OVERRIDES = {
 
 
 AGENT_CAPABILITIES = {
+    "knowledge.enterprise_answer": {
+        "name": "knowledge.enterprise_answer",
+        "capability": "knowledge.enterprise_answer",
+        "description": "Answer enterprise/company questions from scoped knowledge retrieval.",
+        "domain": "knowledge",
+        "system": "knowledge",
+        "permission_category": "chat_access",
+        "risk_level": "low",
+        "requires_approval": False,
+        "io_mode": "read",
+        "read_write": "read",
+        "execution_mode": "retrieval_grounded",
+        "required_parameters": ["message"],
+        "executor": "agents.knowledge_agent.run",
+    },
     "knowledge.general_answer": {
         "name": "knowledge.general_answer",
         "capability": "knowledge.general_answer",
@@ -244,6 +265,37 @@ AGENT_CAPABILITIES = {
         "requires_approval": False,
         "io_mode": "read",
         "read_write": "read",
+        "execution_mode": "llm_direct",
+        "required_parameters": ["message"],
+        "executor": "agents.knowledge_agent.run",
+    },
+    "knowledge.creative_generation": {
+        "name": "knowledge.creative_generation",
+        "capability": "knowledge.creative_generation",
+        "description": "Generate names, ideas, drafts, or other creative text without backend execution.",
+        "domain": "knowledge",
+        "system": "knowledge",
+        "permission_category": "chat_access",
+        "risk_level": "low",
+        "requires_approval": False,
+        "io_mode": "read",
+        "read_write": "read",
+        "execution_mode": "llm_direct",
+        "required_parameters": ["message"],
+        "executor": "agents.knowledge_agent.run",
+    },
+    "knowledge.writing_assistance": {
+        "name": "knowledge.writing_assistance",
+        "capability": "knowledge.writing_assistance",
+        "description": "Rewrite, summarize, translate, or improve user-provided text without backend execution.",
+        "domain": "knowledge",
+        "system": "knowledge",
+        "permission_category": "chat_access",
+        "risk_level": "low",
+        "requires_approval": False,
+        "io_mode": "read",
+        "read_write": "read",
+        "execution_mode": "llm_direct",
         "required_parameters": ["message"],
         "executor": "agents.knowledge_agent.run",
     },
@@ -258,6 +310,7 @@ AGENT_CAPABILITIES = {
         "requires_approval": False,
         "io_mode": "read",
         "read_write": "read",
+        "execution_mode": "llm_direct",
         "required_parameters": ["message"],
         "executor": "agents.support_agent.run",
     },
@@ -291,6 +344,12 @@ TOOLS = {
     },
     "odoo_search_records": {
         "description": "Safely search allowlisted Odoo records by keyword.",
+        "system": "odoo",
+        "risk_level": "low",
+        "requires_approval": False,
+    },
+    "odoo_generic_read": {
+        "description": "Safely read installed Odoo business records through model discovery and field policy.",
         "system": "odoo",
         "risk_level": "low",
         "requires_approval": False,
@@ -510,8 +569,22 @@ def get_tool_metadata(tool_name: str):
     metadata.update(CAPABILITY_OVERRIDES.get(tool_name, {}))
     metadata.setdefault("capability", tool_name)
     metadata["read_write"] = "write" if metadata["io_mode"].startswith("write") else "read"
+    metadata.setdefault("execution_mode", "tool")
 
     return metadata
+
+
+def get_capability_metadata(capability_name: str):
+    if capability_name in AGENT_CAPABILITIES:
+        return dict(AGENT_CAPABILITIES[capability_name])
+
+    for tool_name in TOOLS:
+        metadata = get_tool_metadata(tool_name)
+
+        if metadata and metadata.get("capability") == capability_name:
+            return metadata
+
+    return None
 
 
 def tool_requires_approval(tool_name: str) -> bool:

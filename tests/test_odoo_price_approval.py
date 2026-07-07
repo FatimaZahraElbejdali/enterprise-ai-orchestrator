@@ -1160,10 +1160,9 @@ def test_chat_routes_french_odoo_document_request_to_odoo_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["agent"] == "odoo_agent"
-    assert data["parser_source"] == "openai"
-    assert data["parsed_action"] == "search_document"
-    assert data["document_reference"] == "FNP/2026/04016"
+    assert data["technical"]["agent"] == "odoo_agent"
+    assert data["technical"]["parser_source"] == "openai"
+    assert data["technical"]["action"] == "search_document"
 
 
 def test_toggle_analytic_boolean_creates_approval_without_execution(monkeypatch, tmp_path):

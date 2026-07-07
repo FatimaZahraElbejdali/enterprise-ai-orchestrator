@@ -362,11 +362,10 @@ def test_chat_routes_document_id_details_to_odoo(monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert seen["message"] == "Montre-moi les détails du document ID 793"
-    assert data["intent"] == "odoo_document_details"
-    assert data["agent"] == "odoo_agent"
-    assert data["parsed_action"] == "document_details"
-    assert data["document_id"] == 793
-    assert data["approval_required"] is False
+    assert data["technical"]["intent"] == "odoo_document_details"
+    assert data["technical"]["agent"] == "odoo_agent"
+    assert data["technical"]["action"] == "document_details"
+    assert data["requires_approval"] is False
 
 
 def test_chat_routes_purchase_order_reference_to_odoo(monkeypatch):
@@ -407,6 +406,6 @@ def test_chat_routes_purchase_order_reference_to_odoo(monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert seen["message"] == "Cherche le bon de commande fournisseur BC-BPP2600313"
-    assert data["intent"] == "odoo_document_search"
-    assert data["agent"] == "odoo_agent"
-    assert data["parsed_action"] == "document_search"
+    assert data["technical"]["intent"] == "odoo_document_search"
+    assert data["technical"]["agent"] == "odoo_agent"
+    assert data["technical"]["action"] == "document_search"

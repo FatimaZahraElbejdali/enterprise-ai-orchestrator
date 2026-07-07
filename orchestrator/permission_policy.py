@@ -2,6 +2,8 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+from orchestrator.tool_registry import get_capability_metadata
+
 
 WRITE_TOKENS = {
     "approve",
@@ -103,6 +105,12 @@ def _is_document_route(values: list[str]) -> bool:
 
 def resolve_route_permission(classification: dict | None) -> RoutePermission:
     classification = classification or {}
+    capability_name = classification.get("capability")
+    capability_metadata = (
+        get_capability_metadata(capability_name)
+        if isinstance(capability_name, str)
+        else None
+    )
     agent = normalize_policy_value(
         classification.get("selected_agent") or classification.get("agent")
     ) or "general_agent"
@@ -110,6 +118,30 @@ def resolve_route_permission(classification: dict | None) -> RoutePermission:
     risk_level = normalize_policy_value(
         classification.get("risk_level") or classification.get("risk")
     ) or "low"
+
+    if capability_metadata:
+        capability_domain = normalize_policy_value(
+            capability_metadata.get("domain") or capability_metadata.get("system")
+        )
+
+        if capability_domain and target_system in {"", "general"}:
+            target_system = capability_domain
+
+        if agent == "general_agent" and capability_domain:
+            agent = {
+                "knowledge": "knowledge_agent",
+                "odoo": "odoo_agent",
+                "support": "support_agent",
+                "server": "server_agent",
+                "security": "security_agent",
+                "development": "development_agent",
+            }.get(capability_domain, agent)
+
+        metadata_risk = normalize_policy_value(capability_metadata.get("risk_level"))
+
+        if metadata_risk in {"medium", "high", "blocked"} and risk_level == "low":
+            risk_level = metadata_risk
+
     action_values = _normalized_fields(
         classification,
         "action",
@@ -183,6 +215,59 @@ def resolve_route_permission(classification: dict | None) -> RoutePermission:
     ):
         if unknown_without_category:
             return _unsupported(agent, target_system or "odoo", action, risk_level)
+
+        if capability_metadata:
+            permission_category = capability_metadata.get("permission_category")
+            io_mode = str(capability_metadata.get("io_mode") or "")
+            is_capability_write = (
+                permission_category == "odoo_write"
+                or io_mode.startswith("write")
+                or capability_metadata.get("requires_approval") is True
+            )
+
+            if is_capability_write:
+                return RoutePermission(
+                    agent=agent,
+                    target_system=target_system or "odoo",
+                    action=action or str(capability_name),
+                    risk_level=risk_level,
+                    action_category="write",
+                    permission_category="odoo_write",
+                    required_permissions=frozenset({"request_odoo_write"}),
+                    requires_approval=True,
+                )
+
+            if permission_category == "odoo_document_read":
+                return RoutePermission(
+                    agent=agent,
+                    target_system=target_system or "odoo",
+                    action=action or str(capability_name),
+                    risk_level=risk_level,
+                    action_category="read",
+                    permission_category="odoo_document_read",
+                    required_permissions=frozenset({"view_odoo_documents", "view_limited_odoo_info"}),
+                )
+
+            if permission_category == "odoo_read":
+                return RoutePermission(
+                    agent=agent,
+                    target_system=target_system or "odoo",
+                    action=action or str(capability_name),
+                    risk_level=risk_level,
+                    action_category="read",
+                    permission_category="odoo_read",
+                    required_permissions=frozenset({"view_odoo_documents", "view_odoo_products", "view_limited_odoo_info"}),
+                )
+
+            return RoutePermission(
+                agent=agent,
+                target_system=target_system or "odoo",
+                action=action or str(capability_name),
+                risk_level=risk_level,
+                action_category="read",
+                permission_category="odoo_product_read",
+                required_permissions=frozenset({"view_odoo_products", "view_limited_odoo_info"}),
+            )
 
         is_write = (
             classification.get("requires_approval") is True

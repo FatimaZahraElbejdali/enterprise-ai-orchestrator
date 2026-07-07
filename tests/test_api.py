@@ -25,10 +25,18 @@ def test_chat_support_request():
     assert response.status_code == 200
     data = response.json()
 
-    assert "intent" in data
-    assert "selected_agent" in data
-    assert "selected_model" in data
-    assert "agent_result" in data
+    assert set(data) == {
+        "status",
+        "response",
+        "requires_approval",
+        "approval_id",
+        "sources",
+        "technical",
+    }
+    assert "response" in data
+    assert "technical" in data
+    assert "agent_result" not in data
+    assert data["technical"]["agent"] == "support_agent"
 
 
 def test_chat_odoo_request():
@@ -41,6 +49,15 @@ def test_chat_odoo_request():
     assert response.status_code == 200
     data = response.json()
 
-    assert "intent" in data
-    assert "selected_agent" in data
-    assert "agent_result" in data
+    assert set(data) == {
+        "status",
+        "response",
+        "requires_approval",
+        "approval_id",
+        "sources",
+        "technical",
+    }
+    assert "response" in data
+    assert "technical" in data
+    assert "agent_result" not in data
+    assert data["technical"]["agent"] == "odoo_agent"

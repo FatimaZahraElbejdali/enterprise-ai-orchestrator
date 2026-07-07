@@ -372,7 +372,7 @@ def test_chat_enriches_follow_up_product_reference(monkeypatch):
     assert first_response.status_code == 200
     assert second_response.status_code == 200
     assert seen_messages[1] == "Change the price of product BACO CLEAN to 7 DH in Odoo"
-    assert second_response.json()["approval_required"] is True
+    assert second_response.json()["requires_approval"] is True
 
 
 def test_chat_enriches_french_details_followup(monkeypatch):

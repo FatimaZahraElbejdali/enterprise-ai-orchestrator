@@ -5,6 +5,8 @@ export type AuthUser = {
   email: string;
   role: string;
   role_label: string;
+  department?: string;
+  department_label?: string;
   permissions: string[];
 };
 
@@ -23,6 +25,16 @@ const ROLE_LABELS: Record<string, string> = {
   support_agent: "Agent Support",
   employee: "Employé",
   readonly_viewer: "Lecture seule",
+};
+
+const DEPARTMENT_LABELS: Record<string, string> = {
+  administration: "Administration",
+  commerciale: "Commerciale",
+  comptabilite_finance: "Comptabilité & Finance",
+  informatique: "Informatique",
+  nettoyage: "Nettoyage",
+  rh: "Ressources humaines",
+  securite: "Sécurité",
 };
 
 export function getStoredToken() {
@@ -59,6 +71,16 @@ export function getRoleLabel(user: AuthUser | null) {
   if (!user) return "Lecture seule";
 
   return ROLE_LABELS[user.role] || user.role_label || "Lecture seule";
+}
+
+export function getDepartmentLabel(user: AuthUser | null) {
+  if (!user) return "Administration";
+
+  return (
+    DEPARTMENT_LABELS[user.department || ""] ||
+    user.department_label ||
+    "Administration"
+  );
 }
 
 export function authHeaders(): HeadersInit {
