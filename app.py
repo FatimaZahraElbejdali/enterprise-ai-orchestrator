@@ -51,6 +51,7 @@ from orchestrator.conversation_memory import conversation_memory
 from orchestrator.contextual_resolver import resolve_contextual_message
 from orchestrator.tool_executor import execute_tool
 from orchestrator.permission_policy import resolve_route_permission
+from orchestrator.tool_registry import get_capability_metadata, get_tool_metadata
 from orchestrator.department_profiles import (
     DEPARTMENT_ACCESS_DENIED_MESSAGE,
     get_department_profile,
@@ -103,6 +104,39 @@ ODOO_APPROVAL_ACTIONS = {
     "odoo_update_field_request",
 }
 
+ODOO_READ_OPERATION_VALUES = {
+    "count",
+    "describe",
+    "detail",
+    "details",
+    "find",
+    "get",
+    "inspect",
+    "list",
+    "read",
+    "search",
+    "show",
+    "summary",
+    "view",
+}
+
+ODOO_WRITE_OPERATION_VALUES = {
+    "approve",
+    "assign",
+    "cancel",
+    "change",
+    "confirm",
+    "create",
+    "delete",
+    "modify",
+    "remove",
+    "set",
+    "unlink",
+    "update",
+    "validate",
+    "write",
+}
+
 
 class ChatRequest(BaseModel):
     message: str
@@ -147,11 +181,16 @@ class ChatTechnicalMetadata(BaseModel):
     tool_used: str | None = None
     provider: str | None = None
     model: str | None = None
+    llm_success: bool | None = None
+    llm_error: str | None = None
     permission_decision: str | None = None
     department: str | None = None
     target_system: str | None = None
     odoo_model: str | None = None
     record_count: int | None = None
+    odoo_tool_steps: list[dict] | None = None
+    final_odoo_model: str | None = None
+    final_record_count: int | None = None
     retrieval_query: str | None = None
     classifier_source: str | None = None
     semantic_source: str | None = None
@@ -490,6 +529,200 @@ def _normalize_public_status(status):
     return status or "completed"
 
 
+def _classification_values(classification: dict, *keys: str):
+    values = []
+
+    for key in keys:
+        value = classification.get(key)
+
+        if value not in {None, ""}:
+            values.append(str(value).strip().lower())
+
+    semantic = classification.get("semantic_request")
+
+    if isinstance(semantic, dict):
+        for container_name in ("entities", "parameters"):
+            container = semantic.get(container_name)
+
+            if isinstance(container, dict):
+                for key in keys:
+                    value = container.get(key)
+
+                    if value not in {None, ""}:
+                        values.append(str(value).strip().lower())
+
+    for container_name in ("entities", "parameters"):
+        container = classification.get(container_name)
+
+        if isinstance(container, dict):
+            for key in keys:
+                value = container.get(key)
+
+                if value not in {None, ""}:
+                    values.append(str(value).strip().lower())
+
+    return values
+
+
+def _is_explicit_odoo_route(classification: dict):
+    return (
+        classification.get("domain") == "odoo"
+        or classification.get("target_system") == "odoo"
+        or classification.get("selected_agent") == "odoo_agent"
+        or classification.get("agent") == "odoo_agent"
+    )
+
+
+def _is_structured_odoo_write(classification: dict):
+    operation_values = _classification_values(classification, "operation")
+    action_values = _classification_values(classification, "action", "intent")
+
+    if any(value in ODOO_WRITE_OPERATION_VALUES for value in operation_values):
+        return True
+
+    if any(value in ODOO_WRITE_OPERATION_VALUES for value in action_values):
+        return True
+
+    if _classification_values(classification, "field", "new_value", "new_price"):
+        return True
+
+    if classification.get("requires_approval") is True or classification.get("approval_required") is True:
+        return True
+
+    return False
+
+
+def _is_registered_odoo_write_capability(capability: str | None):
+    if not capability:
+        return False
+
+    metadata = get_capability_metadata(capability)
+
+    if not metadata:
+        return False
+
+    return (
+        metadata.get("permission_category") == "odoo_write"
+        or str(metadata.get("io_mode") or "").startswith("write")
+        or metadata.get("requires_approval") is True
+    )
+
+
+def _unsupported_odoo_write_classification(classification: dict):
+    normalized = dict(classification)
+    normalized["domain"] = "odoo"
+    normalized["target_system"] = "odoo"
+    normalized["agent"] = "odoo_agent"
+    normalized["selected_agent"] = "odoo_agent"
+    normalized["action"] = "unsupported_capability"
+    normalized["risk_level"] = "medium"
+    normalized["risk"] = "medium"
+    normalized["requires_approval"] = False
+    normalized["approval_required"] = False
+    normalized["capability_validation_error"] = (
+        normalized.get("capability_validation_error")
+        or "Odoo write request did not select a registered safe write capability."
+    )
+    return normalized
+
+
+def _is_structured_odoo_read(classification: dict):
+    operation_values = _classification_values(classification, "operation")
+
+    if any(value in ODOO_READ_OPERATION_VALUES for value in operation_values):
+        return True
+
+    return bool(
+        _classification_values(
+            classification,
+            "business_object",
+            "query",
+            "record_keyword",
+            "target",
+            "topic",
+            "model",
+            "model_name",
+            "model_hint",
+        )
+    )
+
+
+def normalize_safe_odoo_read_fallback(classification: dict | None):
+    if not isinstance(classification, dict):
+        return classification
+
+    if not _is_explicit_odoo_route(classification):
+        return classification
+
+    if _is_structured_odoo_write(classification):
+        action = str(classification.get("action") or "").strip().lower()
+        has_known_action = action and action not in {
+            "unknown",
+            "unsupported",
+            "unsupported_capability",
+        }
+
+        if (
+            not _is_registered_odoo_write_capability(classification.get("capability"))
+            and not has_known_action
+        ):
+            return _unsupported_odoo_write_classification(classification)
+
+        return classification
+
+    capability = classification.get("capability")
+
+    if capability in {
+        "odoo.generic_read",
+        "odoo.partner_search",
+        "odoo.document_search",
+        "odoo.product_search",
+        "odoo.product_stock",
+        "odoo.inventory_summary",
+    }:
+        return classification
+
+    if not _is_structured_odoo_read(classification):
+        return classification
+
+    normalized = dict(classification)
+    normalized["request_type"] = normalized.get("request_type") or "enterprise_action"
+    normalized["intent"] = "odoo_generic_read"
+    normalized["domain"] = "odoo"
+    normalized["target_system"] = "odoo"
+    normalized["agent"] = "odoo_agent"
+    normalized["selected_agent"] = "odoo_agent"
+    normalized["capability"] = "odoo.generic_read"
+    normalized["execution_mode"] = "tool"
+    normalized["action"] = "odoo_generic_read"
+    normalized["risk_level"] = "low"
+    normalized["risk"] = "low"
+    normalized["requires_approval"] = False
+    normalized["approval_required"] = False
+    normalized["capability_validation_error"] = None
+    normalized.setdefault("parameters", {})
+
+    if not isinstance(normalized["parameters"], dict):
+        normalized["parameters"] = {}
+
+    if not normalized["parameters"].get("operation"):
+        normalized["parameters"]["operation"] = "list"
+
+    if not normalized["parameters"].get("business_object"):
+        for value in _classification_values(
+            classification,
+            "business_object",
+            "query",
+            "record_keyword",
+            "target",
+            "topic",
+        ):
+            normalized["parameters"]["business_object"] = value
+            break
+
+    return normalized
+
+
 def _extract_approval_id(result: dict):
     result_record = _as_record(result.get("result"))
     data_record = _as_record(result.get("data"))
@@ -531,6 +764,7 @@ def _build_public_technical(result: dict):
     model_response = _as_record(result.get("response"))
     selected_model = _as_record(result.get("selected_model"))
     nested_result = _as_record(result.get("result"))
+    nested_nested_result = _as_record(nested_result.get("result"))
     user = _as_record(result.get("user"))
 
     provider = (
@@ -545,6 +779,29 @@ def _build_public_technical(result: dict):
         or selected_model.get("model")
         or model_response.get("model")
     )
+    odoo_tool_steps = result.get("tool_sequence") or nested_result.get("tool_sequence")
+    final_odoo_model = (
+        result.get("odoo_model")
+        or nested_result.get("model")
+        or next(iter(result.get("models_used") or nested_result.get("models_used") or []), None)
+    )
+    final_record_count = result.get("record_count") or nested_result.get("record_count")
+    final_business_scope_status = (
+        result.get("business_scope_status")
+        or nested_result.get("business_scope_status")
+        or nested_nested_result.get("business_scope_status")
+        or agent_result.get("business_scope_status")
+    )
+
+    if not final_business_scope_status and isinstance(odoo_tool_steps, list):
+        final_business_scope_status = next(
+            (
+                item.get("business_scope_status")
+                for item in reversed(odoo_tool_steps)
+                if isinstance(item, dict) and item.get("business_scope_status")
+            ),
+            None,
+        )
     action = (
         result.get("parsed_action")
         or result.get("action")
@@ -579,12 +836,22 @@ def _build_public_technical(result: dict):
         "tool_used": result.get("tool_used") or agent_result.get("tool_used"),
         "provider": provider,
         "model": model,
+        "llm_success": (
+            result.get("llm_success")
+            if "llm_success" in result
+            else nested_result.get("llm_success")
+        ),
+        "llm_error": result.get("llm_error") or nested_result.get("llm_error"),
         "permission_decision": result.get("permission_decision"),
         "department": user.get("department"),
         "knowledge_scopes": result.get("knowledge_scopes") or nested_result.get("knowledge_scopes"),
         "target_system": result.get("target_system"),
-        "odoo_model": result.get("odoo_model") or nested_result.get("model"),
-        "record_count": result.get("record_count") or nested_result.get("record_count"),
+        "odoo_model": final_odoo_model,
+        "record_count": final_record_count,
+        "odoo_tool_steps": odoo_tool_steps,
+        "final_odoo_model": final_odoo_model,
+        "final_record_count": final_record_count,
+        "business_scope_status": final_business_scope_status,
         "retrieval_query": result.get("retrieval_query") or nested_result.get("retrieval_query"),
         "classifier_source": result.get("classifier_source"),
         "semantic_source": result.get("semantic_source"),
@@ -1203,8 +1470,27 @@ def build_direct_knowledge_response(
     if not knowledge_message and isinstance(result, dict):
         knowledge_message = result.get("answer") or result.get("message")
 
+    llm_success = (
+        agent_result.get("llm_success")
+        if isinstance(agent_result, dict)
+        else None
+    )
+    llm_error = (
+        agent_result.get("llm_error")
+        if isinstance(agent_result, dict)
+        else None
+    )
+
     if not knowledge_message:
-        knowledge_message = "Réponse informative générée par l’orchestrateur."
+        knowledge_message = (
+            "Je ne peux pas générer une réponse fiable pour le moment, car le "
+            "fournisseur LLM configuré n’est pas disponible."
+        )
+        if isinstance(agent_result, dict):
+            agent_result["llm_success"] = False
+            agent_result.setdefault("llm_error", "empty_response")
+            llm_success = False
+            llm_error = agent_result.get("llm_error")
 
     sources = []
     retrieval_query = None
@@ -1259,6 +1545,8 @@ def build_direct_knowledge_response(
         "approval_status": "not_required",
         "status": "completed",
         "message": knowledge_message,
+        "llm_success": llm_success,
+        "llm_error": llm_error,
         "parser_source": agent_result.get("parser_source", "knowledge_fallback") if isinstance(agent_result, dict) else "knowledge_fallback",
         "parsed_action": (
             classification.get("action")
@@ -1278,6 +1566,13 @@ def build_direct_knowledge_response(
 def build_direct_server_response(message: str):
     agent_result = run_server_agent(message)
     result = agent_result.get("result") if isinstance(agent_result, dict) else None
+    tool_used = agent_result.get("tool_used") if isinstance(agent_result, dict) else None
+    tool_metadata = get_tool_metadata(tool_used) if tool_used else None
+    capability = (
+        tool_metadata.get("capability")
+        if isinstance(tool_metadata, dict)
+        else None
+    )
 
     log_request({
         "event_type": "server_request",
@@ -1307,9 +1602,12 @@ def build_direct_server_response(message: str):
         "approval_status": "not_required",
         "status": agent_result.get("status", "completed") if isinstance(agent_result, dict) else "completed",
         "message": agent_result.get("message") if isinstance(agent_result, dict) else str(agent_result),
+        "domain": "server",
+        "capability": capability,
+        "execution_mode": "tool" if capability else None,
         "parser_source": agent_result.get("parser_source", "server_fallback") if isinstance(agent_result, dict) else "server_fallback",
         "parsed_action": agent_result.get("parsed_action", "unknown") if isinstance(agent_result, dict) else "unknown",
-        "tool_used": agent_result.get("tool_used") if isinstance(agent_result, dict) else None,
+        "tool_used": tool_used,
         "agent_result": agent_result,
         "result": result,
     }
@@ -1521,6 +1819,7 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
             ).to_public_dict(),
         },
     )
+    primary_classification = normalize_safe_odoo_read_fallback(primary_classification)
     primary_agent = primary_classification.get("selected_agent")
     route_permission = resolve_route_permission(primary_classification)
     department_profile = get_department_profile(current_user.get("department"))

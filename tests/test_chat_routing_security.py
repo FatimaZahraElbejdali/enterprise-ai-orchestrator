@@ -161,6 +161,376 @@ def test_inventory_product_existence_question_routes_to_odoo_agent(monkeypatch):
     assert data["requires_approval"] is False
 
 
+def test_generic_odoo_area_question_invokes_read_agent(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+
+    def fake_run_odoo_agent(message, classification=None):
+        captured["message"] = message
+        captured["classification"] = classification
+        return {
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "status": "completed",
+            "message": "Lecture Odoo générique appelée.",
+            "tool_used": "odoo_read_agent",
+            "target_system": "odoo",
+            "requires_approval": False,
+            "approval_required": False,
+        }
+
+    monkeypatch.setattr(app_module, "run_odoo_agent", fake_run_odoo_agent)
+
+    response = client.post(
+        "/chat",
+        json={"message": "What is available in the generic business area section in Odoo?"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    classification = captured["classification"]
+    assert data["status"] == "completed"
+    assert classification["selected_agent"] == "odoo_agent"
+    assert classification["capability"] == "odoo.generic_read"
+    assert classification["action"] == "odoo_generic_read"
+    assert data["technical"]["tool_used"] == "odoo_read_agent"
+
+
+def test_generic_odoo_concept_information_invokes_read_agent(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+
+    def fake_run_odoo_agent(message, classification=None):
+        captured["classification"] = classification
+        return {
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "status": "completed",
+            "message": "Lecture Odoo générique appelée.",
+            "tool_used": "odoo_read_agent",
+            "target_system": "odoo",
+            "requires_approval": False,
+            "approval_required": False,
+        }
+
+    monkeypatch.setattr(app_module, "run_odoo_agent", fake_run_odoo_agent)
+
+    response = client.post(
+        "/chat",
+        json={"message": "Show me information about generic business concept in Odoo"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    assert response.status_code == 200
+    classification = captured["classification"]
+    assert classification["capability"] == "odoo.generic_read"
+    assert classification["parameters"]["operation"] == "list"
+
+
+def test_write_like_generic_odoo_request_does_not_enter_read_loop(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+    monkeypatch.setattr(
+        app_module,
+        "run_odoo_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("write-like request should not use the generic read loop")
+        ),
+    )
+
+    response = client.post(
+        "/chat",
+        json={"message": "Update the generic business concept in Odoo"},
+        headers=auth_headers("viewer@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["technical"]["capability"] != "odoo.generic_read"
+    assert data["technical"]["permission_decision"] in {"denied", "department_denied"}
+
+
+def _unknown_odoo_read_route(capability="odoo.unknown_business_read"):
+    return {
+        "intent": "unsupported_capability",
+        "request_type": "enterprise_action",
+        "domain": "odoo",
+        "target_system": "odoo",
+        "selected_agent": "odoo_agent",
+        "agent": "odoo_agent",
+        "capability": capability,
+        "execution_mode": None,
+        "action": "unsupported_capability",
+        "risk_level": "low",
+        "risk": "low",
+        "requires_approval": False,
+        "approval_required": False,
+        "entities": {"business_object": "unknown business area"},
+        "parameters": {
+            "operation": "describe",
+            "business_object": "unknown business area",
+            "limit": 10,
+        },
+        "semantic_request": {
+            "request_type": "enterprise_action",
+            "domain": "odoo",
+            "capability": capability,
+            "requires_internal_context": False,
+            "topic": None,
+            "entities": {"business_object": "unknown business area"},
+            "parameters": {
+                "operation": "describe",
+                "business_object": "unknown business area",
+                "limit": 10,
+            },
+            "clarification_needed": False,
+            "missing_parameters": [],
+        },
+        "confidence": "high",
+        "classifier_source": "openai_structured",
+        "semantic_source": "openai_structured",
+        "capability_validation_error": (
+            f"Capability is not registered: {capability}" if capability else None
+        ),
+    }
+
+
+def test_unknown_odoo_read_capability_falls_through_to_generic_agent(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda *args, **kwargs: _unknown_odoo_read_route(),
+    )
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+
+    def fake_run_odoo_agent(message, classification=None):
+        captured["classification"] = classification
+        return {
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "status": "completed",
+            "message": "Lecture Odoo générique appelée.",
+            "tool_used": "odoo_read_agent",
+            "target_system": "odoo",
+            "requires_approval": False,
+            "approval_required": False,
+        }
+
+    monkeypatch.setattr(app_module, "run_odoo_agent", fake_run_odoo_agent)
+
+    response = client.post(
+        "/chat",
+        json={"message": "What is available in the unknown business area section in Odoo?"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    data = response.json()
+    assert response.status_code == 200
+    assert data["status"] == "completed"
+    assert captured["classification"]["capability"] == "odoo.generic_read"
+    assert captured["classification"]["action"] == "odoo_generic_read"
+    assert data["technical"]["capability"] == "odoo.generic_read"
+    assert data["technical"]["tool_used"] == "odoo_read_agent"
+
+
+def test_null_odoo_read_capability_falls_through_to_generic_agent(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda *args, **kwargs: _unknown_odoo_read_route(capability=None),
+    )
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+
+    def fake_run_odoo_agent(message, classification=None):
+        captured["classification"] = classification
+        return {
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "status": "completed",
+            "message": "Lecture Odoo générique appelée.",
+            "tool_used": "odoo_read_agent",
+            "target_system": "odoo",
+            "requires_approval": False,
+            "approval_required": False,
+        }
+
+    monkeypatch.setattr(app_module, "run_odoo_agent", fake_run_odoo_agent)
+
+    response = client.post(
+        "/chat",
+        json={"message": "Show me information about unknown business concept in Odoo"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    assert response.status_code == 200
+    assert captured["classification"]["capability"] == "odoo.generic_read"
+
+
+def test_structured_odoo_write_semantics_do_not_use_generic_read(monkeypatch):
+    route = _unknown_odoo_read_route(capability=None)
+    route["parameters"] = {
+        "operation": "update",
+        "business_object": "unknown business area",
+        "field": "status",
+        "new_value": "done",
+    }
+    route["semantic_request"]["parameters"] = dict(route["parameters"])
+
+    monkeypatch.setattr(app_module, "classify_message", lambda *args, **kwargs: route)
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+    monkeypatch.setattr(
+        app_module,
+        "run_odoo_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("write-like request should not use generic read")
+        ),
+    )
+
+    response = client.post(
+        "/chat",
+        json={"message": "Update the unknown business area in Odoo"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    data = response.json()
+    assert response.status_code == 200
+    assert data["technical"]["capability"] != "odoo.generic_read"
+
+
+def test_non_odoo_unknown_request_does_not_use_generic_odoo_read(monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda *args, **kwargs: {
+            "intent": "unsupported_capability",
+            "request_type": "enterprise_action",
+            "domain": "general",
+            "target_system": "general",
+            "selected_agent": "general_agent",
+            "agent": "general_agent",
+            "capability": None,
+            "action": "unsupported_capability",
+            "risk_level": "low",
+            "requires_approval": False,
+            "entities": {"business_object": "unknown business area"},
+            "parameters": {"operation": "describe", "business_object": "unknown business area"},
+        },
+    )
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+    monkeypatch.setattr(
+        app_module,
+        "run_odoo_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("non-Odoo request should not use Odoo")
+        ),
+    )
+
+    response = client.post(
+        "/chat",
+        json={"message": "What is available in the unknown business area?"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    data = response.json()
+    assert response.status_code == 200
+    assert data["technical"]["capability"] != "odoo.generic_read"
+
+
+def test_department_denial_still_blocks_unknown_odoo_read(monkeypatch):
+    called = {"value": False}
+
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda *args, **kwargs: _unknown_odoo_read_route(capability=None),
+    )
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+
+    def fake_run_odoo_agent(*args, **kwargs):
+        called["value"] = True
+        return {"status": "completed", "message": "should not run"}
+
+    monkeypatch.setattr(app_module, "run_odoo_agent", fake_run_odoo_agent)
+
+    response = client.post(
+        "/chat",
+        json={"message": "Show me information about unknown business concept in Odoo"},
+        headers=auth_headers("support@company.local"),
+    )
+
+    data = response.json()
+    assert response.status_code == 200
+    assert data["status"] in {"department_access_denied", "denied"}
+    assert called["value"] is False
+
+
+def test_specialized_odoo_capability_is_preserved(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda *args, **kwargs: {
+            "intent": "product_stock_check",
+            "request_type": "enterprise_action",
+            "domain": "odoo",
+            "target_system": "odoo",
+            "selected_agent": "odoo_agent",
+            "agent": "odoo_agent",
+            "capability": "odoo.product_stock",
+            "execution_mode": "tool",
+            "action": "read_product_stock",
+            "risk_level": "low",
+            "requires_approval": False,
+            "entities": {"product_name": "BACO CLEAN"},
+            "parameters": {"product_name": "BACO CLEAN"},
+        },
+    )
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+
+    def fake_run_odoo_agent(message, classification=None):
+        captured["classification"] = classification
+        return {
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "status": "completed",
+            "message": "Stock consulté.",
+            "tool_used": "odoo_product_stock",
+            "target_system": "odoo",
+            "requires_approval": False,
+            "approval_required": False,
+        }
+
+    monkeypatch.setattr(app_module, "run_odoo_agent", fake_run_odoo_agent)
+
+    response = client.post(
+        "/chat",
+        json={"message": "Quel est le stock de BACO CLEAN ?"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    assert response.status_code == 200
+    assert captured["classification"]["capability"] == "odoo.product_stock"
+
+
 def test_invoice_details_request_still_routes_to_odoo_agent(monkeypatch):
     monkeypatch.setattr(
         app_module,
@@ -226,15 +596,9 @@ def test_internal_server_list_routes_to_server_agent(monkeypatch):
     monkeypatch.setattr(
         app_module,
         "run_server_agent",
-        lambda message: {
-            "intent": "server",
-            "agent": "server_agent",
-            "parser_source": "server_fallback",
-            "parsed_action": "list_internal_files",
-            "status": "completed",
-            "message": "Fichiers listés.",
-            "result": {"success": True, "files": []},
-        },
+        lambda message: (_ for _ in ()).throw(
+            AssertionError("Unsupported server resource request must not execute")
+        ),
     )
     monkeypatch.setattr(app_module, "log_request", lambda data: None)
 
@@ -246,9 +610,10 @@ def test_internal_server_list_routes_to_server_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["technical"]["intent"] == "server"
+    assert data["status"] == "unsupported"
+    assert data["technical"]["intent"] == "unsupported_capability"
     assert data["technical"]["agent"] == "server_agent"
-    assert data["technical"]["action"] == "list_internal_files"
+    assert data["technical"]["capability"] == "unsupported_capability"
     assert data["requires_approval"] is False
 
 
@@ -256,15 +621,9 @@ def test_internal_server_create_routes_to_server_agent(monkeypatch):
     monkeypatch.setattr(
         app_module,
         "run_server_agent",
-        lambda message: {
-            "intent": "server",
-            "agent": "server_agent",
-            "parser_source": "server_fallback",
-            "parsed_action": "create_internal_file",
-            "status": "completed",
-            "message": "Fichier créé.",
-            "result": {"success": True, "filename": "test-note.txt"},
-        },
+        lambda message: (_ for _ in ()).throw(
+            AssertionError("Unsupported server resource request must not execute")
+        ),
     )
     monkeypatch.setattr(app_module, "log_request", lambda data: None)
 
@@ -278,9 +637,10 @@ def test_internal_server_create_routes_to_server_agent(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["technical"]["intent"] == "server"
+    assert data["status"] == "unsupported"
+    assert data["technical"]["intent"] == "unsupported_capability"
     assert data["technical"]["agent"] == "server_agent"
-    assert data["technical"]["action"] == "create_internal_file"
+    assert data["technical"]["capability"] == "unsupported_capability"
     assert data["requires_approval"] is False
 
 

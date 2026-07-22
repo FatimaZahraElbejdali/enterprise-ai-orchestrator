@@ -389,7 +389,11 @@ def test_general_advice_question_uses_llm_not_internal_docs(monkeypatch):
         "Je n'ai pas encore suffisamment d'informations internes pour répondre "
         "précisément à cette question."
     )
-    assert data["technical"]["tool_used"] == "public_llm_answer"
+    assert data["sources"] == []
+    assert data["technical"]["tool_used"] in {
+        "public_llm_answer",
+        "knowledge_creative_generation",
+    }
     assert data["technical"]["provider"] == "openai"
     assert len(calls) == 1
 

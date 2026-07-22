@@ -158,6 +158,102 @@ def test_general_answer_uses_direct_llm_without_retrieval(monkeypatch):
     assert data["technical"]["tool_used"] == "public_llm_answer"
 
 
+def test_writing_assistance_uses_direct_llm_without_placeholder(monkeypatch):
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda *args, **kwargs: semantic_classification(
+            request_type="writing_assistance",
+            capability="knowledge.writing_assistance",
+            execution_mode="llm_direct",
+            action="writing_assistance",
+            topic="reformulation professionnelle",
+        ),
+    )
+    monkeypatch.setattr(
+        knowledge_agent,
+        "search_knowledge",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Writing assistance should not retrieve RAG context")
+        ),
+    )
+    monkeypatch.setattr(knowledge_agent, "is_openai_configured", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        knowledge_agent,
+        "generate_response",
+        lambda **kwargs: {
+            "success": True,
+            "response": "Bonjour, je vous informe que je serai absent demain. Merci.",
+            "content": "Bonjour, je vous informe que je serai absent demain. Merci.",
+            "provider": "openai",
+            "model": "test-model",
+            "llm_success": True,
+            "llm_error": None,
+            "error": None,
+        },
+    )
+
+    response = client.post(
+        "/chat",
+        json={"message": "Reformule de manière professionnelle : bonjour je serai absent demain merci"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    data = response.json()
+    assert response.status_code == 200
+    assert data["status"] == "completed"
+    assert data["response"] == "Bonjour, je vous informe que je serai absent demain. Merci."
+    assert data["response"] != "Réponse générée par l’orchestrateur."
+    assert data["sources"] == []
+    assert data["technical"]["capability"] == "knowledge.writing_assistance"
+    assert data["technical"]["execution_mode"] == "llm_direct"
+    assert data["technical"]["tool_used"] == "knowledge_writing_assistance"
+
+
+def test_direct_llm_malformed_empty_response_uses_service_error(monkeypatch):
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda *args, **kwargs: semantic_classification(
+            request_type="general_knowledge",
+            capability="knowledge.general_answer",
+            execution_mode="llm_direct",
+            action="answer_question",
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "run_knowledge_agent",
+        lambda *args, **kwargs: {
+            "intent": "knowledge",
+            "agent": "knowledge_agent",
+            "status": "completed",
+            "tool_used": "public_llm_answer",
+            "provider": "openai",
+            "model": "test-model",
+            "llm_success": False,
+            "llm_error": "empty_response",
+            "result": {},
+        },
+    )
+
+    response = client.post(
+        "/chat",
+        json={"message": "Explique une API"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    data = response.json()
+    assert response.status_code == 200
+    assert data["response"] != "Réponse générée par l’orchestrateur."
+    assert data["response"] != "Réponse informative générée par l’orchestrateur."
+    assert "fournisseur LLM" in data["response"]
+    assert data["technical"]["llm_success"] is False
+    assert data["technical"]["llm_error"] == "empty_response"
+
+
 def test_enterprise_knowledge_uses_retrieval_grounded_mode(monkeypatch):
     monkeypatch.setattr(app_module, "log_request", lambda data: None)
     monkeypatch.setattr(

@@ -22,6 +22,37 @@ def test_classifier_routes_document_id_to_odoo(monkeypatch):
     assert result["requires_approval"] is False
 
 
+def test_classifier_overrides_bad_knowledge_route_for_document_id(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: {
+            "intent": "summarize_documentation",
+            "request_type": "general_knowledge",
+            "domain": "knowledge",
+            "capability": "knowledge.general_answer",
+            "execution_mode": "llm_direct",
+            "agent": "knowledge_agent",
+            "selected_agent": "knowledge_agent",
+            "action": "answer_question",
+            "target_system": "knowledge",
+            "risk_level": "low",
+            "requires_approval": False,
+            "entities": {},
+            "parameters": {"operation": "summarize"},
+            "confidence": "high",
+            "reason": "Provider confused an Odoo business document with documentation.",
+            "classifier_source": "openai_structured",
+            "semantic_source": "openai_structured",
+        },
+    )
+
+    result = classify_message("Montre-moi les détails du document ID 793")
+
+    assert result["intent"] == "odoo_document_details"
+    assert result["selected_agent"] == "odoo_agent"
+    assert result["capability"] == "odoo.document_details"
+
+
 def test_classifier_routes_purchase_order_reference_to_odoo(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
@@ -58,6 +89,7 @@ def test_classifier_keeps_actual_knowledge_questions(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     allowed_knowledge_intents = {
+        "general_information_question",
         "knowledge",
         "knowledge_summary",
         "explain_orchestrator",
@@ -306,7 +338,7 @@ def test_document_lines_question_returns_focused_summary(monkeypatch):
     assert result["data"]["lines"][0]["product_name"] == "BACO CLEAN"
 
 
-def test_document_details_question_keeps_normal_message(monkeypatch):
+def test_document_details_question_formats_exact_document_fields(monkeypatch):
     message = (
         "Montre-moi les détails du document Odoo BC-BPP2600313 avec l'ID 793 "
         "de type purchase_order dans Odoo ?\n\n"
@@ -319,9 +351,64 @@ def test_document_details_question_keeps_normal_message(monkeypatch):
 
     result, _calls = run_document_details_question(monkeypatch, message)
 
-    assert result["message"] == "Document consulté avec succès."
+    assert result["message"] != "Document consulté avec succès."
+    assert "BC-BPP2600313" in result["message"]
+    assert "P.A.N" in result["message"]
+    assert "ID : 793" in result["message"]
+    assert "Statut : purchase" in result["message"]
+    assert "Date : 2026-01-15" in result["message"]
+    assert "BACO CLEAN" in result["message"]
     assert result["response_focus"] is None
     assert result["data"]["document_id"] == 793
+
+
+def test_document_details_preserves_two_document_candidates(monkeypatch):
+    message = "Montre-moi les détails du document ID 793"
+    raw_result = {
+        "success": False,
+        "found": True,
+        "ambiguous": True,
+        "model": "purchase.order",
+        "record_id": None,
+        "name": "",
+        "partner": "",
+        "state": "",
+        "date": "",
+        "query": "ID 793",
+        "message": "Document ambigu — aucune modification exécutée.",
+        "candidates": [
+            {
+                "id": 793,
+                "record_id": 793,
+                "name": "BC-BPP2600313",
+                "partner": "P.A.N",
+                "state": "purchase",
+                "date": "2026-01-15",
+                "model": "purchase.order",
+            },
+            {
+                "id": 794,
+                "record_id": 794,
+                "name": "BC-BPP2600314",
+                "partner": "P.A.N",
+                "state": "draft",
+                "date": "2026-01-16",
+                "model": "purchase.order",
+            },
+        ],
+    }
+
+    result, _calls = run_document_details_question(monkeypatch, message, raw_result)
+
+    assert result["status"] == "needs_clarification"
+    assert result["message"] != "Document consulté avec succès."
+    assert "Plusieurs documents correspondent" in result["message"]
+    assert "ID 793" in result["message"]
+    assert "BC-BPP2600313" in result["message"]
+    assert "ID 794" in result["message"]
+    assert "BC-BPP2600314" in result["message"]
+    assert result["candidates"] == raw_result["candidates"]
+    assert result["data"]["candidates"] == raw_result["candidates"]
 
 
 def test_chat_routes_document_id_details_to_odoo(monkeypatch):

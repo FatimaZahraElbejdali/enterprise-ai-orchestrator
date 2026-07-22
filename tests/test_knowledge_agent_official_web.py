@@ -174,7 +174,7 @@ def test_semantic_history_variants_use_same_retrieval_path(monkeypatch):
 
         assert classification["selected_agent"] == "knowledge_agent"
         assert classification["target_system"] == "knowledge"
-        assert capability == "knowledge.general_answer"
+        assert capability == "knowledge.enterprise_answer"
         assert result["tool_used"] == "knowledge_rag_retrieval"
         assert result["sources"][0]["source_type"] == "official_web"
         assert result["sources"][0]["title"] == "Histoire du groupe"

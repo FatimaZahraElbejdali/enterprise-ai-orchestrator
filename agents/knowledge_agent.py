@@ -711,7 +711,11 @@ def _answer_from_repository_context(
             system_prompt=system_prompt,
             api_key_env=llm_project_env,
         )
-        answer = (llm_result.get("content") or "").strip()
+        answer = (
+            llm_result.get("response")
+            or llm_result.get("content")
+            or ""
+        ).strip()
         llm_success = bool(llm_result.get("success") and answer)
 
         if not llm_success:
@@ -771,7 +775,11 @@ def _answer_with_llm(
         system_prompt=system_prompt,
         api_key_env=llm_project_env,
     )
-    answer = (llm_result.get("content") or "").strip()
+    answer = (
+        llm_result.get("response")
+        or llm_result.get("content")
+        or ""
+    ).strip()
     llm_success = bool(llm_result.get("success") and answer)
 
     if not llm_success:

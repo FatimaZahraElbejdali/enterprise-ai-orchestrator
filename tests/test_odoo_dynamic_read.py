@@ -229,6 +229,62 @@ def test_dynamic_read_list_normalizes_many2one_and_filters_fields():
     assert "password" not in result["fields"]
 
 
+def test_dynamic_read_resolves_selection_display_label_filter_to_technical_value():
+    fake = FakeDynamicModels(
+        catalog=[{"model": "sale.order", "name": "Sales Order"}],
+        fields={
+            "sale.order": {
+                "name": {"string": "Order Reference", "type": "char"},
+                "is_subscription": {"string": "Recurring", "type": "boolean"},
+                "subscription_state": {
+                    "string": "Subscription Status",
+                    "type": "selection",
+                    "selection": [
+                        ("draft", "Brouillon"),
+                        ("sale", "Bon de commande"),
+                    ],
+                },
+            },
+        },
+        records={"sale.order": []},
+    )
+    connector = dynamic_connector(fake)
+
+    result = connector.dynamic_read({
+        "operation": "list",
+        "business_object": "abonnements",
+        "model_hint": "sale.order",
+        "filters": [
+            {
+                "field": "subscription_state",
+                "operator": "=",
+                "value": "Brouillon",
+            },
+        ],
+    })
+
+    search_read = [
+        call
+        for call in fake.calls
+        if call[0] == "sale.order" and call[1] == "search_read"
+    ][0]
+    domain = search_read[2][0]
+
+    assert ["subscription_state", "=", "draft"] in domain
+    assert ["subscription_state", "=", "Brouillon"] not in domain
+    assert result["validated_filters"] == [
+        {
+            "field": "subscription_state",
+            "operator": "=",
+            "value": "draft",
+            "input_value": "Brouillon",
+            "field_type": "selection",
+            "matched_selection_labels": ["Brouillon"],
+        }
+    ]
+    assert result["search_domain"] == domain
+
+
 def test_dynamic_read_ignores_nonexistent_model_hint_and_discovers_safely():
     fake = FakeDynamicModels(
         catalog=[
@@ -302,6 +358,73 @@ def test_dynamic_read_search_details_and_count_use_read_only_methods():
     assert "read" in methods
     assert "search_count" in methods
     assert not {"write", "create", "unlink"} & set(methods)
+
+
+def test_dynamic_read_list_and_count_share_business_scope_domain():
+    fake = FakeDynamicModels(
+        catalog=[{"model": "x.service.order", "name": "Service Order"}],
+        fields={
+            "x.service.order": {
+                "name": {"string": "Name", "type": "char"},
+                "is_contract": {"string": "Contract", "type": "boolean"},
+                "state": {
+                    "string": "Status",
+                    "type": "selection",
+                    "selection": [
+                        ("open", "Open"),
+                        ("closed", "Closed"),
+                    ],
+                },
+            },
+        },
+        records={
+            "x.service.order": [
+                {"id": 41, "name": "SO-001", "is_contract": True, "state": "open"},
+            ],
+        },
+    )
+    connector = dynamic_connector(fake)
+
+    list_result = connector.dynamic_read({
+        "operation": "list",
+        "business_object": "contract",
+        "model_hint": "x.service.order",
+        "filters": [{"field": "state", "operator": "=", "value": "Open"}],
+    })
+    count_result = connector.dynamic_read({
+        "operation": "count",
+        "business_object": "contract",
+        "model_hint": "x.service.order",
+        "query": "contract",
+        "filters": [{"field": "state", "operator": "=", "value": "Open"}],
+    })
+
+    search_read = [
+        call
+        for call in fake.calls
+        if call[0] == "x.service.order" and call[1] == "search_read"
+    ][0]
+    search_count = [
+        call
+        for call in fake.calls
+        if call[0] == "x.service.order" and call[1] == "search_count"
+    ][0]
+
+    expected_domain = [
+        ["is_contract", "=", True],
+        ["state", "=", "open"],
+    ]
+
+    assert list_result["model"] == "x.service.order"
+    assert count_result["model"] == "x.service.order"
+    assert list_result["search_domain"] == expected_domain
+    assert count_result["search_domain"] == expected_domain
+    assert search_read[2][0] == expected_domain
+    assert search_count[2][0] == expected_domain
+    assert list_result["business_scope_domain"] == [["is_contract", "=", True]]
+    assert count_result["business_scope_domain"] == [["is_contract", "=", True]]
+    assert count_result["query_domain"] == []
+    assert count_result["validated_filters"] == list_result["validated_filters"]
 
 
 def test_dynamic_read_ignores_nonstored_boolean_auto_domain():
@@ -402,10 +525,19 @@ def test_chat_generic_read_authorized_without_approval(monkeypatch):
             "agent": "odoo_agent",
             "status": "completed",
             "message": "Voici les premiers enregistrements trouvés dans Odoo :\n- SUB001",
-            "tool_used": "odoo_generic_read",
+            "tool_used": "odoo_read_agent",
             "target_system": "odoo",
             "odoo_model": "sale.subscription",
             "record_count": 1,
+            "tool_sequence": [
+                {
+                    "tool": "odoo.search_records",
+                    "model": "sale.subscription",
+                    "record_count": 1,
+                    "status": "completed",
+                    "validation_allowed": True,
+                }
+            ],
             "requires_approval": False,
             "approval_required": False,
         },
@@ -424,29 +556,41 @@ def test_chat_generic_read_authorized_without_approval(monkeypatch):
     assert data["technical"]["capability"] == "odoo.generic_read"
     assert data["technical"]["odoo_model"] == "sale.subscription"
     assert data["technical"]["record_count"] == 1
+    assert data["technical"]["final_odoo_model"] == "sale.subscription"
+    assert data["technical"]["final_record_count"] == 1
+    assert data["technical"]["odoo_tool_steps"] == [
+        {
+            "tool": "odoo.search_records",
+            "model": "sale.subscription",
+            "record_count": 1,
+            "status": "completed",
+            "validation_allowed": True,
+        }
+    ]
 
 
 def test_odoo_agent_generic_read_uses_structured_plan_not_product_search(monkeypatch):
     calls = []
 
-    def fake_execute_tool(tool_name, **kwargs):
-        calls.append((tool_name, kwargs))
+    def fake_read_agent(message, read_plan=None, **kwargs):
+        calls.append((message, read_plan))
         return {
-            "success": True,
-            "result": {
-                "success": True,
-                "status": "completed",
-                "model": "sale.subscription",
-                "display_name": "Subscriptions",
-                "record_count": 1,
-                "read_plan": kwargs["read_plan"],
-                "records": [
-                    {"id": 10, "name": "SUB001", "partner_id": "Client A"},
-                ],
-            },
+            "status": "completed",
+            "message": "Voici les premiers enregistrements trouvés dans Odoo :\n- SUB001",
+            "tool_used": "odoo_read_agent",
+            "models_used": ["sale.subscription"],
+            "record_count": 1,
+            "tool_sequence": [
+                {"tool": "odoo.search_records", "model": "sale.subscription", "record_count": 1, "validation_allowed": True},
+            ],
+            "stop_reason": "final_answer",
+            "provider": "openai",
+            "model": "gpt-test",
+            "llm_success": True,
+            "llm_error": None,
         }
 
-    monkeypatch.setattr(odoo_agent_module, "execute_tool", fake_execute_tool)
+    monkeypatch.setattr(odoo_agent_module, "run_odoo_read_agent", fake_read_agent)
     monkeypatch.setattr(odoo_agent_module, "parse_odoo_action_with_openai", lambda message: (_ for _ in ()).throw(AssertionError("old parser should not run")))
     monkeypatch.setattr(odoo_agent_module, "log_request", lambda data: None)
 
@@ -456,7 +600,162 @@ def test_odoo_agent_generic_read_uses_structured_plan_not_product_search(monkeyp
     )
 
     assert result["status"] == "completed"
-    assert result["tool_used"] == "odoo_generic_read"
+    assert result["tool_used"] == "odoo_read_agent"
     assert result["odoo_model"] == "sale.subscription"
-    assert calls[0][0] == "odoo_generic_read"
-    assert calls[0][1]["read_plan"]["business_object"] == "subscriptions"
+    assert calls[0][1]["business_object"] == "subscriptions"
+
+
+def test_agentic_broad_read_helper_does_not_require_predefined_capability():
+    classification = {
+        "request_type": "enterprise_action",
+        "domain": "odoo",
+        "target_system": "odoo",
+        "selected_agent": "odoo_agent",
+        "capability": "odoo.unknown_business_read",
+        "parameters": {
+            "operation": "describe",
+            "business_object": "unknown business area",
+        },
+        "entities": {"business_object": "unknown business area"},
+    }
+    parsed_action = {
+        "action": "unknown",
+        "parser_source": "test",
+        "requires_approval": False,
+        "new_value": None,
+    }
+
+    assert odoo_agent_module.should_use_agentic_broad_read(
+        "Show me information about unknown business area in Odoo",
+        classification,
+        parsed_action,
+    ) is True
+
+
+def test_agentic_broad_document_search_without_exact_target_uses_read_agent(monkeypatch):
+    calls = []
+
+    classification = {
+        "request_type": "enterprise_action",
+        "domain": "odoo",
+        "target_system": "odoo",
+        "selected_agent": "odoo_agent",
+        "capability": "odoo.document_search",
+        "parameters": {
+            "operation": "list",
+            "business_object": "recent business documents",
+            "limit": 5,
+        },
+        "entities": {},
+    }
+
+    monkeypatch.setattr(
+        odoo_agent_module,
+        "parse_odoo_action_with_openai",
+        lambda message: {
+            "action": "search_document",
+            "business_action": "document_search",
+            "target_model": "sale.order",
+            "document_query": None,
+            "document_reference": None,
+            "document_id": None,
+            "record_query": "recent business documents",
+            "requires_approval": False,
+            "needs_clarification": False,
+            "parser_source": "test",
+        },
+    )
+    monkeypatch.setattr(
+        odoo_agent_module,
+        "execute_tool",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("broad document reads should not use the specialized document tool")
+        ),
+    )
+
+    def fake_read_agent(message, read_plan=None, **kwargs):
+        calls.append((message, read_plan))
+        return {
+            "status": "completed",
+            "message": "Voici les derniers documents trouvés.",
+            "tool_used": "odoo_read_agent",
+            "models_used": ["sale.order"],
+            "record_count": 2,
+            "tool_sequence": [
+                {"tool": "odoo.search_records", "model": "sale.order", "record_count": 2, "validation_allowed": True},
+            ],
+            "provider": "openai",
+            "model": "gpt-test",
+            "llm_success": True,
+        }
+
+    monkeypatch.setattr(odoo_agent_module, "run_odoo_read_agent", fake_read_agent)
+    monkeypatch.setattr(odoo_agent_module, "log_request", lambda data: None)
+
+    result = odoo_agent_module.run("Show me the latest business documents in Odoo", classification=classification)
+
+    assert result["status"] == "completed"
+    assert result["tool_used"] == "odoo_read_agent"
+    assert result["odoo_model"] == "sale.order"
+    assert result["record_count"] == 2
+    assert calls[0][1]["operation"] == "list"
+    assert calls[0][1]["business_object"] == "recent business documents"
+
+
+def test_agentic_broad_read_helper_preserves_exact_document_search():
+    classification = {
+        "request_type": "enterprise_action",
+        "domain": "odoo",
+        "target_system": "odoo",
+        "selected_agent": "odoo_agent",
+        "capability": "odoo.document_search",
+        "parameters": {
+            "operation": "search",
+            "business_object": "supplier invoice",
+            "query": "FNP/2026/04016",
+        },
+        "entities": {"document_reference": "FNP/2026/04016"},
+    }
+    parsed_action = {
+        "action": "search_document",
+        "business_action": "document_search",
+        "document_query": "FNP/2026/04016",
+        "document_reference": "FNP/2026/04016",
+        "document_id": None,
+        "requires_approval": False,
+        "new_value": None,
+    }
+
+    assert odoo_agent_module.should_use_agentic_broad_read(
+        "Find supplier invoice FNP/2026/04016 in Odoo",
+        classification,
+        parsed_action,
+    ) is False
+
+
+def test_agentic_broad_read_helper_rejects_structured_write_semantics():
+    classification = {
+        "request_type": "enterprise_action",
+        "domain": "odoo",
+        "target_system": "odoo",
+        "selected_agent": "odoo_agent",
+        "capability": "odoo.unknown_business_write",
+        "parameters": {
+            "operation": "update",
+            "business_object": "unknown business area",
+            "field": "status",
+            "new_value": "done",
+        },
+    }
+    parsed_action = {
+        "action": "unknown",
+        "parser_source": "test",
+        "requires_approval": False,
+        "new_value": None,
+    }
+
+    assert odoo_agent_module.should_use_agentic_broad_read(
+        "Update unknown business area in Odoo",
+        classification,
+        parsed_action,
+    ) is False

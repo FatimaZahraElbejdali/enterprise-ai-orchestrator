@@ -4,6 +4,11 @@ import unicodedata
 
 from models.openai_adapter import generate_structured_response
 from orchestrator.tool_executor import execute_tool
+from agents.odoo_read_agent import run_odoo_read_agent
+from agents.odoo_response_synthesizer import (
+    normalize_odoo_read_result,
+    synthesize_odoo_read_response,
+)
 from orchestrator.risk import classify_risk
 from orchestrator.approval import requires_approval
 from orchestrator.approval_store import create_approval
@@ -264,6 +269,14 @@ def extract_product_name(message: str) -> str:
     if context_match:
         return clean_product_name(context_match.group(1))
 
+    quoted_match = (
+        re.search(r"[\"“”]([^\"“”]{2,})[\"“”]", text)
+        or re.search(r"(?<!\w)['’]([A-Za-z0-9][^'’]{1,80})['’](?!\w)", text)
+    )
+
+    if quoted_match:
+        return clean_product_name(quoted_match.group(1))
+
     patterns = [
         r"(?:stock|inventory|inventaire)\s+(?:for|of|du|de|pour)\s+(.+)",
         r"(?:check|show|view|verify|get|consult|search)\s+(?:the\s+)?(?:stock|inventory|product|details|information)\s+(?:for|of)?\s*(.+)",
@@ -379,6 +392,14 @@ def extract_inventory_product_keyword(message: str) -> str:
 
     if context_match:
         return clean_product_name(context_match.group(1))
+
+    quoted_match = (
+        re.search(r"[\"“”]([^\"“”]{2,})[\"“”]", text)
+        or re.search(r"(?<!\w)['’]([A-Za-z0-9][^'’]{1,80})['’](?!\w)", text)
+    )
+
+    if quoted_match:
+        return clean_inventory_keyword(quoted_match.group(1))
 
     patterns = [
         r"(?:matching|correspond(?:ant|ants)?\s+(?:à|a|to)|contenant|contient|avec|keyword|mot\s+cl[ée]|cat[ée]gorie|category|famille)\s+(.+?)(?:\s+(?:dans|in|sur|on|est|sont|are|is)\b|[?.!,;:]|$)",
@@ -2101,7 +2122,8 @@ def document_partner_label(raw_result: dict, focus: str | None = None) -> str:
 def _document_value(raw_result: dict, key: str):
     metadata = raw_result.get("metadata") if isinstance(raw_result.get("metadata"), dict) else {}
     document = raw_result.get("document") if isinstance(raw_result.get("document"), dict) else {}
-    return raw_result.get(key) or metadata.get(key) or document.get(key)
+    record = raw_result.get("record") if isinstance(raw_result.get("record"), dict) else {}
+    return raw_result.get(key) or metadata.get(key) or document.get(key) or record.get(key)
 
 
 def format_document_lines_summary(lines: list[dict]) -> str:
@@ -2132,6 +2154,68 @@ def format_document_lines_summary(lines: list[dict]) -> str:
     return "Articles :\n" + "\n".join(formatted_lines)
 
 
+def format_document_details_message(raw_result: dict) -> str | None:
+    if not isinstance(raw_result, dict):
+        return None
+
+    reference = (
+        _document_value(raw_result, "document_name")
+        or _document_value(raw_result, "name")
+        or _document_value(raw_result, "reference")
+    )
+    document_id = (
+        _document_value(raw_result, "document_id")
+        or _document_value(raw_result, "record_id")
+        or _document_value(raw_result, "id")
+    )
+    model_name = _document_value(raw_result, "document_model") or _document_value(raw_result, "model")
+    partner_name = (
+        _document_value(raw_result, "partner_name")
+        or _document_value(raw_result, "partner")
+    )
+    state = _document_value(raw_result, "state")
+    date_value = _document_value(raw_result, "date")
+
+    lines = raw_result.get("lines")
+    if not isinstance(lines, list):
+        document = raw_result.get("document") if isinstance(raw_result.get("document"), dict) else {}
+        record = raw_result.get("record") if isinstance(raw_result.get("record"), dict) else {}
+        lines = document.get("lines") if isinstance(document.get("lines"), list) else record.get("lines")
+
+    details = []
+
+    if reference:
+        details.append(f"Référence : {reference}")
+
+    if document_id is not None:
+        details.append(f"ID : {document_id}")
+
+    if model_name:
+        details.append(f"Type : {document_type_label(model_name)}")
+
+    if partner_name:
+        details.append(f"{document_partner_label(raw_result)} : {partner_name}")
+
+    if state:
+        details.append(f"Statut : {state}")
+
+    if date_value:
+        details.append(f"Date : {date_value}")
+
+    if not details and not lines:
+        return None
+
+    message_parts = []
+
+    if details:
+        message_parts.append("Document Odoo consulté :\n" + "\n".join(f"- {detail}" for detail in details))
+
+    if lines:
+        message_parts.append(format_document_lines_summary(lines))
+
+    return "\n\n".join(message_parts)
+
+
 def focused_document_response_message(message: str, raw_result: dict) -> tuple[str | None, str | None]:
     focus = detect_document_response_focus(message)
 
@@ -2160,6 +2244,50 @@ def focused_document_response_message(message: str, raw_result: dict) -> tuple[s
         return format_document_lines_summary(lines), focus
 
     return None, None
+
+
+def format_document_candidates_message(candidates: list[dict]) -> str | None:
+    if not candidates:
+        return None
+
+    lines = [
+        "Plusieurs documents correspondent à votre demande. Veuillez préciser lequel utiliser :"
+    ]
+
+    for candidate in candidates[:5]:
+        parts = []
+        record_id = candidate.get("record_id") or candidate.get("id")
+        name = candidate.get("name") or candidate.get("document_name")
+        model = candidate.get("model") or candidate.get("document_model")
+        partner = candidate.get("partner") or candidate.get("partner_name")
+        date_value = candidate.get("date")
+
+        if record_id is not None:
+            parts.append(f"ID {record_id}")
+
+        if name:
+            parts.append(str(name))
+
+        label = document_type_label(model) if model else None
+
+        if label:
+            parts.append(label)
+
+        if partner:
+            parts.append(f"partenaire {partner}")
+
+        if date_value:
+            parts.append(f"date {date_value}")
+
+        if parts:
+            lines.append("- " + " · ".join(parts))
+
+    remaining_count = len(candidates) - 5
+
+    if remaining_count > 0:
+        lines.append(f"- ... (+{remaining_count} autres documents)")
+
+    return "\n".join(lines)
 
 
 def document_type_label(model_name: str | None):
@@ -2739,6 +2867,154 @@ def build_odoo_read_plan(message: str, classification: dict | None = None):
     }
 
 
+def should_use_agentic_broad_read(message: str, classification: dict | None, parsed_action: dict):
+    if not isinstance(classification, dict):
+        return False
+
+    is_odoo_target = (
+        classification.get("domain") == "odoo"
+        or classification.get("target_system") == "odoo"
+        or classification.get("selected_agent") == "odoo_agent"
+        or classification.get("agent") == "odoo_agent"
+    )
+
+    if not is_odoo_target:
+        return False
+
+    values = _semantic_read_values(classification)
+    operation = str(values.get("operation") or "").lower()
+    action = str(parsed_action.get("action") or "").lower()
+    business_action = str(parsed_action.get("business_action") or "").lower()
+    document_search_actions = {"search_document", "document_search"}
+    stable_specialized_read_actions = {
+        "check_product_stock",
+        "check_stock",
+        "document_details",
+        "inventory_product_search",
+        "product_details",
+        "product_search",
+        "read_document",
+    }
+    write_operations = {
+        "approve",
+        "assign",
+        "cancel",
+        "change",
+        "confirm",
+        "create",
+        "delete",
+        "modify",
+        "remove",
+        "set",
+        "unlink",
+        "update",
+        "write",
+    }
+
+    if parsed_action.get("requires_approval") or parsed_action.get("new_value") not in {None, ""}:
+        return False
+
+    if parsed_action.get("understood_write"):
+        return False
+
+    if action in document_search_actions or business_action in document_search_actions:
+        if _has_specific_document_search_target(parsed_action, values, message, operation):
+            return False
+
+    if action in stable_specialized_read_actions or business_action in stable_specialized_read_actions:
+        return False
+
+    if operation in write_operations or action in write_operations:
+        return False
+
+    if values.get("field") or values.get("new_value") or values.get("new_price"):
+        return False
+
+    if values.get("partner_name") or values.get("document_reference") or values.get("document_id") or values.get("record_id"):
+        return False
+
+    read_operations = {
+        "count",
+        "describe",
+        "detail",
+        "details",
+        "find",
+        "get",
+        "inspect",
+        "list",
+        "read",
+        "search",
+        "show",
+        "summary",
+        "view",
+    }
+
+    if operation in read_operations:
+        return True
+
+    if values.get("business_object") or values.get("query") or values.get("record_keyword") or values.get("target"):
+        return True
+
+    return (
+        parsed_action.get("parser_source") == "fallback"
+        and parsed_action.get("record_query") == message
+    )
+
+
+def _has_specific_document_search_target(
+    parsed_action: dict,
+    semantic_values: dict,
+    message: str,
+    operation: str,
+) -> bool:
+    if parsed_action.get("document_id") or parsed_action.get("record_id"):
+        return True
+
+    if semantic_values.get("document_id") or semantic_values.get("record_id"):
+        return True
+
+    if (
+        parsed_action.get("document_reference")
+        or semantic_values.get("document_reference")
+        or extract_document_reference(message)
+    ):
+        return True
+
+    query = (
+        parsed_action.get("document_query")
+        or parsed_action.get("record_query")
+        or semantic_values.get("query")
+        or semantic_values.get("record_keyword")
+    )
+    normalized_query = normalize_label(str(query or ""))
+    normalized_message = normalize_label(message)
+
+    if not normalized_query or normalized_query == normalized_message:
+        return False
+
+    broad_document_labels = {
+        normalize_label(str(value or ""))
+        for value in (
+            semantic_values.get("business_object"),
+            semantic_values.get("document_type"),
+            parsed_action.get("document_type"),
+            parsed_action.get("target_model"),
+        )
+        if value
+    }
+    if normalized_query in broad_document_labels:
+        return False
+
+    if " " in normalized_query:
+        return False
+
+    broad_operations = {"count", "describe", "inspect", "list", "summary", "view"}
+    if operation in broad_operations:
+        return False
+
+    return True
+
+
 def _format_dynamic_field_label(field_name: str):
     labels = {
         "amount_total": "Montant",
@@ -2784,6 +3060,27 @@ def _format_dynamic_record(record: dict):
     return " - ".join(parts)
 
 
+def _synthesize_read_message(
+    message: str,
+    parsed_action: dict,
+    raw_result: dict,
+    *,
+    operation: str | None = None,
+    query_context: dict | None = None,
+):
+    normalized_result = normalize_odoo_read_result(
+        raw_result if isinstance(raw_result, dict) else {"status": "failed", "error": "invalid_result"},
+        operation=operation,
+        query_context=query_context or {},
+    )
+    synthesis = synthesize_odoo_read_response(
+        user_message=message,
+        semantic_request=parsed_action,
+        normalized_result=normalized_result,
+    )
+    return synthesis.get("response"), normalized_result, synthesis
+
+
 def build_dynamic_read_response(message: str, parsed_action: dict, raw_result: dict):
     status = raw_result.get("status")
 
@@ -2814,21 +3111,14 @@ def build_dynamic_read_response(message: str, parsed_action: dict, raw_result: d
         }, parsed_action, "odoo_generic_read")
 
     operation = (raw_result.get("read_plan") or {}).get("operation")
-    model_label = raw_result.get("display_name") or raw_result.get("model") or "enregistrements"
     count = raw_result.get("record_count") or 0
-
-    if operation == "count":
-        message_text = f"J’ai trouvé {count} enregistrement(s) pour {model_label} dans Odoo."
-    else:
-        records = raw_result.get("records") or []
-        if records:
-            lines = [
-                f"- {_format_dynamic_record(record)}"
-                for record in records[:10]
-            ]
-            message_text = "Voici les premiers enregistrements trouvés dans Odoo :\n" + "\n".join(lines)
-        else:
-            message_text = "Aucun enregistrement correspondant trouvé dans Odoo."
+    message_text, normalized_read, synthesis = _synthesize_read_message(
+        message,
+        parsed_action,
+        raw_result,
+        operation=operation,
+        query_context=raw_result.get("read_plan") or {},
+    )
 
     return with_parser_debug({
         "intent": "odoo",
@@ -2843,9 +3133,84 @@ def build_dynamic_read_response(message: str, parsed_action: dict, raw_result: d
         "target_system": "odoo",
         "odoo_model": raw_result.get("model"),
         "record_count": count,
+        "normalized_read_result": normalized_read,
+        "response_synthesis": synthesis,
         "data": raw_result,
         "result": raw_result,
     }, parsed_action, "odoo_generic_read")
+
+
+def build_agentic_read_response(message: str, parsed_action: dict, read_plan: dict):
+    raw_result = run_odoo_read_agent(
+        message,
+        read_plan=read_plan,
+    )
+
+    if raw_result.get("stop_reason") == "provider_error":
+        raw_result = unwrap_tool_response(
+            execute_tool("odoo_generic_read", read_plan=read_plan)
+        )
+        return build_dynamic_read_response(message, parsed_action, raw_result)
+
+    response = with_parser_debug({
+        "intent": "odoo",
+        "agent": "odoo_agent",
+        "risk": "low",
+        "risk_level": "low",
+        "requires_approval": False,
+        "approval_required": False,
+        "status": raw_result.get("status", "completed"),
+        "message": raw_result.get("message") or "Lecture Odoo terminée.",
+        "tool_used": "odoo_read_agent",
+        "target_system": "odoo",
+        "odoo_model": next(iter(raw_result.get("models_used", [])), None),
+        "record_count": raw_result.get("record_count") or 0,
+        "business_scope_status": raw_result.get("business_scope_status"),
+        "provider": raw_result.get("provider"),
+        "model": raw_result.get("model"),
+        "llm_success": raw_result.get("llm_success"),
+        "llm_error": raw_result.get("llm_error"),
+        "data": {
+            "tool_sequence": raw_result.get("tool_sequence", []),
+            "models_used": raw_result.get("models_used", []),
+            "record_count": raw_result.get("record_count") or 0,
+            "business_scope_status": raw_result.get("business_scope_status"),
+            "stop_reason": raw_result.get("stop_reason"),
+        },
+        "result": raw_result,
+    }, parsed_action, "odoo_generic_read")
+
+    log_request({
+        "event_type": "odoo_read",
+        "title": "Lecture Odoo générique",
+        "system": "odoo",
+        "agent": "odoo_agent",
+        "status": response.get("status", "completed"),
+        "risk": "low",
+        "approval_status": "not_required",
+        "user_message": message,
+        "action": "odoo_generic_read",
+        "target_model": response.get("odoo_model"),
+        "record_count": response.get("record_count"),
+        "business_scope_status": response.get("business_scope_status"),
+        "tool_sequence": [
+            {
+                "tool": item.get("tool"),
+                "model": item.get("model"),
+                "record_count": item.get("record_count"),
+                "group_by": item.get("group_by"),
+                "group_count": item.get("group_count"),
+                "business_scope_status": item.get("business_scope_status"),
+                "status": item.get("status"),
+                "validation_allowed": item.get("validation_allowed"),
+            }
+            for item in raw_result.get("tool_sequence", [])
+            if isinstance(item, dict)
+        ],
+        "message": "Lecture Odoo consultative via agent de lecture borné.",
+    })
+
+    return response
 
 
 def run(message: str, classification: dict | None = None):
@@ -2867,35 +3232,9 @@ def run(message: str, classification: dict | None = None):
             "parser_error": classification.get("classifier_error"),
             "entities": _semantic_read_values(classification),
         }
-        raw_result = unwrap_tool_response(
-            execute_tool("odoo_generic_read", read_plan=read_plan)
-        )
+        result = build_agentic_read_response(message, parsed_action, read_plan)
 
-        if not isinstance(raw_result, dict):
-            raw_result = {
-                "success": False,
-                "status": "failed",
-                "records": [],
-                "record_count": 0,
-                "message": "Odoo generic read returned an invalid response.",
-            }
-
-        log_request({
-            "event_type": "odoo_read",
-            "title": "Lecture Odoo générique",
-            "system": "odoo",
-            "agent": "odoo_agent",
-            "status": "completed" if raw_result.get("success") else raw_result.get("status", "failed"),
-            "risk": "low",
-            "approval_status": "not_required",
-            "user_message": message,
-            "action": "odoo_generic_read",
-            "target_model": raw_result.get("model"),
-            "record_count": raw_result.get("record_count"),
-            "message": "Lecture Odoo consultative via découverte de modèle.",
-        })
-
-        return build_dynamic_read_response(message, parsed_action, raw_result)
+        return result
 
     parsed_action = parse_odoo_action_with_openai(message)
     action = parsed_action.get("action")
@@ -2910,6 +3249,18 @@ def run(message: str, classification: dict | None = None):
         parsed_action["clarification_reason"] = None
 
     if parsed_action.get("needs_clarification"):
+        if should_use_agentic_broad_read(message, classification, parsed_action):
+            read_plan = build_odoo_read_plan(message, classification)
+            read_plan["operation"] = read_plan.get("operation") or "list"
+            read_plan["business_object"] = read_plan.get("business_object") or message
+            return build_agentic_read_response(message, parsed_action, read_plan)
+
+        if action in {"search_document", "odoo_search_records"} and not parsed_action.get("understood_write"):
+            read_plan = build_odoo_read_plan(message, classification)
+            read_plan["operation"] = read_plan.get("operation") or "list"
+            read_plan["business_object"] = read_plan.get("business_object") or message
+            return build_agentic_read_response(message, parsed_action, read_plan)
+
         reason = parsed_action.get("clarification_reason")
         return build_needs_clarification_response(
             message,
@@ -2930,6 +3281,11 @@ def run(message: str, classification: dict | None = None):
             parsed_action,
             ["nom du produit"],
         )
+
+    if should_use_agentic_broad_read(message, classification, parsed_action):
+        read_plan = build_odoo_read_plan(message, classification)
+        read_plan["business_object"] = read_plan.get("business_object") or message
+        return build_agentic_read_response(message, parsed_action, read_plan)
 
     if (
         action == "unknown"
@@ -3009,6 +3365,13 @@ def run(message: str, classification: dict | None = None):
         record_id = parsed_action.get("record_id")
         keyword = parsed_action.get("record_query") or extract_generic_keyword(message, parsed_action)
 
+        if should_use_agentic_broad_read(message, classification, parsed_action):
+            read_plan = build_odoo_read_plan(message, classification)
+            read_plan["operation"] = read_plan.get("operation") or "list"
+            read_plan["business_object"] = read_plan.get("business_object") or message
+            read_plan["model_hint"] = read_plan.get("model_hint") or target_model
+            return build_agentic_read_response(message, parsed_action, read_plan)
+
         if target_model not in ALLOWED_GENERIC_READ_MODELS:
             return build_needs_clarification_response(
                 message,
@@ -3017,11 +3380,11 @@ def run(message: str, classification: dict | None = None):
             )
 
         if action == "odoo_search_records" and not keyword:
-            return build_needs_clarification_response(
-                message,
-                parsed_action,
-                ["mot-clé de recherche"],
-            )
+            read_plan = build_odoo_read_plan(message, classification)
+            read_plan["operation"] = "list"
+            read_plan["business_object"] = read_plan.get("business_object") or message
+            read_plan["model_hint"] = read_plan.get("model_hint") or target_model
+            return build_agentic_read_response(message, parsed_action, read_plan)
 
         if action == "odoo_get_record_details" and record_id is None and not keyword:
             return build_needs_clarification_response(
@@ -3051,6 +3414,18 @@ def run(message: str, classification: dict | None = None):
 
         found = bool(isinstance(raw_result, dict) and raw_result.get("found"))
         ambiguous = bool(isinstance(raw_result, dict) and raw_result.get("ambiguous"))
+        message_text, normalized_read, synthesis = _synthesize_read_message(
+            message,
+            parsed_action,
+            raw_result if isinstance(raw_result, dict) else {},
+            operation="read" if action == "odoo_get_record_details" else "search",
+            query_context={
+                "operation": "read" if action == "odoo_get_record_details" else "search",
+                "model": target_model,
+                "record_id": record_id,
+                "query": keyword,
+            },
+        )
 
         log_request({
             "event_type": "odoo_read",
@@ -3078,15 +3453,11 @@ def run(message: str, classification: dict | None = None):
             "message": (
                 "Plusieurs enregistrements correspondent à votre demande. Veuillez préciser lequel choisir."
                 if ambiguous
-                else (
-                    "Enregistrements Odoo trouvés."
-                    if found and action == "odoo_search_records"
-                    else "Détails Odoo consultés avec succès."
-                    if found
-                    else "Aucun enregistrement correspondant trouvé dans Odoo."
-                )
+                else message_text
             ),
             "tool_used": "odoo_get_record_details" if action == "odoo_get_record_details" else "odoo_search_records",
+            "normalized_read_result": normalized_read,
+            "response_synthesis": synthesis,
             "data": raw_result,
             "result": raw_result,
             "candidates": raw_result.get("candidates", []) if isinstance(raw_result, dict) else [],
@@ -3098,6 +3469,22 @@ def run(message: str, classification: dict | None = None):
         data = normalize_stock_result(raw_result, action)
 
         found = bool(data.get("found"))
+        message_text, normalized_read, synthesis = _synthesize_read_message(
+            message,
+            parsed_action,
+            {
+                **(raw_result if isinstance(raw_result, dict) else {}),
+                "found": found,
+                "success": found,
+                "record": data,
+                "records": [data] if found else [],
+            },
+            operation="read",
+            query_context={
+                "requested_entity": product_name,
+                "operation": "read",
+            },
+        )
 
         log_request({
             "event_type": "odoo_read",
@@ -3122,8 +3509,10 @@ def run(message: str, classification: dict | None = None):
             "requires_approval": False,
             "approval_required": False,
             "status": "completed" if found else "not_found",
-            "message": "Données produit consultées avec succès." if found else "Produit introuvable dans Odoo.",
+            "message": message_text,
             "tool_used": "odoo_check_stock",
+            "normalized_read_result": normalized_read,
+            "response_synthesis": synthesis,
             "data": data,
             "result": raw_result,
         }, parsed_action, action)
@@ -3148,10 +3537,15 @@ def run(message: str, classification: dict | None = None):
 
         raw_result = search_product(product_name)
         found = bool(isinstance(raw_result, dict) and raw_result.get("found"))
-        message_text = (
-            "Produits correspondants trouvés dans l’inventaire Odoo."
-            if found
-            else "Aucun produit correspondant trouvé dans l’inventaire Odoo."
+        message_text, normalized_read, synthesis = _synthesize_read_message(
+            message,
+            parsed_action,
+            raw_result if isinstance(raw_result, dict) else {},
+            operation="search",
+            query_context={
+                "requested_entity": product_name,
+                "operation": "search",
+            },
         )
 
         log_request({
@@ -3183,6 +3577,8 @@ def run(message: str, classification: dict | None = None):
             "status": "completed" if found else "not_found",
             "message": message_text,
             "tool_used": "odoo_search_product",
+            "normalized_read_result": normalized_read,
+            "response_synthesis": synthesis,
             "data": raw_result,
             "result": raw_result,
         }, parsed_action, action)
@@ -3232,11 +3628,42 @@ def run(message: str, classification: dict | None = None):
 
         found = bool(isinstance(raw_result, dict) and raw_result.get("found"))
         ambiguous = bool(isinstance(raw_result, dict) and raw_result.get("ambiguous"))
+        candidates = raw_result.get("candidates", []) if isinstance(raw_result, dict) else []
+        candidates_message = (
+            format_document_candidates_message(candidates)
+            if ambiguous or len(candidates) > 1
+            else None
+        )
         focused_message, response_focus = (
             focused_document_response_message(message, raw_result)
-            if found and not ambiguous
+            if found and not ambiguous and not candidates_message
             else (None, None)
         )
+        details_message = (
+            format_document_details_message(raw_result)
+            if found and not ambiguous and not candidates_message and not focused_message
+            else None
+        )
+        synthesized_document_message, normalized_read, synthesis = _synthesize_read_message(
+            message,
+            parsed_action,
+            raw_result if isinstance(raw_result, dict) else {},
+            operation="read" if action == "document_details" or document_id is not None else "search",
+            query_context={
+                "operation": "read" if action == "document_details" or document_id is not None else "search",
+                "model": target_model,
+                "record_id": document_id,
+                "query": document_query,
+            },
+        )
+        if candidates_message:
+            document_message = candidates_message
+        else:
+            document_message = (
+                focused_message
+                or details_message
+                or synthesized_document_message
+            )
 
         log_request({
             "event_type": "odoo_read",
@@ -3261,15 +3688,15 @@ def run(message: str, classification: dict | None = None):
             "risk_level": "low",
             "requires_approval": False,
             "approval_required": False,
-            "status": "completed" if found else "not_found",
-            "message": (
-                focused_message
-                or ("Document consulté avec succès." if found else "Document introuvable dans Odoo.")
-            ),
+            "status": "needs_clarification" if candidates_message else ("completed" if found else "not_found"),
+            "message": document_message,
             "response_focus": response_focus,
             "tool_used": tool_name,
+            "normalized_read_result": normalized_read,
+            "response_synthesis": synthesis,
             "data": raw_result,
             "result": raw_result,
+            "candidates": candidates,
         }, parsed_action, action)
 
     if "customer" in message.lower() or "client" in message.lower():

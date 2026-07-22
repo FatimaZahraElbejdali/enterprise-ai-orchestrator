@@ -82,6 +82,29 @@ def _extract_text(response) -> str:
     return "\n".join(chunks).strip()
 
 
+def _normalized_text_result(
+    *,
+    provider: str,
+    model: str,
+    text: str = "",
+    success: bool = False,
+    error: str | None = None,
+) -> dict:
+    response_text = (text or "").strip()
+    llm_success = bool(success and response_text)
+
+    return {
+        "provider": provider,
+        "model": model,
+        "success": llm_success,
+        "content": response_text,
+        "response": response_text,
+        "llm_success": llm_success,
+        "llm_error": None if llm_success else error,
+        "error": None if llm_success else error,
+    }
+
+
 def generate_response(
     prompt: str,
     system_prompt: str | None = None,
@@ -93,13 +116,12 @@ def generate_response(
     api_key = _get_api_key(api_key_env)
 
     if not api_key or OpenAI is None:
-        return {
-            "provider": "openai",
-            "model": selected_model,
-            "success": False,
-            "content": "",
-            "error": "missing_api_key",
-        }
+        return _normalized_text_result(
+            provider="openai",
+            model=selected_model,
+            success=False,
+            error="missing_api_key",
+        )
 
     try:
         client = OpenAI(
@@ -118,22 +140,21 @@ def generate_response(
         response = client.responses.create(**request)
         content = _extract_text(response)
 
-        return {
-            "provider": "openai",
-            "model": selected_model,
-            "success": True,
-            "content": content,
-            "error": None,
-        }
+        return _normalized_text_result(
+            provider="openai",
+            model=selected_model,
+            text=content,
+            success=True,
+            error="empty_response",
+        )
 
     except Exception as error:
-        return {
-            "provider": "openai",
-            "model": selected_model,
-            "success": False,
-            "content": "",
-            "error": error.__class__.__name__,
-        }
+        return _normalized_text_result(
+            provider="openai",
+            model=selected_model,
+            success=False,
+            error=error.__class__.__name__,
+        )
 
 
 def generate_structured_response(

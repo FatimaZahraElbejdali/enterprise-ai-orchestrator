@@ -936,8 +936,71 @@ def test_inventory_product_search_calls_odoo_with_extracted_keyword(monkeypatch)
     assert result["parsed_action"] == "inventory_product_search"
     assert result["tool_used"] == "odoo_search_product"
     assert result["status"] == "completed"
-    assert "Produits correspondants trouvés" in result["message"]
+    assert "NETTOYAGE SOL" in result["message"]
+    assert "NET-SOL" in result["message"]
+    assert "Produits correspondants trouvés" not in result["message"]
     assert result["result"]["results"][0]["default_code"] == "NET-SOL"
+
+
+def test_product_existence_uses_specialized_search_before_generic_read(monkeypatch):
+    captured = {}
+
+    def fake_execute_tool(tool_name, **kwargs):
+        captured["call"] = {
+            "tool_name": tool_name,
+            "kwargs": kwargs,
+        }
+        return {
+            "success": True,
+            "result": {
+                "success": True,
+                "source": "mock_odoo",
+                "model": "product.product",
+                "product": kwargs["product_name"],
+                "found": True,
+                "results": [
+                    {
+                        "id": 99,
+                        "name": "TEST PRODUCT",
+                        "default_code": "TEST-PROD",
+                        "qty_available": 3,
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: parsed_inventory_product_search_action(record_query="TEST PRODUCT"),
+    )
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
+    monkeypatch.setattr(
+        "agents.odoo_agent.run_odoo_read_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("generic Odoo read agent should not handle product existence")
+        ),
+    )
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent(
+        "Vérifie si l'article TEST PRODUCT existe dans le stock Odoo",
+        classification={
+            "domain": "odoo",
+            "target_system": "odoo",
+            "selected_agent": "odoo_agent",
+            "action": "read_odoo",
+            "risk_level": "low",
+            "requires_approval": False,
+        },
+    )
+
+    assert captured["call"]["tool_name"] == "odoo_search_product"
+    assert captured["call"]["kwargs"]["product_name"] == "TEST PRODUCT"
+    assert result["status"] == "completed"
+    assert result["tool_used"] == "odoo_search_product"
+    assert result["parsed_action"] == "inventory_product_search"
+    assert result["result"]["results"][0]["name"] == "TEST PRODUCT"
+    assert "Précision requise" not in result["message"]
 
 
 def test_inventory_product_search_not_found_returns_clean_message(monkeypatch):
@@ -965,7 +1028,10 @@ def test_inventory_product_search_not_found_returns_clean_message(monkeypatch):
 
     assert result["status"] == "not_found"
     assert result["approval_required"] is False
-    assert "Aucun produit correspondant trouvé" in result["message"]
+    assert result["message"]
+    assert result["result"]["product"] == "xyz"
+    assert result["result"]["results"] == []
+    assert "Aucun produit correspondant trouvé" not in result["message"]
     assert "JSON" not in result["message"]
 
 

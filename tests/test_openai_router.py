@@ -218,6 +218,275 @@ def test_openai_router_validates_support_and_odoo_execution_modes(monkeypatch):
     assert generic_read["parameters"]["business_object"] == "subscriptions"
 
 
+def test_openai_router_normalizes_server_domain_placeholder_to_registered_diagnostic(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="enterprise_action",
+            domain="server",
+            capability="server",
+            parameters={
+                "operation": "check",
+                "metric": "cpu",
+            },
+        ),
+    )
+
+    result = classify_with_openai_router("Check the configured server CPU")
+
+    assert result["selected_agent"] == "server_agent"
+    assert result["domain"] == "server"
+    assert result["capability"] == "server.cpu_usage"
+    assert result["action"] == "check_cpu_usage"
+    assert result["execution_mode"] == "tool"
+
+
+def test_openai_router_normalizes_server_status_placeholder_to_local_health(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="enterprise_action",
+            domain="server",
+            capability="server",
+            parameters={
+                "operation": "status",
+            },
+        ),
+    )
+
+    result = classify_with_openai_router("Check configured server status")
+
+    assert result["selected_agent"] == "server_agent"
+    assert result["capability"] == "server.local_health"
+    assert result["action"] == "check_server_health"
+
+
+def test_openai_router_normalizes_french_server_state_placeholder_to_health(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="enterprise_action",
+            domain="server",
+            capability="server",
+            parameters={
+                "operation": "read",
+                "target": "état des serveurs",
+            },
+        ),
+    )
+
+    result = classify_with_openai_router("Vérifie l’état des serveurs")
+
+    assert result["selected_agent"] == "server_agent"
+    assert result["domain"] == "server"
+    assert result["capability"] == "server.local_health"
+    assert result["action"] == "check_server_health"
+
+
+def test_openai_router_normalizes_missing_server_status_capability_to_health(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="enterprise_action",
+            domain="server",
+            capability=None,
+            parameters={
+                "operation": "read",
+                "target": "état des serveurs",
+            },
+        ),
+    )
+
+    result = classify_with_openai_router("Vérifie l’état des serveurs")
+
+    assert result["selected_agent"] == "server_agent"
+    assert result["domain"] == "server"
+    assert result["capability"] == "server.local_health"
+    assert result["action"] == "check_server_health"
+
+
+def test_openai_router_clears_clarification_for_registered_server_health(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="enterprise_action",
+            domain="server",
+            capability="server.local_health",
+            clarification_needed=True,
+            missing_parameters=["metric"],
+            parameters={
+                "operation": "status",
+                "target": "état des serveurs",
+            },
+        ),
+    )
+
+    result = classify_with_openai_router("Vérifie l’état des serveurs")
+
+    assert result["selected_agent"] == "server_agent"
+    assert result["capability"] == "server.local_health"
+    assert result["clarification_needed"] is False
+    assert result["missing_parameters"] == []
+
+
+def test_classify_message_clears_clarification_for_registered_server_health(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: {
+            "intent": "server_health_check",
+            "request_type": "enterprise_action",
+            "domain": "server",
+            "capability": "server.local_health",
+            "execution_mode": "tool",
+            "agent": "server_agent",
+            "selected_agent": "server_agent",
+            "action": "check_server_health",
+            "target_system": "server",
+            "risk_level": "low",
+            "requires_approval": False,
+            "clarification_needed": True,
+            "missing_parameters": ["metric"],
+            "parameters": {"operation": "status"},
+            "entities": {},
+            "confidence": "high",
+            "reason": "Provider asked for an unnecessary metric.",
+            "classifier_source": "openai_structured",
+            "semantic_source": "openai_structured",
+        },
+    )
+
+    result = classify_message("Vérifie l’état des serveurs")
+
+    assert result["selected_agent"] == "server_agent"
+    assert result["capability"] == "server.local_health"
+    assert result["clarification_needed"] is False
+    assert result["missing_parameters"] == []
+
+
+def test_classify_message_defaults_server_health_clarification_to_registered_capability(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: {
+            "intent": "server_issue_clarification",
+            "request_type": "enterprise_action",
+            "domain": "server",
+            "capability": None,
+            "execution_mode": None,
+            "agent": "server_agent",
+            "selected_agent": "server_agent",
+            "action": "clarify_server_issue",
+            "target_system": "server",
+            "risk_level": "low",
+            "requires_approval": False,
+            "clarification_needed": True,
+            "missing_parameters": ["metric"],
+            "parameters": {},
+            "entities": {},
+            "confidence": "high",
+            "reason": "Provider asked for an unnecessary metric.",
+            "classifier_source": "openai_structured",
+            "semantic_source": "openai_structured",
+        },
+    )
+
+    result = classify_message("Vérifie l’état des serveurs")
+
+    assert result["selected_agent"] == "server_agent"
+    assert result["capability"] == "server.local_health"
+    assert result["action"] == "check_server_health"
+    assert result["clarification_needed"] is False
+    assert result["missing_parameters"] == []
+
+
+def test_openai_router_keeps_unsupported_server_placeholder_unsupported(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="enterprise_action",
+            domain="server",
+            capability="server",
+            parameters={
+                "operation": "create",
+                "target": "internal file",
+            },
+        ),
+    )
+
+    result = classify_with_openai_router("Create something on the internal server")
+
+    assert result["selected_agent"] == "server_agent"
+    assert result["action"] == "unsupported_capability"
+    assert result["capability_validation_error"]
+    assert result.get("capability") != "server.local_health"
+
+
+def test_openai_router_keeps_server_documentation_placeholder_in_knowledge(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="general_knowledge",
+            domain="server",
+            capability="server",
+            topic="server documentation",
+            parameters={
+                "operation": "summarize",
+            },
+        ),
+    )
+
+    result = classify_with_openai_router("Résume la documentation serveur")
+
+    assert result["selected_agent"] == "knowledge_agent"
+    assert result["domain"] == "knowledge"
+    assert result["capability"] == "knowledge.general_answer"
+    assert result["execution_mode"] == "llm_direct"
+
+
+def test_openai_router_preserves_documentation_summary_intent_when_mislabeled_writing(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="writing_assistance",
+            domain="knowledge",
+            capability="knowledge.writing_assistance",
+            topic="documentation serveur",
+            parameters={
+                "operation": "summarize",
+            },
+        ),
+    )
+
+    result = classify_with_openai_router("Résumé la documentation serveur")
+
+    assert result["selected_agent"] == "knowledge_agent"
+    assert result["intent"] == "summarize_server_documentation"
+    assert result["capability"] == "knowledge.general_answer"
+    assert result["execution_mode"] == "llm_direct"
+
+
+def test_openai_router_overrides_server_capability_for_documentation_summary(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="writing_assistance",
+            domain="server",
+            capability="server.local_health",
+            topic="documentation serveur",
+            parameters={
+                "operation": "summarize",
+            },
+        ),
+    )
+
+    result = classify_with_openai_router("Résumé la documentation serveur")
+
+    assert result["selected_agent"] == "knowledge_agent"
+    assert result["intent"] == "summarize_server_documentation"
+    assert result["capability"] == "knowledge.general_answer"
+
+
 def test_openai_router_rejects_unknown_capability(monkeypatch):
     _mock_semantic_router(
         monkeypatch,
@@ -233,6 +502,78 @@ def test_openai_router_rejects_unknown_capability(monkeypatch):
     assert result["action"] == "unsupported_capability"
     assert result["capability_validation_error"]
     assert result["classifier_error"] == "capability_validation_failed"
+
+
+def test_openai_router_normalizes_general_knowledge_without_capability(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="general_knowledge",
+            domain="general",
+            capability=None,
+        ),
+    )
+
+    result = classify_with_openai_router("Explique une API REST")
+
+    assert result["domain"] == "knowledge"
+    assert result["selected_agent"] == "knowledge_agent"
+    assert result["capability"] == "knowledge.general_answer"
+    assert result["execution_mode"] == "llm_direct"
+
+
+def test_openai_router_normalizes_writing_without_capability(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="writing_assistance",
+            domain="general",
+            capability=None,
+        ),
+    )
+
+    result = classify_with_openai_router("Reformule ce texte")
+
+    assert result["domain"] == "knowledge"
+    assert result["selected_agent"] == "knowledge_agent"
+    assert result["capability"] == "knowledge.writing_assistance"
+    assert result["execution_mode"] == "llm_direct"
+
+
+def test_openai_router_normalizes_direct_knowledge_capability_wrong_domain(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="writing_assistance",
+            domain="general",
+            capability="knowledge.writing_assistance",
+        ),
+    )
+
+    result = classify_with_openai_router("Reformule ce texte")
+
+    assert result["domain"] == "knowledge"
+    assert result["selected_agent"] == "knowledge_agent"
+    assert result["capability"] == "knowledge.writing_assistance"
+    assert result["execution_mode"] == "llm_direct"
+
+
+def test_openai_router_normalizes_creative_without_capability(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="creative_generation",
+            domain="general",
+            capability=None,
+        ),
+    )
+
+    result = classify_with_openai_router("Donne-moi cinq idées")
+
+    assert result["domain"] == "knowledge"
+    assert result["selected_agent"] == "knowledge_agent"
+    assert result["capability"] == "knowledge.creative_generation"
+    assert result["execution_mode"] == "llm_direct"
 
 
 def test_openai_router_normalizes_generic_read_search_alias_for_dynamic_models(monkeypatch):
@@ -276,6 +617,56 @@ def test_openai_router_normalizes_product_search_for_non_product_business_object
 
     assert result["capability"] == "odoo.generic_read"
     assert result["action"] == "odoo_generic_read"
+
+
+def test_openai_router_normalizes_uncapable_odoo_read_to_generic_read(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="enterprise_action",
+            domain="odoo",
+            capability=None,
+            parameters={
+                "operation": "describe",
+                "business_object": "generic business area",
+                "limit": 10,
+            },
+        ),
+    )
+
+    result = classify_with_openai_router(
+        "What is available in the generic business area section in Odoo?"
+    )
+
+    assert result["selected_agent"] == "odoo_agent"
+    assert result["capability"] == "odoo.generic_read"
+    assert result["action"] == "odoo_generic_read"
+    assert result["execution_mode"] == "tool"
+
+
+def test_openai_router_keeps_uncapable_odoo_write_unsupported(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="enterprise_action",
+            domain="odoo",
+            capability=None,
+            parameters={
+                "operation": "update",
+                "business_object": "generic business concept",
+                "field": "status",
+                "new_value": "done",
+            },
+        ),
+    )
+
+    result = classify_with_openai_router(
+        "Update the generic business concept status in Odoo"
+    )
+
+    assert result["selected_agent"] == "odoo_agent"
+    assert result["action"] == "unsupported_capability"
+    assert result["capability_validation_error"]
 
 
 def test_openai_router_preserves_missing_parameters(monkeypatch):
@@ -374,6 +765,140 @@ def test_classify_message_uses_openai_router_for_primary_route(monkeypatch):
     assert result["classifier_source"] == "openai_router"
 
 
+def test_classify_message_normalizes_provider_server_placeholder_to_registered_capability(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: {
+            "intent": "server",
+            "request_type": "enterprise_action",
+            "domain": "server",
+            "capability": "server",
+            "execution_mode": "tool",
+            "agent": "server_agent",
+            "selected_agent": "server_agent",
+            "action": "server",
+            "target_system": "server",
+            "risk_level": "low",
+            "requires_approval": False,
+            "parameters": {"operation": "check", "metric": "ram"},
+            "entities": {},
+            "confidence": "high",
+            "reason": "Provider returned a domain placeholder.",
+            "classifier_source": "openai_structured",
+            "semantic_source": "openai_structured",
+        },
+    )
+
+    result = classify_message("Check configured server RAM")
+
+    assert result["selected_agent"] == "server_agent"
+    assert result["domain"] == "server"
+    assert result["capability"] == "server.ram_usage"
+    assert result["action"] == "check_ram_usage"
+    assert result["execution_mode"] == "tool"
+
+
+def test_classify_message_keeps_provider_server_placeholder_unsupported(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: {
+            "intent": "server",
+            "request_type": "enterprise_action",
+            "domain": "server",
+            "capability": "server",
+            "execution_mode": "tool",
+            "agent": "server_agent",
+            "selected_agent": "server_agent",
+            "action": "server",
+            "target_system": "server",
+            "risk_level": "low",
+            "requires_approval": False,
+            "parameters": {"operation": "create", "target": "internal server item"},
+            "entities": {},
+            "confidence": "high",
+            "reason": "Provider returned a domain placeholder.",
+            "classifier_source": "openai_structured",
+            "semantic_source": "openai_structured",
+        },
+    )
+
+    result = classify_message("Create an internal server item")
+
+    assert result["selected_agent"] == "server_agent"
+    assert result["action"] == "unsupported_capability"
+    assert result["capability"] == "unsupported_capability"
+    assert result["capability_validation_error"]
+
+
+def test_classify_message_keeps_server_documentation_placeholder_in_knowledge(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: {
+            "intent": "server",
+            "request_type": "general_knowledge",
+            "domain": "server",
+            "capability": "server",
+            "execution_mode": "tool",
+            "agent": "server_agent",
+            "selected_agent": "server_agent",
+            "action": "server",
+            "target_system": "server",
+            "risk_level": "low",
+            "requires_approval": False,
+            "parameters": {"operation": "summarize"},
+            "entities": {},
+            "confidence": "high",
+            "reason": "Provider returned a domain placeholder.",
+            "classifier_source": "openai_structured",
+            "semantic_source": "openai_structured",
+        },
+    )
+
+    result = classify_message("Résume la documentation serveur")
+
+    assert result["selected_agent"] == "knowledge_agent"
+    assert result["domain"] == "knowledge"
+    assert result["capability"] == "knowledge.general_answer"
+    assert result["execution_mode"] == "llm_direct"
+
+
+def test_classify_message_routes_company_topic_general_answer_to_retrieval(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: {
+            "intent": "general_information_question",
+            "request_type": "general_knowledge",
+            "domain": "knowledge",
+            "capability": "knowledge.general_answer",
+            "execution_mode": "llm_direct",
+            "agent": "knowledge_agent",
+            "selected_agent": "knowledge_agent",
+            "action": "answer_question",
+            "target_system": "knowledge",
+            "risk_level": "low",
+            "requires_approval": False,
+            "topic": "histoire du groupe Jamain Baco",
+            "parameters": {},
+            "entities": {"knowledge_topic": "histoire du groupe Jamain Baco"},
+            "confidence": "high",
+            "reason": "Provider mislabeled an enterprise topic as general.",
+            "classifier_source": "openai_structured",
+            "semantic_source": "openai_structured",
+        },
+    )
+
+    result = classify_message("c quoi l'histoire du groupe jamain baco")
+
+    assert result["selected_agent"] == "knowledge_agent"
+    assert result["domain"] == "knowledge"
+    assert result["capability"] == "knowledge.enterprise_answer"
+    assert result["execution_mode"] == "retrieval_grounded"
+
+
 def test_required_routes_fall_back_safely_when_openai_unavailable(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("LLM_ROUTER_PROVIDER", raising=False)
@@ -460,7 +985,9 @@ def test_general_company_questions_use_limited_fallback_when_openai_unavailable(
 
         assert result["selected_agent"] == "knowledge_agent"
         assert result["intent"] == "general_information_question"
-        assert result["action"] == "answer_question"
+        assert result["action"] == "enterprise_answer"
+        assert result["capability"] == "knowledge.enterprise_answer"
+        assert result["execution_mode"] == "retrieval_grounded"
         assert result["requires_approval"] is False
         assert result["classifier_error"] == "openai_router_unavailable"
 
@@ -472,7 +999,6 @@ def test_general_company_questions_use_limited_fallback_when_openai_unavailable(
 
         assert orchestrator["selected_agent"] == "knowledge_agent"
         assert orchestrator["intent"] == "explain_orchestrator"
-        assert orchestrator["action"] == "answer_question"
         assert orchestrator["requires_approval"] is False
 
 

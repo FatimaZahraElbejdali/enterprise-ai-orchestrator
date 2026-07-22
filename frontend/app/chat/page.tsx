@@ -87,6 +87,12 @@ type ChatTechnicalMetadata = {
   permission_decision?: string | null;
   department?: string | null;
   target_system?: string | null;
+  odoo_model?: string | null;
+  record_count?: number | null;
+  odoo_tool_steps?: Array<Record<string, unknown>>;
+  final_odoo_model?: string | null;
+  final_record_count?: number | null;
+  business_scope_status?: string | null;
   retrieval_query?: string | null;
   classifier_source?: string | null;
   knowledge_scopes?: string[];
@@ -1958,7 +1964,7 @@ function cleanBusinessMessage(value?: string) {
   if (!value) return "";
 
   if (
-    /api key|password|secret|token|\.env|xml-rpc|traceback|Knowledge Agent received|No specific tool matched|raw|provider error/i.test(
+    /api key|password|secret|token|\.env|traceback|Knowledge Agent received|No specific tool matched|raw|provider error/i.test(
       value
     )
   ) {

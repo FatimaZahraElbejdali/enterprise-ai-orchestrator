@@ -38,8 +38,83 @@ VALID_REQUEST_TYPES = {
     "conversational",
 }
 
+READ_OPERATIONS = {
+    "count",
+    "describe",
+    "detail",
+    "details",
+    "find",
+    "get",
+    "inspect",
+    "list",
+    "read",
+    "search",
+    "show",
+    "summary",
+    "view",
+}
+
+WRITE_OPERATIONS = {
+    "approve",
+    "cancel",
+    "change",
+    "create",
+    "delete",
+    "modify",
+    "remove",
+    "set",
+    "unlink",
+    "update",
+    "write",
+}
+
 INTENT_ALIASES = {
     "server_documentation_summary": "summarize_server_documentation",
+}
+
+SERVER_DIAGNOSTIC_CAPABILITY_BY_SIGNAL = {
+    "backend": "server.local_health",
+    "cpu": "server.cpu_usage",
+    "diagnostic": "server.local_health",
+    "disk": "server.disk_usage",
+    "disque": "server.disk_usage",
+    "etat": "server.local_health",
+    "état": "server.local_health",
+    "frontend": "server.local_health",
+    "health": "server.local_health",
+    "local_health": "server.local_health",
+    "memory": "server.ram_usage",
+    "memoire": "server.ram_usage",
+    "ram": "server.ram_usage",
+    "service": "server.local_health",
+    "services": "server.local_health",
+    "state": "server.local_health",
+    "status": "server.local_health",
+    "uptime": "server.uptime",
+}
+
+SERVER_KNOWLEDGE_OPERATIONS = {
+    "documentation",
+    "document",
+    "explain",
+    "explanation",
+    "resume",
+    "résume",
+    "summarize",
+}
+
+SERVER_DIAGNOSTIC_OPERATIONS = {
+    "check",
+    "diagnose",
+    "diagnostic",
+    "etat",
+    "état",
+    "health",
+    "inspect",
+    "monitor",
+    "state",
+    "status",
+    "uptime",
 }
 
 DOMAIN_AGENT_MAP = {
@@ -146,6 +221,10 @@ Use semantic intent, not exact prompt wording:
 - Odoo business data reads/writes -> enterprise_action with an Odoo capability.
 - Broad read-only Odoo business data questions that are not one of the specialized capabilities -> odoo.generic_read.
   Put the business object, optional installed model hint, operation, query, and limit in parameters.
+- For time-bounded Odoo reads, put structured constraints in parameters.filters. Relative
+  periods must use value {"type":"relative_period","period":"day|week|month|year","offset":0}
+  with a safe date/datetime field name when known. Do not convert relative periods to
+  fixed calendar dates.
 - Missing required parameters -> set clarification_needed true and list missing_parameters.
 
 If no registered capability fits, set capability to null and explain briefly.
@@ -156,6 +235,34 @@ blocking is authoritative.
 
 SEMANTIC_VALUE_SCHEMA = {
     "type": ["string", "number", "boolean", "null"],
+}
+
+SEMANTIC_FILTER_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "field": {"type": ["string", "null"]},
+            "operator": {"type": ["string", "null"]},
+            "value": {
+                "anyOf": [
+                    SEMANTIC_VALUE_SCHEMA,
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": ["string", "null"]},
+                            "period": {"type": ["string", "null"]},
+                            "offset": {"type": ["integer", "null"]},
+                        },
+                        "required": ["type", "period", "offset"],
+                        "additionalProperties": False,
+                    },
+                ],
+            },
+        },
+        "required": ["field", "operator", "value"],
+        "additionalProperties": False,
+    },
 }
 
 SEMANTIC_ENTITY_PROPERTIES = {
@@ -175,6 +282,7 @@ SEMANTIC_ENTITY_PROPERTIES = {
     "business_object": SEMANTIC_VALUE_SCHEMA,
     "model_hint": SEMANTIC_VALUE_SCHEMA,
     "requested_fields": SEMANTIC_VALUE_SCHEMA,
+    "filters": SEMANTIC_FILTER_SCHEMA,
     "limit": SEMANTIC_VALUE_SCHEMA,
     "knowledge_topic": SEMANTIC_VALUE_SCHEMA,
     "server_target": SEMANTIC_VALUE_SCHEMA,
@@ -201,6 +309,7 @@ SEMANTIC_PARAMETER_PROPERTIES = {
     "business_object": SEMANTIC_VALUE_SCHEMA,
     "model_hint": SEMANTIC_VALUE_SCHEMA,
     "requested_fields": SEMANTIC_VALUE_SCHEMA,
+    "filters": SEMANTIC_FILTER_SCHEMA,
     "limit": SEMANTIC_VALUE_SCHEMA,
     "knowledge_topic": SEMANTIC_VALUE_SCHEMA,
     "server_target": SEMANTIC_VALUE_SCHEMA,
@@ -286,6 +395,151 @@ def _merge_entities_and_parameters(entities: dict, parameters: dict, topic: str 
     return merged
 
 
+def _is_odoo_read_semantic_route(parsed: dict) -> bool:
+    if parsed.get("request_type") != "enterprise_action" or parsed.get("domain") != "odoo":
+        return False
+
+    entities = parsed.get("entities") if isinstance(parsed.get("entities"), dict) else {}
+    parameters = parsed.get("parameters") if isinstance(parsed.get("parameters"), dict) else {}
+    operation = str(parameters.get("operation") or entities.get("operation") or "").lower()
+    field = parameters.get("field") or entities.get("field")
+    new_value = (
+        parameters.get("new_value")
+        or parameters.get("new_price")
+        or entities.get("new_value")
+    )
+
+    if operation in WRITE_OPERATIONS or field or new_value not in {None, ""}:
+        return False
+
+    if operation in READ_OPERATIONS:
+        return True
+
+    return bool(
+        parameters.get("business_object")
+        or entities.get("business_object")
+        or parameters.get("query")
+        or entities.get("record_keyword")
+        or parsed.get("topic")
+    )
+
+
+def _semantic_values(parsed: dict) -> dict:
+    values = {}
+
+    for key in ("entities", "parameters"):
+        source = parsed.get(key)
+
+        if isinstance(source, dict):
+            values.update(source)
+
+    return values
+
+
+def _semantic_text_signals(parsed: dict) -> set[str]:
+    values = _semantic_values(parsed)
+    signals = set()
+
+    for key in (
+        "metric",
+        "operation",
+        "requested_fields",
+        "server_target",
+        "target",
+        "topic",
+    ):
+        value = values.get(key) if key != "topic" else parsed.get("topic")
+
+        if isinstance(value, str):
+            signals.update(part.strip().lower() for part in value.replace("_", " ").split())
+
+    return {signal for signal in signals if signal}
+
+
+def _registered_capability_for_server_signal(signals: set[str]) -> str | None:
+    for signal in sorted(signals):
+        capability = SERVER_DIAGNOSTIC_CAPABILITY_BY_SIGNAL.get(signal)
+
+        if not capability:
+            continue
+
+        metadata = get_capability_metadata(capability)
+
+        if metadata and metadata.get("domain") == "server":
+            return capability
+
+    return None
+
+
+def _normalize_server_domain_capability(parsed: dict) -> dict:
+    domain = parsed.get("domain")
+    capability = parsed.get("capability")
+
+    if domain != "server" or capability != "server":
+        return parsed
+
+    signals = _semantic_text_signals(parsed)
+    operation = str(_semantic_values(parsed).get("operation") or "").strip().lower()
+
+    if parsed.get("request_type") in {"enterprise_knowledge", "general_knowledge"}:
+        normalized = dict(parsed)
+        normalized["domain"] = "knowledge"
+        normalized["capability"] = (
+            "knowledge.enterprise_answer"
+            if parsed.get("request_type") == "enterprise_knowledge"
+            else "knowledge.general_answer"
+        )
+        return normalized
+
+    if operation in SERVER_KNOWLEDGE_OPERATIONS:
+        normalized = dict(parsed)
+        normalized["request_type"] = "general_knowledge"
+        normalized["domain"] = "knowledge"
+        normalized["capability"] = "knowledge.general_answer"
+        return normalized
+
+    capability = _registered_capability_for_server_signal(signals)
+
+    if capability:
+        normalized = dict(parsed)
+        normalized["capability"] = capability
+        return normalized
+
+    if operation in SERVER_DIAGNOSTIC_OPERATIONS:
+        normalized = dict(parsed)
+        normalized["capability"] = "server.local_health"
+        return normalized
+
+    return parsed
+
+
+def _documentation_summary_intent(parsed: dict) -> str | None:
+    values = _semantic_values(parsed)
+    operation = str(values.get("operation") or "").strip().lower()
+    signals = _semantic_text_signals(parsed)
+    has_summary_operation = operation in SERVER_KNOWLEDGE_OPERATIONS or bool(
+        signals & SERVER_KNOWLEDGE_OPERATIONS
+    )
+    has_documentation_scope = bool(
+        signals
+        & {
+            "documentation",
+            "document",
+            "manual",
+            "manuel",
+            "guide",
+        }
+    )
+
+    if not has_summary_operation or not has_documentation_scope:
+        return None
+
+    if signals & {"server", "serveur", "serveurs"}:
+        return "summarize_server_documentation"
+
+    return "summarize_documentation"
+
+
 def _unsupported_semantic_route(parsed: dict, reason: str) -> dict:
     request_type = parsed.get("request_type")
     domain = parsed.get("domain") if parsed.get("domain") in VALID_DOMAINS else "general"
@@ -339,6 +593,7 @@ def _unsupported_semantic_route(parsed: dict, reason: str) -> dict:
 
 
 def _normalize_semantic_route(parsed: dict) -> dict | None:
+    parsed = _normalize_server_domain_capability(parsed)
     request_type = parsed.get("request_type")
     domain = parsed.get("domain")
     capability = parsed.get("capability")
@@ -352,6 +607,71 @@ def _normalize_semantic_route(parsed: dict) -> dict | None:
 
     if confidence not in VALID_CONFIDENCE:
         return None
+
+    documentation_intent = _documentation_summary_intent(parsed)
+
+    if documentation_intent and domain == "server":
+        domain = "knowledge"
+        capability = "knowledge.general_answer"
+        parsed = dict(parsed)
+        parsed["domain"] = domain
+        parsed["capability"] = capability
+
+    direct_knowledge_capability = {
+        "creative_generation": "knowledge.creative_generation",
+        "general_knowledge": "knowledge.general_answer",
+        "writing_assistance": "knowledge.writing_assistance",
+    }.get(request_type)
+
+    if not capability and direct_knowledge_capability and domain == "general":
+        domain = "knowledge"
+        capability = direct_knowledge_capability
+        parsed = dict(parsed)
+        parsed["domain"] = domain
+        parsed["capability"] = capability
+
+    if (
+        capability
+        in {
+            "knowledge.creative_generation",
+            "knowledge.general_answer",
+            "knowledge.writing_assistance",
+        }
+        and domain == "general"
+    ):
+        domain = "knowledge"
+        parsed = dict(parsed)
+        parsed["domain"] = domain
+
+    if (
+        domain == "knowledge"
+        and capability == "knowledge.writing_assistance"
+        and _documentation_summary_intent(parsed)
+    ):
+        capability = "knowledge.general_answer"
+        parsed = dict(parsed)
+        parsed["capability"] = capability
+
+    if not capability and _is_odoo_read_semantic_route(parsed):
+        capability = "odoo.generic_read"
+        parsed = dict(parsed)
+        parsed["capability"] = capability
+
+    if domain == "server" and not capability:
+        capability = (
+            _registered_capability_for_server_signal(_semantic_text_signals(parsed))
+            or None
+        )
+
+        if not capability:
+            operation = str(_semantic_values(parsed).get("operation") or "").strip().lower()
+
+            if operation in SERVER_DIAGNOSTIC_OPERATIONS:
+                capability = "server.local_health"
+
+        if capability:
+            parsed = dict(parsed)
+            parsed["capability"] = capability
 
     if not capability:
         return _unsupported_semantic_route(
@@ -432,9 +752,14 @@ def _normalize_semantic_route(parsed: dict) -> dict | None:
 
     topic = parsed.get("topic")
     merged_entities = _merge_entities_and_parameters(entities, parameters, topic)
+    clarification_needed = bool(parsed.get("clarification_needed"))
     missing_parameters = parsed.get("missing_parameters")
 
     if not isinstance(missing_parameters, list):
+        missing_parameters = []
+
+    if metadata_domain == "server":
+        clarification_needed = False
         missing_parameters = []
 
     semantic_request = {
@@ -445,18 +770,19 @@ def _normalize_semantic_route(parsed: dict) -> dict | None:
         "topic": topic,
         "entities": entities,
         "parameters": parameters,
-        "clarification_needed": bool(parsed.get("clarification_needed")),
+        "clarification_needed": clarification_needed,
         "missing_parameters": missing_parameters,
         "semantic_source": "openai_structured",
     }
     action = CAPABILITY_LEGACY_ACTIONS.get(capability, capability)
     intent = CAPABILITY_LEGACY_INTENTS.get(capability, request_type)
+    route_intent = documentation_intent or INTENT_ALIASES.get(intent, intent)
     agent = DOMAIN_AGENT_MAP.get(domain, "general_agent")
     risk_level = capability_metadata.get("risk_level", "low")
     requires_approval = bool(capability_metadata.get("requires_approval"))
 
     return {
-        "intent": INTENT_ALIASES.get(intent, intent),
+        "intent": route_intent,
         "request_type": request_type,
         "domain": domain,
         "capability": capability,
@@ -471,7 +797,7 @@ def _normalize_semantic_route(parsed: dict) -> dict | None:
         "approval_required": requires_approval,
         "entities": merged_entities,
         "parameters": parameters,
-        "clarification_needed": bool(parsed.get("clarification_needed")),
+        "clarification_needed": clarification_needed,
         "missing_parameters": missing_parameters,
         "confidence": confidence,
         "reason": str(parsed.get("reason") or "OpenAI semantic router selected this capability."),

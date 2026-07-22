@@ -4,13 +4,17 @@ import unicodedata
 
 from dotenv import load_dotenv
 
-from agents.knowledge_agent import is_general_information_question
+from agents.knowledge_agent import (
+    is_general_information_question,
+    is_internal_knowledge_question,
+)
 from agents.server_agent import (
     extract_specific_server_reference,
     is_vague_server_problem,
 )
 from models.openai_router import classify_with_openai_router
 from orchestrator.intent_classifier import classify_with_confidence
+from orchestrator.tool_registry import get_capability_metadata
 
 load_dotenv()
 
@@ -123,6 +127,106 @@ INTENT_ALIASES = {
     "server_documentation_summary": "summarize_server_documentation",
 }
 
+SERVER_CAPABILITY_ACTIONS = {
+    "server.cpu_usage": ("server_cpu_usage", "check_cpu_usage"),
+    "server.disk_usage": ("server_disk_usage", "check_disk_usage"),
+    "server.local_health": ("server_health_check", "check_server_health"),
+    "server.ram_usage": ("server_ram_usage", "check_ram_usage"),
+    "server.uptime": ("server_status", "check_server_status"),
+}
+
+SERVER_ACTION_CAPABILITIES = {
+    action: capability
+    for capability, (_intent, action) in SERVER_CAPABILITY_ACTIONS.items()
+}
+SERVER_ACTION_CAPABILITIES["check_service_status"] = "server.local_health"
+SERVER_ACTION_CAPABILITIES["server_diagnostic_summary"] = "server.local_health"
+
+SERVER_SIGNAL_CAPABILITIES = {
+    "backend": "server.local_health",
+    "cpu": "server.cpu_usage",
+    "diagnostic": "server.local_health",
+    "disk": "server.disk_usage",
+    "disque": "server.disk_usage",
+    "etat": "server.local_health",
+    "état": "server.local_health",
+    "frontend": "server.local_health",
+    "health": "server.local_health",
+    "local_health": "server.local_health",
+    "memory": "server.ram_usage",
+    "memoire": "server.ram_usage",
+    "ram": "server.ram_usage",
+    "service": "server.local_health",
+    "services": "server.local_health",
+    "state": "server.local_health",
+    "status": "server.local_health",
+    "uptime": "server.uptime",
+}
+
+SERVER_DIAGNOSTIC_OPERATIONS = {
+    "check",
+    "diagnose",
+    "diagnostic",
+    "etat",
+    "état",
+    "health",
+    "inspect",
+    "monitor",
+    "state",
+    "status",
+    "uptime",
+}
+
+SERVER_UNSUPPORTED_RESOURCE_ACTION_TERMS = {
+    "create",
+    "cree",
+    "crée",
+    "gerer",
+    "gérer",
+    "list",
+    "liste",
+    "lister",
+    "manage",
+}
+
+SERVER_RESOURCE_TERMS = {
+    "file",
+    "files",
+    "fichier",
+    "fichiers",
+    "internal server",
+    "ressource serveur",
+    "ressources serveur",
+    "server resource",
+    "server resources",
+    "stockage interne",
+}
+
+SERVER_DOCUMENTATION_OPERATIONS = {
+    "documentation",
+    "document",
+    "explain",
+    "explanation",
+    "resume",
+    "résume",
+    "summarize",
+}
+
+KNOWLEDGE_RETRIEVAL_SIGNALS = {
+    "company",
+    "documentation",
+    "document",
+    "groupe",
+    "history",
+    "histoire",
+    "internal",
+    "interne",
+    "jamain",
+    "baco",
+    "official",
+    "officiel",
+}
+
 
 ODOO_DOCUMENT_PATTERNS = [
     r"\bdocument\s+id\b",
@@ -210,15 +314,20 @@ def _route(
     source: str = "local_rules_fallback",
     error=None,
     entities: dict | None = None,
+    capability: str | None = None,
+    request_type: str | None = None,
+    domain: str | None = None,
+    execution_mode: str | None = None,
+    parameters: dict | None = None,
+    capability_validation_error: str | None = None,
 ):
     target_system = AGENT_TARGET_MAP.get(selected_agent, "general")
-
-    return {
+    route = {
         "intent": intent,
         "agent": selected_agent,
         "selected_agent": selected_agent,
         "action": action,
-        "target_system": target_system,
+        "target_system": domain or target_system,
         "risk_level": risk_level,
         "risk": risk_level,
         "requires_approval": requires_approval,
@@ -229,6 +338,26 @@ def _route(
         "classifier_source": source,
         "classifier_error": error,
     }
+
+    if capability:
+        route["capability"] = capability
+
+    if request_type:
+        route["request_type"] = request_type
+
+    if domain:
+        route["domain"] = domain
+
+    if execution_mode:
+        route["execution_mode"] = execution_mode
+
+    if parameters is not None:
+        route["parameters"] = parameters
+
+    if capability_validation_error:
+        route["capability_validation_error"] = capability_validation_error
+
+    return route
 
 
 def _blocked_security_route(intent: str, reason: str):
@@ -352,6 +481,76 @@ def _is_destructive_or_dangerous_request(message: str) -> bool:
     )
 
 
+def _is_unsupported_server_resource_request(message: str) -> bool:
+    text = _normalize_text(message)
+
+    if not any(term in text for term in SERVER_CONTEXT_TERMS):
+        return False
+
+    if any(term in text for term in SERVER_DIAGNOSTIC_TERMS | SERVER_METRIC_TERMS):
+        return False
+
+    has_resource = any(term in text for term in SERVER_RESOURCE_TERMS)
+    has_unsupported_action = any(
+        re.search(rf"\b{re.escape(term)}\b", text)
+        for term in SERVER_UNSUPPORTED_RESOURCE_ACTION_TERMS
+    )
+
+    return has_resource and has_unsupported_action
+
+
+def _server_diagnostic_capability_from_message(message: str) -> str | None:
+    text = _normalize_text(message)
+
+    if not any(term in text for term in SERVER_CONTEXT_TERMS | {"infrastructure"}):
+        return None
+
+    if _is_unsupported_server_resource_request(message):
+        return None
+
+    documentation_terms = {
+        "documentation",
+        "document",
+        "manuel",
+        "manual",
+        "guide",
+    }
+
+    if any(term in text for term in documentation_terms):
+        return None
+
+    if any(term in text for term in {"ram", "memoire", "memory"}):
+        return "server.ram_usage"
+
+    if any(term in text for term in {"cpu", "processeur", "processor"}):
+        return "server.cpu_usage"
+
+    if any(term in text for term in {"disque", "disk", "espace disque", "storage"}):
+        return "server.disk_usage"
+
+    if "uptime" in text:
+        return "server.uptime"
+
+    has_status_signal = any(
+        term in text
+        for term in {
+            "actif",
+            "diagnostic",
+            "etat",
+            "health",
+            "status",
+            "statut",
+            "verifie",
+            "verifier",
+        }
+    )
+
+    if has_status_signal:
+        return "server.local_health"
+
+    return None
+
+
 def _is_odoo_access_issue(message: str) -> bool:
     text = _normalize_text(message)
 
@@ -391,6 +590,10 @@ def _is_odoo_write_request(message: str) -> bool:
             "delete",
         ]
     )
+
+    if "odoo" in text and has_write:
+        return True
+
     has_odoo_object = any(
         term in text
         for term in [
@@ -484,10 +687,20 @@ def _is_odoo_read_request(message: str) -> bool:
         "verifier",
         "vérifie",
         "vérifier",
+        "what is available",
+        "information",
+        "informations",
+        "section",
+        "partie",
+        "qu est ce qu il y a",
+        "qu y a t il",
     }
 
+    if "odoo" in text and any(term in text for term in read_terms):
+        return True
+
     if (
-        any(term in text for term in {"odoo", "inventory", "inventaire", "stock"})
+        any(term in text for term in {"inventory", "inventaire", "stock", "product", "produit"})
         and any(term in text for term in inventory_existence_terms)
     ):
         return True
@@ -501,15 +714,24 @@ def _odoo_read_route(message: str, error=None):
     text = _normalize_text(message)
     intent = "product_stock_check"
     action = "read_product_stock"
+    capability = "odoo.product_stock"
+    parameters = {}
 
     if is_odoo_document_request(message):
         intent = odoo_document_intent(message)
         action = "search_document" if is_odoo_document_search_request(message) else "read_document"
+        capability = (
+            "odoo.document_search"
+            if is_odoo_document_search_request(message)
+            else "odoo.document_details"
+        )
     elif "combien" in text or "how many" in text or "count" in text or "total" in text:
         intent = "inventory_summary"
         action = "inventory_summary"
+        capability = "odoo.inventory_summary" if "stock" in text or "produit" in text or "product" in text else "odoo.generic_read"
+        parameters = {"operation": "count", "business_object": message, "limit": 10} if capability == "odoo.generic_read" else {}
     elif (
-        any(term in text for term in {"odoo", "inventory", "inventaire", "stock"})
+        any(term in text for term in {"inventory", "inventaire", "stock", "product", "produit"})
         and any(
             term in text
             for term in {
@@ -531,6 +753,12 @@ def _odoo_read_route(message: str, error=None):
     ):
         intent = "inventory_product_lookup"
         action = "inventory_product_search"
+        capability = "odoo.product_search"
+    elif "odoo" in text:
+        intent = "odoo_generic_read"
+        action = "odoo_generic_read"
+        capability = "odoo.generic_read"
+        parameters = {"operation": "list", "business_object": message, "limit": 10}
 
     return _route(
         intent=intent,
@@ -542,6 +770,11 @@ def _odoo_read_route(message: str, error=None):
         reason="Backend category policy detected an Odoo read request.",
         source="local_odoo_read_rules",
         error=error,
+        capability=capability,
+        request_type="enterprise_action",
+        domain="odoo",
+        execution_mode="tool",
+        parameters=parameters,
     )
 
 
@@ -565,6 +798,243 @@ def _knowledge_intent_for(message: str) -> str:
 def _canonical_intent(intent: str | None) -> str:
     intent = str(intent or "general")
     return INTENT_ALIASES.get(intent, intent)
+
+
+def _route_values(route: dict) -> dict:
+    values = {}
+
+    for key in ("entities", "parameters"):
+        source = route.get(key)
+
+        if isinstance(source, dict):
+            values.update(source)
+
+    semantic_request = route.get("semantic_request")
+
+    if isinstance(semantic_request, dict):
+        for key in ("entities", "parameters"):
+            source = semantic_request.get(key)
+
+            if isinstance(source, dict):
+                values.update(source)
+
+        if semantic_request.get("topic") and not values.get("topic"):
+            values["topic"] = semantic_request.get("topic")
+
+    if route.get("topic") and not values.get("topic"):
+        values["topic"] = route.get("topic")
+
+    return values
+
+
+def _route_text_signals(route: dict) -> set[str]:
+    values = _route_values(route)
+    signals = set()
+
+    for key in (
+        "knowledge_topic",
+        "metric",
+        "operation",
+        "requested_fields",
+        "server_target",
+        "target",
+        "topic",
+    ):
+        value = values.get(key)
+
+        if isinstance(value, str):
+            signals.update(
+                part.strip().lower()
+                for part in value.replace("_", " ").replace("-", " ").split()
+            )
+
+    return {signal for signal in signals if signal}
+
+
+def _knowledge_route_requires_retrieval(route: dict) -> bool:
+    if route.get("request_type") == "enterprise_knowledge":
+        return True
+
+    if route.get("execution_mode") == "retrieval_grounded":
+        return True
+
+    semantic_request = route.get("semantic_request")
+
+    if isinstance(semantic_request, dict) and semantic_request.get("requires_internal_context"):
+        return True
+
+    return bool(_route_text_signals(route) & KNOWLEDGE_RETRIEVAL_SIGNALS)
+
+
+def _documentation_summary_intent(route: dict) -> str | None:
+    values = _route_values(route)
+    operation = str(values.get("operation") or "").strip().lower()
+    signals = _route_text_signals(route)
+    has_summary_operation = operation in SERVER_DOCUMENTATION_OPERATIONS or bool(
+        signals & SERVER_DOCUMENTATION_OPERATIONS
+    )
+    has_documentation_scope = bool(
+        signals
+        & {
+            "documentation",
+            "document",
+            "manual",
+            "manuel",
+            "guide",
+        }
+    )
+
+    if not has_summary_operation or not has_documentation_scope:
+        return None
+
+    if signals & {"server", "serveur", "serveurs"}:
+        return "summarize_server_documentation"
+
+    return "summarize_documentation"
+
+
+def _registered_server_capability_for_route(route: dict) -> str | None:
+    for signal in sorted(_route_text_signals(route)):
+        capability = SERVER_SIGNAL_CAPABILITIES.get(signal)
+
+        if not capability:
+            continue
+
+        metadata = get_capability_metadata(capability)
+
+        if metadata and metadata.get("domain") == "server":
+            return capability
+
+    return None
+
+
+def _apply_server_capability(route: dict, capability: str) -> dict:
+    metadata = get_capability_metadata(capability) or {}
+    intent, action = SERVER_CAPABILITY_ACTIONS.get(
+        capability,
+        ("server_health_check", capability),
+    )
+    normalized = dict(route)
+    normalized["intent"] = intent
+    normalized["request_type"] = normalized.get("request_type") or "enterprise_action"
+    normalized["domain"] = "server"
+    normalized["target_system"] = "server"
+    normalized["agent"] = "server_agent"
+    normalized["selected_agent"] = "server_agent"
+    normalized["capability"] = capability
+    normalized["execution_mode"] = metadata.get("execution_mode", "tool")
+    normalized["action"] = action
+    normalized["risk_level"] = metadata.get("risk_level", "low")
+    normalized["risk"] = normalized["risk_level"]
+    normalized["requires_approval"] = bool(metadata.get("requires_approval"))
+    normalized["approval_required"] = normalized["requires_approval"]
+    normalized["clarification_needed"] = False
+    normalized["missing_parameters"] = []
+    return normalized
+
+
+def _apply_knowledge_capability(route: dict, capability: str) -> dict:
+    metadata = get_capability_metadata(capability) or {}
+    normalized = dict(route)
+    current_intent = _canonical_intent(normalized.get("intent"))
+    documentation_intent = _documentation_summary_intent(normalized)
+
+    if documentation_intent:
+        normalized["intent"] = documentation_intent
+    elif current_intent not in {"general", "knowledge"}:
+        normalized["intent"] = current_intent
+    else:
+        normalized["intent"] = "general_information_question"
+    normalized["request_type"] = (
+        "enterprise_knowledge"
+        if capability == "knowledge.enterprise_answer"
+        else normalized.get("request_type") or "general_knowledge"
+    )
+    normalized["domain"] = "knowledge"
+    normalized["target_system"] = "knowledge"
+    normalized["agent"] = "knowledge_agent"
+    normalized["selected_agent"] = "knowledge_agent"
+    normalized["capability"] = capability
+    normalized["execution_mode"] = metadata.get(
+        "execution_mode",
+        "retrieval_grounded" if capability == "knowledge.enterprise_answer" else "llm_direct",
+    )
+    normalized["action"] = (
+        "enterprise_answer"
+        if capability == "knowledge.enterprise_answer"
+        else "answer_question"
+    )
+    normalized["risk_level"] = metadata.get("risk_level", "low")
+    normalized["risk"] = normalized["risk_level"]
+    normalized["requires_approval"] = False
+    normalized["approval_required"] = False
+    return normalized
+
+
+def normalize_semantic_boundaries(route: dict) -> dict:
+    normalized = dict(route)
+    normalized["intent"] = _canonical_intent(normalized.get("intent"))
+    domain = normalized.get("domain") or normalized.get("target_system")
+    capability = normalized.get("capability")
+    operation = str(_route_values(normalized).get("operation") or "").strip().lower()
+    documentation_intent = _documentation_summary_intent(normalized)
+
+    if domain == "server" and documentation_intent:
+        return _apply_knowledge_capability(normalized, "knowledge.general_answer")
+
+    if (
+        normalized.get("selected_agent") == "knowledge_agent"
+        or domain == "knowledge"
+        or capability in {"knowledge.general_answer", "knowledge.enterprise_answer"}
+    ):
+        if _knowledge_route_requires_retrieval(normalized):
+            return _apply_knowledge_capability(normalized, "knowledge.enterprise_answer")
+
+        if capability == "knowledge.enterprise_answer":
+            return _apply_knowledge_capability(normalized, "knowledge.enterprise_answer")
+
+        if capability in {None, "", "knowledge", "knowledge.general_answer"}:
+            return _apply_knowledge_capability(normalized, "knowledge.general_answer")
+
+    if domain == "server" and capability in {None, "", "server"}:
+        if normalized.get("request_type") in {"enterprise_knowledge", "general_knowledge"}:
+            knowledge_capability = (
+                "knowledge.enterprise_answer"
+                if normalized.get("request_type") == "enterprise_knowledge"
+                else "knowledge.general_answer"
+            )
+            return _apply_knowledge_capability(normalized, knowledge_capability)
+
+        if operation in SERVER_DOCUMENTATION_OPERATIONS:
+            return _apply_knowledge_capability(normalized, "knowledge.general_answer")
+
+        action_value = str(normalized.get("action") or "").strip().lower()
+        server_capability = (
+            SERVER_ACTION_CAPABILITIES.get(action_value)
+            or _registered_server_capability_for_route(normalized)
+        )
+
+        if server_capability:
+            return _apply_server_capability(normalized, server_capability)
+
+        if operation in SERVER_DIAGNOSTIC_OPERATIONS:
+            return _apply_server_capability(normalized, "server.local_health")
+
+        normalized["intent"] = "unsupported_capability"
+        normalized["action"] = "unsupported_capability"
+        normalized["capability_validation_error"] = "Capability is not registered: server"
+        normalized.setdefault("risk_level", "low")
+        normalized["risk"] = normalized["risk_level"]
+        normalized["requires_approval"] = False
+        normalized["approval_required"] = False
+
+    if domain == "server" and capability:
+        metadata = get_capability_metadata(str(capability))
+
+        if metadata and metadata.get("domain") == "server":
+            return _apply_server_capability(normalized, str(capability))
+
+    return normalized
 
 
 def _is_odoo_write_route(route: dict) -> bool:
@@ -597,6 +1067,32 @@ def apply_backend_safety_overrides(message: str, route: dict | None = None) -> d
             "Request asks for a destructive or dangerous operation.",
         )
 
+    if is_odoo_document_request(message):
+        return _odoo_read_route(message)
+
+    if _is_unsupported_server_resource_request(message):
+        return _route(
+            intent="unsupported_capability",
+            selected_agent="server_agent",
+            action="unsupported_capability",
+            risk_level="low",
+            requires_approval=False,
+            confidence="high",
+            reason=(
+                "Request targets server-side resources, but no registered safe "
+                "server resource management capability exists."
+            ),
+            source="backend_safety_override",
+            capability="unsupported_capability",
+            request_type="enterprise_action",
+            domain="server",
+            execution_mode=None,
+            parameters={},
+            capability_validation_error=(
+                "No registered safe server resource management capability exists."
+            ),
+        )
+
     specific_server = extract_specific_server_reference(message)
 
     if specific_server:
@@ -627,8 +1123,17 @@ def apply_backend_safety_overrides(message: str, route: dict | None = None) -> d
     if not isinstance(route, dict):
         return route
 
-    normalized_route = dict(route)
-    normalized_route["intent"] = _canonical_intent(normalized_route.get("intent"))
+    selected_agent = route.get("selected_agent") or route.get("agent")
+    route_domain = route.get("domain") or route.get("target_system")
+    message_server_capability = _server_diagnostic_capability_from_message(message)
+
+    if (
+        message_server_capability
+        and (route_domain == "server" or selected_agent == "server_agent")
+    ):
+        return _apply_server_capability(route, message_server_capability)
+
+    normalized_route = normalize_semantic_boundaries(route)
     selected_agent = normalized_route.get("selected_agent") or normalized_route.get("agent")
     normalized_route["selected_agent"] = selected_agent or "general_agent"
     normalized_route["agent"] = normalized_route["selected_agent"]
@@ -734,12 +1239,6 @@ def _classify_with_optional_provider(message: str):
 def _deterministic_fallback(message: str, error=None):
     text = _normalize_text(message)
 
-    if is_odoo_document_request(message):
-        return _odoo_read_route(message, error=error)
-
-    if _is_odoo_read_request(message):
-        return _odoo_read_route(message, error=error)
-
     if _is_odoo_access_issue(message):
         return _route(
             intent="odoo_access_issue",
@@ -751,6 +1250,25 @@ def _deterministic_fallback(message: str, error=None):
             reason="Odoo access/login wording is an IT support issue.",
             error=error,
         )
+
+    if _is_odoo_write_request(message):
+        return _route(
+            intent="odoo_write_request",
+            selected_agent="odoo_agent",
+            action="update_odoo_record",
+            risk_level="high",
+            requires_approval=True,
+            confidence="medium",
+            reason="Local policy detected an Odoo write-like request.",
+            source="local_odoo_write_rules",
+            error=error,
+        )
+
+    if is_odoo_document_request(message):
+        return _odoo_read_route(message, error=error)
+
+    if _is_odoo_read_request(message):
+        return _odoo_read_route(message, error=error)
 
     if any(term in text for term in SUPPORT_ISSUE_TERMS):
         return _route(
@@ -800,15 +1318,33 @@ def _deterministic_fallback(message: str, error=None):
         )
 
     if is_general_information_question(message):
+        internal_knowledge = is_internal_knowledge_question(message)
         return _route(
             intent=_knowledge_intent_for(message),
             selected_agent="knowledge_agent",
-            action="answer_question",
+            action="enterprise_answer" if internal_knowledge else "answer_question",
             risk_level="low",
             requires_approval=False,
             confidence="high",
             reason="Local knowledge fallback matched a general information question.",
             error=error,
+            capability=(
+                "knowledge.enterprise_answer"
+                if internal_knowledge
+                else "knowledge.general_answer"
+            ),
+            request_type=(
+                "enterprise_knowledge"
+                if internal_knowledge
+                else "general_knowledge"
+            ),
+            domain="knowledge",
+            execution_mode=(
+                "retrieval_grounded"
+                if internal_knowledge
+                else "llm_direct"
+            ),
+            parameters={"knowledge_topic": message} if internal_knowledge else None,
         )
 
     if "documentation" in text and ("resume" in text or "résume" in text):
@@ -821,6 +1357,10 @@ def _deterministic_fallback(message: str, error=None):
             confidence="high",
             reason="Local knowledge fallback matched a documentation summary request.",
             error=error,
+            capability="knowledge.general_answer",
+            request_type="general_knowledge",
+            domain="knowledge",
+            execution_mode="llm_direct",
         )
 
     if any(term in text for term in DEVELOPMENT_HELP_TERMS):

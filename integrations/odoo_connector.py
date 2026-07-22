@@ -5,6 +5,7 @@ import xmlrpc.client
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
+from orchestrator.temporal import resolve_relative_period
 
 load_dotenv()
 
@@ -41,6 +42,9 @@ DYNAMIC_READ_BUSINESS_BASE_MODELS = set(ALLOWED_GENERIC_READ_MODELS) | {
 DYNAMIC_READ_CACHE_TTL_SECONDS = 300
 DYNAMIC_READ_DEFAULT_LIMIT = 10
 DYNAMIC_READ_MAX_LIMIT = 20
+DYNAMIC_READ_AGENT_MODEL_LIMIT = 8
+DYNAMIC_READ_AGENT_FIELD_LIMIT = 40
+DYNAMIC_READ_AGGREGATE_MAX_GROUPS = 50
 
 DENIED_DYNAMIC_READ_MODELS = {
     "ir.config_parameter",
@@ -1210,7 +1214,14 @@ class OdooConnector:
         return list(catalog)
 
     def _dynamic_fields_get(self, model_name: str):
-        if model_name not in self._fields_cache:
+        cached_fields = self._fields_cache.get(model_name)
+        needs_selection_metadata = bool(cached_fields) and any(
+            metadata.get("type") == "selection" and "selection" not in metadata
+            for metadata in cached_fields.values()
+            if isinstance(metadata, dict)
+        )
+
+        if model_name not in self._fields_cache or needs_selection_metadata:
             models = self._models()
             self._fields_cache[model_name] = models.execute_kw(
                 self.database,
@@ -1219,7 +1230,7 @@ class OdooConnector:
                 model_name,
                 "fields_get",
                 [],
-                {"attributes": ["string", "type", "relation", "readonly", "store"]},
+                {"attributes": ["string", "type", "relation", "readonly", "store", "selection"]},
             )
 
         return self._fields_cache[model_name]
@@ -1247,7 +1258,226 @@ class OdooConnector:
                 "store": metadata.get("store", True) is not False,
             }
 
+            if field_type == "selection" and isinstance(metadata.get("selection"), list):
+                safe_fields[field_name]["selection"] = [
+                    [option[0], option[1]]
+                    for option in metadata.get("selection", [])
+                    if isinstance(option, (list, tuple)) and len(option) >= 2
+                ]
+
         return safe_fields
+
+    def _resolve_dynamic_filter_field(self, safe_fields: dict, field_value):
+        if not isinstance(field_value, str) or not field_value.strip():
+            return None
+
+        requested = field_value.strip()
+
+        if requested in safe_fields:
+            return requested
+
+        normalized_requested = _normalize_label(requested)
+
+        for field_name, metadata in safe_fields.items():
+            candidates = {
+                _normalize_label(field_name),
+                _normalize_label(field_name.replace("_", " ")),
+                _normalize_label(metadata.get("label") or ""),
+            }
+
+            if normalized_requested in candidates:
+                return field_name
+
+        return None
+
+    def _selection_label_match(self, metadata: dict, value):
+        if not isinstance(value, str):
+            return None
+
+        normalized_value = _normalize_label(value)
+
+        for technical_value, display_label in metadata.get("selection") or []:
+            if normalized_value == _normalize_label(str(technical_value)):
+                return technical_value, display_label
+
+            if normalized_value == _normalize_label(str(display_label)):
+                return technical_value, display_label
+
+        return None
+
+    def _resolve_selection_filter_value(self, metadata: dict, value):
+        if isinstance(value, list):
+            resolved_values = []
+            matched_labels = []
+
+            for item in value:
+                match = self._selection_label_match(metadata, item)
+
+                if match:
+                    resolved_values.append(match[0])
+                    matched_labels.append(match[1])
+                else:
+                    resolved_values.append(item)
+
+            return resolved_values, matched_labels
+
+        match = self._selection_label_match(metadata, value)
+
+        if match:
+            return match[0], [match[1]]
+
+        return value, []
+
+    def _infer_selection_filter_field(self, safe_fields: dict, value):
+        matches = []
+
+        for field_name, metadata in safe_fields.items():
+            if metadata.get("type") != "selection":
+                continue
+
+            if self._selection_label_match(metadata, value):
+                matches.append(field_name)
+
+        if len(matches) == 1:
+            return matches[0]
+
+        return None
+
+    def _format_temporal_boundary(self, metadata: dict, value):
+        if metadata.get("type") == "date":
+            return value.date().isoformat()
+
+        return value.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _resolve_temporal_filter_domain(self, field_name: str, metadata: dict, operator: str, value):
+        if operator not in {"in_period", "relative_period"}:
+            return None
+
+        if metadata.get("type") not in {"date", "datetime"}:
+            raise ValueError(f"invalid_temporal_field:{field_name}")
+
+        interval = resolve_relative_period(value)
+        start_value = self._format_temporal_boundary(metadata, interval["start"])
+        end_value = self._format_temporal_boundary(metadata, interval["end"])
+
+        return {
+            "domain": [
+                [field_name, ">=", start_value],
+                [field_name, "<", end_value],
+            ],
+            "validated_filter": {
+                "field": field_name,
+                "operator": "relative_period",
+                "value": {
+                    "start": start_value,
+                    "end": end_value,
+                    "period": interval["period"],
+                    "offset": interval["offset"],
+                },
+                "input_value": value,
+                "field_type": metadata.get("type"),
+                "matched_selection_labels": [],
+            },
+        }
+
+    def _parse_dynamic_filter(self, filter_value):
+        if isinstance(filter_value, dict):
+            field_name = (
+                filter_value.get("field")
+                or filter_value.get("field_name")
+                or filter_value.get("name")
+                or filter_value.get("field_label")
+                or filter_value.get("label")
+            )
+            operator = filter_value.get("operator") or filter_value.get("op") or "="
+            value = (
+                filter_value.get("value")
+                if "value" in filter_value
+                else filter_value.get("display_value")
+            )
+            return field_name, operator, value
+
+        if isinstance(filter_value, (list, tuple)) and len(filter_value) >= 3:
+            return filter_value[0], filter_value[1], filter_value[2]
+
+        return None, None, None
+
+    def _validated_dynamic_filter_domain(self, model_name: str, filters: list):
+        if not filters:
+            return [], []
+
+        safe_fields = self.safe_dynamic_fields(model_name)
+        allowed_operators = {
+            "=",
+            "!=",
+            "in",
+            "not in",
+            "ilike",
+            "not ilike",
+            ">",
+            ">=",
+            "<",
+            "<=",
+        }
+        domain = []
+        validated_filters = []
+
+        for raw_filter in filters:
+            field_value, operator, value = self._parse_dynamic_filter(raw_filter)
+            field_name = self._resolve_dynamic_filter_field(safe_fields, field_value)
+
+            if not field_name:
+                field_name = self._infer_selection_filter_field(safe_fields, value)
+
+            if not field_name:
+                continue
+
+            metadata = safe_fields.get(field_name) or {}
+
+            if metadata.get("store") is False:
+                continue
+
+            operator = str(operator or "=").strip().lower()
+
+            temporal_filter = self._resolve_temporal_filter_domain(
+                field_name,
+                metadata,
+                operator,
+                value,
+            )
+
+            if temporal_filter:
+                domain.extend(temporal_filter["domain"])
+                validated_filters.append(temporal_filter["validated_filter"])
+                continue
+
+            if operator not in allowed_operators:
+                operator = "="
+
+            resolved_value = value
+            matched_selection_labels = []
+
+            if metadata.get("type") == "selection":
+                resolved_value, matched_selection_labels = self._resolve_selection_filter_value(
+                    metadata,
+                    value,
+                )
+
+            if operator in {"in", "not in"} and not isinstance(resolved_value, list):
+                resolved_value = [resolved_value]
+
+            condition = [field_name, operator, resolved_value]
+            domain.append(condition)
+            validated_filters.append({
+                "field": field_name,
+                "operator": operator,
+                "value": resolved_value,
+                "input_value": value,
+                "field_type": metadata.get("type"),
+                "matched_selection_labels": matched_selection_labels,
+            })
+
+        return domain, validated_filters
 
     def _score_model_candidate(self, business_object: str, model_info: dict, model_hint: str | None = None):
         model_name = model_info.get("model") or ""
@@ -1384,6 +1614,527 @@ class OdooConnector:
             ],
         }
 
+    def agent_search_models(self, query: str, limit: int = DYNAMIC_READ_AGENT_MODEL_LIMIT):
+        try:
+            catalog = self.get_model_catalog()
+        except Exception as error:
+            return {
+                "status": "failed",
+                "tool": "odoo.search_models",
+                "models": [],
+                "message": str(error),
+            }
+
+        scored = []
+
+        for item in catalog:
+            if not item.get("allowed"):
+                continue
+
+            score = self._score_model_candidate(query, item)
+
+            if score > 0:
+                scored.append((score, item))
+
+        scored.sort(key=lambda value: (-value[0], value[1].get("model") or ""))
+        bounded_limit = max(1, min(int(limit or DYNAMIC_READ_AGENT_MODEL_LIMIT), DYNAMIC_READ_AGENT_MODEL_LIMIT))
+
+        return {
+            "status": "completed",
+            "tool": "odoo.search_models",
+            "query": query,
+            "models": [
+                {
+                    "model": item.get("model"),
+                    "label": item.get("name") or item.get("model"),
+                    "score": score,
+                    "available": True,
+                }
+                for score, item in scored[:bounded_limit]
+            ],
+        }
+
+    def _agent_model_catalog_item(self, model_name: str):
+        catalog = self.get_model_catalog()
+
+        return next(
+            (
+                item
+                for item in catalog
+                if item.get("model") == model_name
+            ),
+            None,
+        )
+
+    def _validate_agent_model(self, model_name: str):
+        item = self._agent_model_catalog_item(model_name)
+
+        if not item:
+            raise ValueError("unknown_model")
+
+        if not item.get("allowed"):
+            raise ValueError("denied_model")
+
+        return item
+
+    def agent_describe_model(self, model_name: str):
+        try:
+            item = self._validate_agent_model(model_name)
+            safe_fields = self.safe_dynamic_fields(model_name)
+        except ValueError as error:
+            return {
+                "status": "denied",
+                "tool": "odoo.describe_model",
+                "model": model_name,
+                "message": str(error),
+            }
+        except Exception as error:
+            return {
+                "status": "failed",
+                "tool": "odoo.describe_model",
+                "model": model_name,
+                "message": str(error),
+            }
+
+        fields = []
+
+        for field_name, metadata in safe_fields.items():
+            field = {
+                "name": field_name,
+                "label": metadata.get("label"),
+                "type": metadata.get("type"),
+                "relation": metadata.get("relation"),
+                "store": metadata.get("store", True),
+            }
+
+            if metadata.get("type") == "selection":
+                field["selection"] = metadata.get("selection") or []
+
+            fields.append(field)
+
+        fields.sort(key=lambda value: (value.get("name") not in {"display_name", "name", "state", "status"}, value.get("name") or ""))
+
+        return {
+            "status": "completed",
+            "tool": "odoo.describe_model",
+            "model": model_name,
+            "label": item.get("name") or model_name,
+            "fields": fields[:DYNAMIC_READ_AGENT_FIELD_LIMIT],
+            "field_count": len(fields),
+            "truncated": len(fields) > DYNAMIC_READ_AGENT_FIELD_LIMIT,
+        }
+
+    def _validate_agent_fields(self, model_name: str, requested_fields: list[str] | None):
+        requested_fields = requested_fields or []
+        safe_fields = self.safe_dynamic_fields(model_name)
+        selected = []
+
+        if not requested_fields:
+            return self._dynamic_summary_fields(model_name)
+
+        for field_name in requested_fields:
+            if field_name == "id":
+                if field_name not in selected:
+                    selected.append(field_name)
+                continue
+
+            if field_name not in safe_fields:
+                raise ValueError(f"unsafe_field:{field_name}")
+
+            if field_name not in selected:
+                selected.append(field_name)
+
+        return selected[:DYNAMIC_READ_AGENT_FIELD_LIMIT] or ["id"]
+
+    def _validate_agent_domain(self, model_name: str, domain: list | None):
+        if not domain:
+            return [], []
+
+        if not isinstance(domain, list):
+            raise ValueError("invalid_domain")
+
+        if any(isinstance(item, str) and item in {"|", "&", "!"} for item in domain):
+            raise ValueError("complex_domain_not_supported")
+
+        for condition in domain:
+            if not isinstance(condition, (list, tuple, dict)):
+                raise ValueError("invalid_domain_condition")
+
+        validated_domain, validated_filters = self._validated_dynamic_filter_domain(
+            model_name,
+            domain,
+        )
+
+        if len(validated_filters) != len(domain):
+            raise ValueError("invalid_domain_field")
+
+        return validated_domain, validated_filters
+
+    def _validate_agent_order(self, model_name: str, order: str | None):
+        if not order:
+            return None
+
+        safe_fields = self.safe_dynamic_fields(model_name)
+        order_parts = []
+
+        for raw_part in str(order).split(","):
+            tokens = raw_part.strip().split()
+
+            if not tokens:
+                continue
+
+            field_name = tokens[0]
+            direction = tokens[1].lower() if len(tokens) > 1 else "asc"
+
+            if field_name not in safe_fields and field_name != "id":
+                raise ValueError(f"unsafe_order_field:{field_name}")
+
+            if direction not in {"asc", "desc"}:
+                direction = "asc"
+
+            order_parts.append(f"{field_name} {direction}")
+
+        return ", ".join(order_parts[:3]) or None
+
+    def _validate_agent_group_by(self, model_name: str, group_by: list[str] | None):
+        if not isinstance(group_by, list) or len(group_by) != 1:
+            raise ValueError("invalid_group_by")
+
+        safe_fields = self.safe_dynamic_fields(model_name)
+        raw_field = group_by[0]
+        field_name = self._resolve_dynamic_filter_field(safe_fields, raw_field)
+
+        if not field_name:
+            raise ValueError(f"unsafe_group_by_field:{raw_field}")
+
+        metadata = safe_fields.get(field_name) or {}
+
+        if metadata.get("store") is False:
+            raise ValueError(f"nonstored_group_by_field:{field_name}")
+
+        if metadata.get("type") not in {"boolean", "char", "date", "datetime", "integer", "many2one", "selection"}:
+            raise ValueError(f"unsupported_group_by_type:{field_name}")
+
+        return [field_name], {
+            "field": field_name,
+            "label": metadata.get("label"),
+            "type": metadata.get("type"),
+            "relation": metadata.get("relation"),
+        }
+
+    def _validate_agent_aggregates(self, model_name: str, aggregates: list[dict] | None):
+        if not isinstance(aggregates, list) or not aggregates:
+            aggregates = [{"operation": "count", "field": "id", "alias": "record_count"}]
+
+        safe_fields = self.safe_dynamic_fields(model_name)
+        validated = []
+
+        for raw_aggregate in aggregates[:1]:
+            if not isinstance(raw_aggregate, dict):
+                raise ValueError("invalid_aggregate")
+
+            operation = str(raw_aggregate.get("operation") or "").strip().lower()
+            field_name = str(raw_aggregate.get("field") or "id").strip()
+            alias = str(raw_aggregate.get("alias") or "record_count").strip() or "record_count"
+
+            if operation != "count":
+                raise ValueError(f"unsupported_aggregate_operation:{operation}")
+
+            if field_name != "id":
+                resolved_field = self._resolve_dynamic_filter_field(safe_fields, field_name)
+
+                if not resolved_field:
+                    raise ValueError(f"unsafe_aggregate_field:{field_name}")
+
+                metadata = safe_fields.get(resolved_field) or {}
+
+                if metadata.get("store") is False:
+                    raise ValueError(f"nonstored_aggregate_field:{resolved_field}")
+
+                field_name = resolved_field
+
+            if not alias.replace("_", "").isalnum():
+                alias = "record_count"
+
+            validated.append({
+                "operation": operation,
+                "field": field_name,
+                "alias": alias,
+            })
+
+        return validated
+
+    def _validate_agent_aggregate_order(self, order_by: list[dict] | None, group_field: str, aggregate_aliases: set[str]):
+        if not isinstance(order_by, list):
+            return [{"field": "record_count", "direction": "desc"}]
+
+        validated = []
+
+        for raw_order in order_by[:2]:
+            if not isinstance(raw_order, dict):
+                continue
+
+            field_name = str(raw_order.get("field") or "").strip()
+            direction = str(raw_order.get("direction") or "asc").strip().lower()
+
+            if field_name not in aggregate_aliases and field_name != group_field:
+                raise ValueError(f"unsafe_aggregate_order_field:{field_name}")
+
+            if direction not in {"asc", "desc"}:
+                direction = "asc"
+
+            validated.append({"field": field_name, "direction": direction})
+
+        return validated or [{"field": "record_count", "direction": "desc"}]
+
+    def _normalize_group_value(self, value):
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            return {
+                "id": value[0],
+                "display_name": value[1],
+            }
+
+        return value
+
+    def agent_aggregate_records(
+        self,
+        model_name: str,
+        domain: list | None = None,
+        group_by: list[str] | None = None,
+        aggregates: list[dict] | None = None,
+        order_by: list[dict] | None = None,
+        limit: int = DYNAMIC_READ_DEFAULT_LIMIT,
+    ):
+        try:
+            self._validate_agent_model(model_name)
+            safe_domain, validated_filters = self._validate_agent_domain(model_name, domain)
+            safe_group_by, group_metadata = self._validate_agent_group_by(model_name, group_by)
+            safe_aggregates = self._validate_agent_aggregates(model_name, aggregates)
+            aggregate_aliases = {item["alias"] for item in safe_aggregates}
+            safe_order_by = self._validate_agent_aggregate_order(
+                order_by,
+                safe_group_by[0],
+                aggregate_aliases,
+            )
+            bounded_limit = max(1, min(int(limit or DYNAMIC_READ_DEFAULT_LIMIT), DYNAMIC_READ_MAX_LIMIT))
+            fetch_limit = min(DYNAMIC_READ_AGGREGATE_MAX_GROUPS, max(bounded_limit, DYNAMIC_READ_MAX_LIMIT))
+
+            raw_groups = self._models().execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                model_name,
+                "read_group",
+                [safe_domain, safe_group_by, safe_group_by],
+                {
+                    "context": {"active_test": False},
+                    "lazy": False,
+                    "limit": fetch_limit,
+                },
+            )
+
+            group_field = safe_group_by[0]
+            count_alias = safe_aggregates[0]["alias"]
+            normalized_groups = []
+
+            for raw_group in raw_groups or []:
+                if not isinstance(raw_group, dict):
+                    continue
+
+                group_value = self._normalize_group_value(raw_group.get(group_field))
+                record_count = raw_group.get("__count")
+
+                if record_count is None:
+                    record_count = raw_group.get(f"{group_field}_count")
+
+                if record_count is None:
+                    record_count = raw_group.get(count_alias, 0)
+
+                normalized_groups.append({
+                    "group": {
+                        "field": group_field,
+                        "label": group_metadata.get("label"),
+                        "type": group_metadata.get("type"),
+                        "relation": group_metadata.get("relation"),
+                        "value": group_value,
+                    },
+                    "metrics": {
+                        count_alias: int(record_count or 0),
+                    },
+                })
+
+            for order in reversed(safe_order_by):
+                field_name = order["field"]
+                reverse = order["direction"] == "desc"
+
+                def sort_key(item):
+                    if field_name in aggregate_aliases:
+                        return item.get("metrics", {}).get(field_name, 0)
+
+                    value = item.get("group", {}).get("value")
+
+                    if isinstance(value, dict):
+                        return str(value.get("display_name") or value.get("id") or "")
+
+                    return str(value or "")
+
+                normalized_groups.sort(key=sort_key, reverse=reverse)
+
+            returned_groups = normalized_groups[:bounded_limit]
+
+            return {
+                "status": "completed",
+                "tool": "odoo.aggregate_records",
+                "model": model_name,
+                "domain": safe_domain,
+                "validated_filters": validated_filters,
+                "group_by": safe_group_by,
+                "aggregates": safe_aggregates,
+                "order_by": safe_order_by,
+                "group_count": len(returned_groups),
+                "groups": returned_groups,
+                "truncated": len(raw_groups or []) > bounded_limit,
+                "error": None,
+            }
+        except Exception as error:
+            return {
+                "status": "denied" if isinstance(error, ValueError) else "failed",
+                "tool": "odoo.aggregate_records",
+                "model": model_name,
+                "domain": [],
+                "group_by": group_by or [],
+                "group_count": 0,
+                "groups": [],
+                "message": str(error),
+                "error": str(error),
+            }
+
+    def agent_search_records(
+        self,
+        model_name: str,
+        domain: list | None = None,
+        fields: list[str] | None = None,
+        limit: int = DYNAMIC_READ_DEFAULT_LIMIT,
+        order: str | None = None,
+    ):
+        try:
+            self._validate_agent_model(model_name)
+            safe_domain, validated_filters = self._validate_agent_domain(model_name, domain)
+            safe_fields = self._validate_agent_fields(model_name, fields)
+            safe_order = self._validate_agent_order(model_name, order)
+            bounded_limit = max(1, min(int(limit or DYNAMIC_READ_DEFAULT_LIMIT), DYNAMIC_READ_MAX_LIMIT))
+
+            kwargs = {
+                "fields": safe_fields,
+                "limit": bounded_limit + 1,
+                "context": {"active_test": False},
+            }
+
+            if safe_order:
+                kwargs["order"] = safe_order
+
+            raw_records = self._models().execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                model_name,
+                "search_read",
+                [safe_domain],
+                kwargs,
+            )
+            records = [
+                self._normalize_dynamic_record(model_name, record)
+                for record in raw_records[:bounded_limit]
+            ]
+
+            return {
+                "status": "completed",
+                "tool": "odoo.search_records",
+                "model": model_name,
+                "domain": safe_domain,
+                "validated_filters": validated_filters,
+                "fields": safe_fields,
+                "record_count": len(records),
+                "records": records,
+                "truncated": len(raw_records) > bounded_limit,
+            }
+        except Exception as error:
+            return {
+                "status": "denied" if isinstance(error, ValueError) else "failed",
+                "tool": "odoo.search_records",
+                "model": model_name,
+                "record_count": 0,
+                "records": [],
+                "message": str(error),
+            }
+
+    def agent_count_records(self, model_name: str, domain: list | None = None):
+        try:
+            self._validate_agent_model(model_name)
+            safe_domain, validated_filters = self._validate_agent_domain(model_name, domain)
+            count = self._models().execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                model_name,
+                "search_count",
+                [safe_domain],
+                {"context": {"active_test": False}},
+            )
+
+            return {
+                "status": "completed",
+                "tool": "odoo.count_records",
+                "model": model_name,
+                "domain": safe_domain,
+                "validated_filters": validated_filters,
+                "record_count": count,
+            }
+        except Exception as error:
+            return {
+                "status": "denied" if isinstance(error, ValueError) else "failed",
+                "tool": "odoo.count_records",
+                "model": model_name,
+                "record_count": 0,
+                "message": str(error),
+            }
+
+    def agent_read_record(self, model_name: str, record_id, fields: list[str] | None = None):
+        try:
+            self._validate_agent_model(model_name)
+            safe_fields = self._validate_agent_fields(model_name, fields)
+            record_id = int(record_id)
+            raw_records = self._models().execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                model_name,
+                "read",
+                [[record_id]],
+                {"fields": safe_fields},
+            )
+            records = [
+                self._normalize_dynamic_record(model_name, record)
+                for record in raw_records[:1]
+            ]
+
+            return {
+                "status": "completed" if records else "not_found",
+                "tool": "odoo.read_record",
+                "model": model_name,
+                "record_id": record_id,
+                "record": records[0] if records else None,
+            }
+        except Exception as error:
+            return {
+                "status": "denied" if isinstance(error, ValueError) else "failed",
+                "tool": "odoo.read_record",
+                "model": model_name,
+                "record_id": record_id,
+                "record": None,
+                "message": str(error),
+            }
+
     def _dynamic_summary_fields(self, model_name: str, requested_fields: list[str] | None = None):
         safe_fields = self.safe_dynamic_fields(model_name)
         selected = ["id"]
@@ -1472,6 +2223,43 @@ class OdooConnector:
 
         return conditions[:1]
 
+    def _is_redundant_dynamic_query(self, query: str | None, business_object: str, model_hint: str | None):
+        query_tokens = _match_tokens(query or "")
+
+        if not query_tokens:
+            return True
+
+        scope_tokens = _match_tokens(" ".join([business_object or "", model_hint or ""]))
+
+        return bool(scope_tokens) and query_tokens <= scope_tokens
+
+    def _dynamic_executable_domain(self, model_name: str, plan: OdooReadPlan):
+        business_domain = self._dynamic_business_domain(
+            model_name,
+            f"{plan.business_object} {plan.model_hint or ''}",
+        )
+        query_domain = []
+
+        if not self._is_redundant_dynamic_query(
+            plan.query,
+            plan.business_object,
+            plan.model_hint,
+        ):
+            query_domain = self._dynamic_search_domain(model_name, plan.query or "")
+
+        filter_domain, validated_filters = self._validated_dynamic_filter_domain(
+            model_name,
+            plan.filters,
+        )
+
+        return {
+            "domain": business_domain + query_domain + filter_domain,
+            "business_scope_domain": business_domain,
+            "query_domain": query_domain,
+            "filter_domain": filter_domain,
+            "validated_filters": validated_filters,
+        }
+
     def _normalize_dynamic_record(self, model_name: str, record: dict):
         normalized = {}
 
@@ -1534,13 +2322,11 @@ class OdooConnector:
         model_name = discovery["model"]
         fields = self._dynamic_summary_fields(model_name, plan.requested_fields)
         models = self._models()
-        domain = self._dynamic_search_domain(model_name, plan.query or "")
-
-        if not domain:
-            domain = self._dynamic_business_domain(
-                model_name,
-                f"{plan.business_object} {plan.model_hint or ''}",
-            )
+        executable = self._dynamic_executable_domain(model_name, plan)
+        domain = executable["domain"]
+        business_scope_domain = executable["business_scope_domain"]
+        query_domain = executable["query_domain"]
+        validated_filters = executable["validated_filters"]
 
         try:
             if plan.operation == "aggregate":
@@ -1552,6 +2338,11 @@ class OdooConnector:
                     "read_plan": plan.to_dict(),
                     "model": model_name,
                     "display_name": discovery.get("display_name"),
+                    "model_discovery": discovery,
+                    "business_scope_domain": business_scope_domain,
+                    "query_domain": query_domain,
+                    "validated_filters": validated_filters,
+                    "search_domain": domain,
                     "records": [],
                     "record_count": 0,
                     "message": "Aggregates are not enabled for generic Odoo reads yet.",
@@ -1585,6 +2376,11 @@ class OdooConnector:
                     "read_plan": plan.to_dict(),
                     "model": model_name,
                     "display_name": discovery.get("display_name"),
+                    "model_discovery": discovery,
+                    "business_scope_domain": business_scope_domain,
+                    "query_domain": query_domain,
+                    "validated_filters": validated_filters,
+                    "search_domain": domain,
                     "records": [],
                     "record_count": count,
                     "message": "Odoo records counted.",
@@ -1612,6 +2408,11 @@ class OdooConnector:
                 "read_plan": plan.to_dict(),
                 "model": model_name,
                 "display_name": discovery.get("display_name"),
+                "model_discovery": discovery,
+                "business_scope_domain": business_scope_domain,
+                "query_domain": query_domain,
+                "validated_filters": validated_filters,
+                "search_domain": domain,
                 "records": [],
                 "record_count": 0,
                 "message": str(error),
@@ -1630,7 +2431,12 @@ class OdooConnector:
             "read_plan": plan.to_dict(),
             "model": model_name,
             "display_name": discovery.get("display_name"),
+            "model_discovery": discovery,
             "fields": fields,
+            "business_scope_domain": business_scope_domain,
+            "query_domain": query_domain,
+            "validated_filters": validated_filters,
+            "search_domain": domain,
             "records": records,
             "record_count": len(records),
             "message": "Odoo records read safely.",
