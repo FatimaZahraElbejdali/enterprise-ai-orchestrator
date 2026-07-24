@@ -59,6 +59,64 @@ def test_openai_parser_falls_back_to_deterministic_toggle(monkeypatch):
     assert result["parser_source"] == "fallback"
 
 
+def test_deterministic_toggle_parser_does_not_treat_odoo_context_as_status():
+    result = odoo_agent.parse_odoo_action_deterministic(
+        "coche pointage pour le compte analytique 11IFCX0003 sur odoo"
+    )
+
+    assert result["action"] == "toggle_boolean_field"
+    assert result["target_model"] == "account.analytic.account"
+    assert result["record_query"] == "11IFCX0003"
+    assert result["field_label"] == "pointage"
+    assert result["new_value"] is True
+    assert result["requires_approval"] is True
+
+
+def test_openai_parser_normalizes_analytic_toggle_action(monkeypatch):
+    monkeypatch.setattr(
+        "agents.odoo_agent.generate_structured_response",
+        lambda **kwargs: {
+            "success": True,
+            "parsed": {
+                "intent": "odoo",
+                "action": "toggle_boolean_field",
+                "language": "fr",
+                "requires_approval": True,
+                "needs_clarification": False,
+                "clarification_reason": None,
+                "entities": {
+                    "product_name": None,
+                    "document_type": None,
+                    "document_reference": None,
+                    "document_id": None,
+                    "partner_name": None,
+                    "line_product": None,
+                    "field": "x_studio_pointage",
+                    "new_value": True,
+                    "model": "account.analytic.account",
+                    "record_id": None,
+                    "record_keyword": "11IFCX0003",
+                    "filename": None,
+                    "content": None,
+                },
+            },
+            "error": None,
+        },
+    )
+
+    result = odoo_agent.parse_odoo_action_with_openai(
+        "coche pointage pour le compte analytique 11IFCX0003 sur odoo"
+    )
+
+    assert result["action"] == "toggle_boolean_field"
+    assert result["target_model"] == "account.analytic.account"
+    assert result["record_query"] == "11IFCX0003"
+    assert result["field_name"] == "x_studio_pointage"
+    assert result["new_value"] is True
+    assert result["requires_approval"] is True
+    assert result["parser_source"] == "openai"
+
+
 def test_openai_parser_normalizes_invoice_line_update(monkeypatch):
     monkeypatch.setattr(
         "agents.odoo_agent.generate_structured_response",

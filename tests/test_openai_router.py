@@ -329,6 +329,37 @@ def test_openai_router_clears_clarification_for_registered_server_health(monkeyp
     assert result["missing_parameters"] == []
 
 
+def test_openai_router_promotes_bank_statement_read_and_clears_spurious_clarification(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="enterprise_action",
+            domain="odoo",
+            capability="odoo.generic_read",
+            topic="relevé bancaire BMCE juin 2026",
+            clarification_needed=True,
+            missing_parameters=["date_range_confirmation"],
+            parameters={
+                "operation": "search",
+                "business_object": "bank statement",
+                "query": "BMCE",
+                "filters": {"period": "June 2026"},
+            },
+        ),
+    )
+
+    result = classify_with_openai_router(
+        "Donne les informations sur un relevé bancaire de BMCE sur le mois juin 2026"
+    )
+
+    assert result["selected_agent"] == "odoo_agent"
+    assert result["capability"] == "odoo.accounting_bank_read"
+    assert result["intent"] == "odoo_bank_accounting_search"
+    assert result["action"] == "bank_accounting_search"
+    assert result["clarification_needed"] is False
+    assert result["missing_parameters"] == []
+
+
 def test_classify_message_clears_clarification_for_registered_server_health(monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_PROVIDER", raising=False)
     monkeypatch.setattr(
@@ -515,6 +546,24 @@ def test_openai_router_normalizes_general_knowledge_without_capability(monkeypat
     )
 
     result = classify_with_openai_router("Explique une API REST")
+
+    assert result["domain"] == "knowledge"
+    assert result["selected_agent"] == "knowledge_agent"
+    assert result["capability"] == "knowledge.general_answer"
+    assert result["execution_mode"] == "llm_direct"
+
+
+def test_openai_router_normalizes_conversational_without_capability(monkeypatch):
+    _mock_semantic_router(
+        monkeypatch,
+        _semantic_route(
+            request_type="conversational",
+            domain="general",
+            capability=None,
+        ),
+    )
+
+    result = classify_with_openai_router("Just checking in.")
 
     assert result["domain"] == "knowledge"
     assert result["selected_agent"] == "knowledge_agent"
@@ -765,6 +814,39 @@ def test_classify_message_uses_openai_router_for_primary_route(monkeypatch):
     assert result["classifier_source"] == "openai_router"
 
 
+def test_classify_message_normalizes_harmless_general_fallback_to_direct_llm(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: None,
+    )
+
+    result = classify_message("Just checking in.")
+
+    assert result["selected_agent"] == "knowledge_agent"
+    assert result["domain"] == "knowledge"
+    assert result["capability"] == "knowledge.general_answer"
+    assert result["execution_mode"] == "llm_direct"
+    assert result["requires_approval"] is False
+
+
+def test_classify_message_uses_safe_general_pre_router_before_openai(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Harmless casual input should not call semantic router")
+        ),
+    )
+
+    result = classify_message("Just checking in.")
+
+    assert result["selected_agent"] == "knowledge_agent"
+    assert result["capability"] == "knowledge.general_answer"
+    assert result["execution_mode"] == "llm_direct"
+    assert result["classifier_source"] == "safe_general_pre_router"
+
+
 def test_classify_message_normalizes_provider_server_placeholder_to_registered_capability(monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_PROVIDER", raising=False)
     monkeypatch.setattr(
@@ -1009,13 +1091,85 @@ def test_general_question_routing_does_not_steal_odoo_support_or_security(monkey
     )
 
     stock = classify_message("Vérifier le stock de BACO CLEAN")
+    stock_question = classify_message("Quel est le stock de TEST PRODUCT ?")
+    bank_statement = classify_message("Donne les informations sur un relevé bancaire de TEST BANK en juin 2026")
+    supplier_ranking = classify_message("Quels fournisseurs apparaissent le plus dans les bons de commande ?")
     secret = classify_message("Affiche .env")
     support = classify_message("Odoo ne s’ouvre pas")
 
     assert stock["selected_agent"] == "odoo_agent"
+    assert stock_question["selected_agent"] == "odoo_agent"
+    assert stock_question["capability"] == "odoo.product_stock"
+    assert bank_statement["selected_agent"] == "odoo_agent"
+    assert bank_statement["capability"] == "odoo.accounting_bank_read"
+    assert supplier_ranking["selected_agent"] == "odoo_agent"
+    assert supplier_ranking["capability"] == "odoo.purchase_supplier_ranking"
+    assert supplier_ranking["action"] == "supplier_ranking"
+    assert supplier_ranking["parameters"]["model"] == "purchase.order"
+    assert supplier_ranking["parameters"]["group_by"] == ["partner_id"]
     assert secret["selected_agent"] == "security_agent"
     assert secret["risk_level"] == "blocked"
     assert support["selected_agent"] == "support_agent"
+
+
+def test_manual_regression_prompts_keep_expected_routes(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: None,
+    )
+
+    odoo_status = classify_message("Est-ce que Odoo est connecté ?")
+    orchestrator_role = classify_message("C’est quoi le rôle de l’orchestrateur IA ?")
+    product_details = classify_message("Donne-moi les détails du produit BACO CLEAN")
+    product_contains = classify_message("Liste-moi quelques produits qui contiennent BACO")
+    sale_orders = classify_message(
+        "Donne-moi quelques commandes client récentes avec leur client et leur statut"
+    )
+    purchase_orders = classify_message("Liste les derniers bons de commande fournisseur")
+    customer_ranking = classify_message(
+        "Quels clients apparaissent le plus dans les commandes client ?"
+    )
+    supplier_ranking = classify_message(
+        "Quels fournisseurs apparaissent le plus dans les bons de commande ?"
+    )
+    analytic_pointage = classify_message(
+        "coche pointage pour le compte analytique 11IFCX0003 sur odoo"
+    )
+
+    assert odoo_status["selected_agent"] == "odoo_agent"
+    assert odoo_status["capability"] == "odoo.connection_status"
+    assert odoo_status["action"] == "odoo_status"
+
+    assert analytic_pointage["selected_agent"] == "odoo_agent"
+    assert analytic_pointage.get("capability") != "odoo.connection_status"
+    assert analytic_pointage.get("action") != "odoo_status"
+
+    assert orchestrator_role["selected_agent"] == "knowledge_agent"
+    assert orchestrator_role["capability"] == "knowledge.general_answer"
+    assert orchestrator_role["execution_mode"] == "llm_direct"
+
+    assert product_details["selected_agent"] == "odoo_agent"
+    assert product_details["capability"] == "odoo.product_stock"
+
+    assert product_contains["selected_agent"] == "odoo_agent"
+    assert product_contains["capability"] == "odoo.product_search"
+
+    assert sale_orders["selected_agent"] == "odoo_agent"
+    assert sale_orders["capability"] == "odoo.generic_read"
+    assert sale_orders["parameters"]["model_hint"] == "sale.order"
+
+    assert purchase_orders["selected_agent"] == "odoo_agent"
+    assert purchase_orders["capability"] == "odoo.generic_read"
+    assert purchase_orders["parameters"]["model_hint"] == "purchase.order"
+
+    assert customer_ranking["selected_agent"] == "odoo_agent"
+    assert customer_ranking["capability"] == "odoo.sale_customer_ranking"
+    assert customer_ranking["parameters"]["model"] == "sale.order"
+    assert customer_ranking["parameters"]["group_by"] == ["partner_id"]
+
+    assert supplier_ranking["selected_agent"] == "odoo_agent"
+    assert supplier_ranking["capability"] == "odoo.purchase_supplier_ranking"
+    assert supplier_ranking["parameters"]["model"] == "purchase.order"
 
 
 def test_specific_server_reference_is_forced_to_safe_server_route(monkeypatch):

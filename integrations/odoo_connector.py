@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import unicodedata
 import xmlrpc.client
@@ -13,13 +14,89 @@ load_dotenv()
 PRODUCT_SEARCH_MODELS = {"product.product", "product.template"}
 
 ALLOWED_GENERIC_READ_MODELS = {
+    "account.bank.statement",
+    "account.bank.statement.line",
+    "account.journal",
     "product.product",
     "product.template",
     "res.partner",
     "sale.order",
     "purchase.order",
     "account.move",
+    "account.move.line",
     "stock.picking",
+}
+
+ACCOUNTING_BANK_READ_MODELS = (
+    "account.bank.statement",
+    "account.bank.statement.line",
+    "account.move",
+    "account.move.line",
+    "account.journal",
+)
+
+SAFE_ACCOUNTING_BANK_FIELDS = {
+    "account.bank.statement": [
+        "id",
+        "name",
+        "display_name",
+        "date",
+        "journal_id",
+        "balance",
+        "balance_start",
+        "balance_end_real",
+        "ref",
+    ],
+    "account.bank.statement.line": [
+        "id",
+        "name",
+        "display_name",
+        "date",
+        "journal_id",
+        "partner_id",
+        "amount",
+        "balance",
+        "ref",
+        "payment_ref",
+        "move_id",
+        "statement_id",
+    ],
+    "account.move": [
+        "id",
+        "name",
+        "display_name",
+        "date",
+        "invoice_date",
+        "journal_id",
+        "partner_id",
+        "amount_total",
+        "state",
+        "move_type",
+        "ref",
+        "payment_ref",
+    ],
+    "account.move.line": [
+        "id",
+        "name",
+        "display_name",
+        "date",
+        "journal_id",
+        "partner_id",
+        "balance",
+        "amount_currency",
+        "debit",
+        "credit",
+        "ref",
+        "payment_ref",
+        "move_id",
+    ],
+    "account.journal": [
+        "id",
+        "name",
+        "display_name",
+        "code",
+        "type",
+    ],
 }
 
 ALLOWED_GENERIC_WRITE_FIELDS = {
@@ -235,6 +312,107 @@ def _match_tokens(value: str) -> set[str]:
     return tokens
 
 
+def _parse_month_year_period(value: str) -> tuple[str, str] | None:
+    normalized = _normalize_label(value)
+    month_names = {
+        "janvier": 1,
+        "january": 1,
+        "fevrier": 2,
+        "february": 2,
+        "mars": 3,
+        "march": 3,
+        "avril": 4,
+        "april": 4,
+        "mai": 5,
+        "may": 5,
+        "juin": 6,
+        "june": 6,
+        "juillet": 7,
+        "july": 7,
+        "aout": 8,
+        "august": 8,
+        "septembre": 9,
+        "september": 9,
+        "octobre": 10,
+        "october": 10,
+        "novembre": 11,
+        "november": 11,
+        "decembre": 12,
+        "december": 12,
+    }
+    year_match = re.search(r"\b(20\d{2}|19\d{2})\b", normalized)
+
+    if not year_match:
+        return None
+
+    year = int(year_match.group(1))
+    month = None
+
+    for name, number in month_names.items():
+        if re.search(rf"\b{name}\b", normalized):
+            month = number
+            break
+
+    if month is None:
+        numeric_match = re.search(r"\b(?:mois|month)\s+(\d{1,2})\b", normalized)
+        if numeric_match:
+            month = int(numeric_match.group(1))
+
+    if month is None or month < 1 or month > 12:
+        return None
+
+    if month == 12:
+        end_year = year + 1
+        end_month = 1
+    else:
+        end_year = year
+        end_month = month + 1
+
+    return f"{year:04d}-{month:02d}-01", f"{end_year:04d}-{end_month:02d}-01"
+
+
+def _accounting_period_label(date_metadata: dict | None) -> str:
+    if not isinstance(date_metadata, dict):
+        return ""
+
+    start = str(date_metadata.get("start") or "")
+    end = str(date_metadata.get("end") or "")
+    month_labels = {
+        "01": "janvier",
+        "02": "février",
+        "03": "mars",
+        "04": "avril",
+        "05": "mai",
+        "06": "juin",
+        "07": "juillet",
+        "08": "août",
+        "09": "septembre",
+        "10": "octobre",
+        "11": "novembre",
+        "12": "décembre",
+    }
+
+    if re.match(r"^\d{4}-\d{2}-01$", start) and re.match(r"^\d{4}-\d{2}-01$", end):
+        year = start[:4]
+        month = start[5:7]
+        next_month = int(month) + 1
+        end_year = int(year)
+
+        if next_month == 13:
+            next_month = 1
+            end_year += 1
+
+        expected_end = f"{end_year:04d}-{next_month:02d}-01"
+
+        if end == expected_end and month in month_labels:
+            return f"en {month_labels[month]} {year}"
+
+    if start and end:
+        return f"entre {start} et {end}"
+
+    return ""
+
+
 def _contains_secret_token(value: str) -> bool:
     normalized = _normalize_label(value).replace(" ", "_")
     return any(token in normalized for token in SECRET_FIELD_TOKENS)
@@ -297,7 +475,8 @@ DOCUMENT_MODEL_TO_TYPE = {
 
 class OdooConnector:
     def __init__(self):
-        self.url = os.getenv("ODOO_URL")
+        configured_url = (os.getenv("ODOO_URL") or "").strip().rstrip("/")
+        self.url = configured_url or None
         self.database = os.getenv("ODOO_DB")
         self.username = os.getenv("ODOO_USERNAME")
         self.password = os.getenv("ODOO_PASSWORD")
@@ -442,6 +621,25 @@ class OdooConnector:
             "uom_id": unit[1] if isinstance(unit, list) and len(unit) > 1 else unit or "",
         }
 
+    def _product_candidate_matches_query(self, candidate: dict, product_name: str) -> bool:
+        normalized_query = _normalize_label(product_name)
+        compact_query = normalized_query.replace(" ", "")
+
+        if not normalized_query:
+            return False
+
+        for field in ("name", "default_code", "barcode", "template_name"):
+            normalized_value = _normalize_label(candidate.get(field) or "")
+            compact_value = normalized_value.replace(" ", "")
+
+            if normalized_query in normalized_value:
+                return True
+
+            if compact_query and compact_query in compact_value:
+                return True
+
+        return False
+
     def _search_product_templates(self, domain, limit: int = 20):
         models = self._models()
 
@@ -500,6 +698,10 @@ class OdooConnector:
                     continue
 
                 formatted = self._format_product_candidate(product)
+
+                if not self._product_candidate_matches_query(formatted, product_name):
+                    continue
+
                 formatted["model"] = model_name
                 results.append(formatted)
                 seen.add(key)
@@ -548,6 +750,88 @@ class OdooConnector:
             }
 
         return None
+
+    def _resolve_product_for_stock_read(self, product_query: str) -> dict:
+        products = self._search_products_for_inventory(product_query, limit=20)
+
+        if not products:
+            return {
+                "success": False,
+                "found": False,
+                "ambiguous": False,
+                "product_query": product_query,
+                "product": None,
+                "product_id": None,
+                "candidates": [],
+                "message": "No product found in Odoo.",
+            }
+
+        normalized_query = _normalize_label(product_query)
+
+        def candidate_labels(product):
+            return {
+                _normalize_label(str(product.get("name") or "")),
+                _normalize_label(str(product.get("default_code") or "")),
+                _normalize_label(str(product.get("barcode") or "")),
+                _normalize_label(str(product.get("template_name") or "")),
+            }
+
+        exact_products = [
+            product
+            for product in products
+            if normalized_query and normalized_query in candidate_labels(product)
+        ]
+        candidate_pool = exact_products or products
+        variant_candidates = [
+            product
+            for product in candidate_pool
+            if product.get("model") == "product.product"
+        ]
+
+        if variant_candidates:
+            candidate_pool = variant_candidates
+
+        deduped = []
+        seen = set()
+
+        for product in candidate_pool:
+            identity = (
+                _normalize_label(str(product.get("default_code") or "")),
+                _normalize_label(str(product.get("barcode") or "")),
+                _normalize_label(str(product.get("name") or "")),
+                _normalize_label(str(product.get("template_name") or "")),
+            )
+
+            if identity in seen:
+                continue
+
+            seen.add(identity)
+            deduped.append(product)
+
+        if len(deduped) == 1:
+            return {
+                "success": True,
+                "found": True,
+                "ambiguous": False,
+                "product_query": product_query,
+                "resolution_strategy": "inventory_read_search",
+                "product": deduped[0],
+                "product_id": deduped[0].get("id"),
+                "candidates": deduped,
+                "message": "Product resolved for stock read.",
+            }
+
+        return {
+            "success": False,
+            "found": True,
+            "ambiguous": True,
+            "product_query": product_query,
+            "resolution_strategy": "inventory_read_search",
+            "product": None,
+            "product_id": None,
+            "candidates": deduped[:5],
+            "message": "Produit ambigu — aucune consultation unique exécutée.",
+        }
 
     def resolve_product_template_for_write(self, product_query: str) -> dict:
         if self.mock_mode:
@@ -818,7 +1102,7 @@ class OdooConnector:
             }
 
         try:
-            resolved = self.resolve_product_template_for_write(product_name)
+            resolved = self._resolve_product_for_stock_read(product_name)
 
             if not resolved.get("product"):
                 return {
@@ -2009,6 +2293,474 @@ class OdooConnector:
                 "error": str(error),
             }
 
+    def rank_purchase_order_suppliers(self, limit: int = 10):
+        model_name = "purchase.order"
+        aggregation_field = "partner_id"
+        bounded_limit = max(1, min(int(limit or 10), DYNAMIC_READ_MAX_LIMIT))
+        domain = []
+
+        if model_name not in ALLOWED_GENERIC_READ_MODELS:
+            return {
+                "success": False,
+                "source": "real_odoo",
+                "status": "unsupported",
+                "found": False,
+                "selected_model": model_name,
+                "aggregation_field": aggregation_field,
+                "odoo_method": None,
+                "domain_used": domain,
+                "fields_used": [],
+                "count_returned": 0,
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "unsupported_by_policy",
+                "message": "La lecture des fournisseurs de bons de commande n'est pas autorisée par la politique actuelle.",
+            }
+
+        try:
+            fields = self._existing_fields(model_name, ["id", aggregation_field])
+        except Exception as error:
+            return {
+                "success": False,
+                "source": "real_odoo_error",
+                "status": "unsupported",
+                "found": False,
+                "selected_model": model_name,
+                "aggregation_field": aggregation_field,
+                "odoo_method": None,
+                "domain_used": domain,
+                "fields_used": [],
+                "count_returned": 0,
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "missing_model",
+                "message": "Le modèle purchase.order n'est pas disponible pour cette lecture.",
+                "error": str(error),
+            }
+
+        if aggregation_field not in fields:
+            return {
+                "success": False,
+                "source": "real_odoo",
+                "status": "unsupported",
+                "found": False,
+                "selected_model": model_name,
+                "aggregation_field": aggregation_field,
+                "odoo_method": None,
+                "domain_used": domain,
+                "fields_used": fields,
+                "count_returned": 0,
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "missing_field",
+                "message": "Le champ fournisseur partner_id n'est pas disponible sur les bons de commande.",
+            }
+
+        try:
+            raw_groups = self._models().execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                model_name,
+                "read_group",
+                [domain, [aggregation_field], [aggregation_field]],
+                {
+                    "context": {"active_test": False},
+                    "lazy": False,
+                    "limit": min(DYNAMIC_READ_AGGREGATE_MAX_GROUPS, max(bounded_limit, 10)),
+                },
+            )
+            records = []
+
+            for raw_group in raw_groups or []:
+                group_value = self._normalize_group_value(raw_group.get(aggregation_field))
+
+                if not isinstance(group_value, dict):
+                    continue
+
+                count = raw_group.get("__count")
+
+                if count is None:
+                    count = raw_group.get(f"{aggregation_field}_count", 0)
+
+                records.append({
+                    "supplier_id": group_value.get("id"),
+                    "supplier": group_value.get("display_name"),
+                    "count": int(count or 0),
+                })
+
+            records = [
+                record
+                for record in records
+                if record.get("supplier") and record.get("count", 0) > 0
+            ]
+            records.sort(key=lambda item: item["count"], reverse=True)
+            records = records[:bounded_limit]
+
+            if records:
+                return {
+                    "success": True,
+                    "source": "real_odoo",
+                    "status": "completed",
+                    "found": True,
+                    "selected_model": model_name,
+                    "aggregation_field": aggregation_field,
+                    "odoo_method": "read_group",
+                    "domain_used": domain,
+                    "fields_used": [aggregation_field],
+                    "count_returned": len(records),
+                    "records": records,
+                    "record_count": len(records),
+                    "failure_reason": None,
+                    "message": "Supplier ranking read from purchase orders.",
+                }
+
+            return {
+                "success": False,
+                "source": "real_odoo",
+                "status": "not_found",
+                "found": False,
+                "selected_model": model_name,
+                "aggregation_field": aggregation_field,
+                "odoo_method": "read_group",
+                "domain_used": domain,
+                "fields_used": [aggregation_field],
+                "count_returned": 0,
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "no_records",
+                "message": "Aucun fournisseur n'a été trouvé dans les bons de commande.",
+            }
+        except Exception as read_group_error:
+            try:
+                raw_records = self._models().execute_kw(
+                    self.database,
+                    self.uid,
+                    self.auth_secret,
+                    model_name,
+                    "search_read",
+                    [domain],
+                    {
+                        "fields": ["id", aggregation_field],
+                        "limit": min(DYNAMIC_READ_AGGREGATE_MAX_GROUPS, max(bounded_limit, 10)),
+                        "context": {"active_test": False},
+                    },
+                )
+            except Exception as fallback_error:
+                return {
+                    "success": False,
+                    "source": "real_odoo_error",
+                    "status": "failed",
+                    "found": False,
+                    "selected_model": model_name,
+                    "aggregation_field": aggregation_field,
+                    "odoo_method": "read_group",
+                    "domain_used": domain,
+                    "fields_used": [aggregation_field],
+                    "count_returned": 0,
+                    "records": [],
+                    "record_count": 0,
+                    "failure_reason": "read_group_failed",
+                    "message": "Le classement des fournisseurs n'a pas pu être lu dans Odoo.",
+                    "error": str(fallback_error),
+                    "read_group_error": str(read_group_error),
+                }
+
+            counts = {}
+
+            for record in raw_records or []:
+                partner = record.get(aggregation_field)
+                supplier_name = self._m2o_name(partner)
+                supplier_id = self._m2o_id(partner)
+
+                if not supplier_name:
+                    continue
+
+                key = (supplier_id, supplier_name)
+                counts[key] = counts.get(key, 0) + 1
+
+            records = [
+                {
+                    "supplier_id": supplier_id,
+                    "supplier": supplier_name,
+                    "count": count,
+                }
+                for (supplier_id, supplier_name), count in counts.items()
+            ]
+            records.sort(key=lambda item: item["count"], reverse=True)
+            records = records[:bounded_limit]
+
+            if records:
+                return {
+                    "success": True,
+                    "source": "real_odoo",
+                    "status": "completed",
+                    "found": True,
+                    "selected_model": model_name,
+                    "aggregation_field": aggregation_field,
+                    "odoo_method": "search_read_fallback",
+                    "domain_used": domain,
+                    "fields_used": ["id", aggregation_field],
+                    "count_returned": len(records),
+                    "records": records,
+                    "record_count": len(records),
+                    "failure_reason": None,
+                    "message": "Supplier ranking read from bounded purchase order search.",
+                    "read_group_error": str(read_group_error),
+                }
+
+            return {
+                "success": False,
+                "source": "real_odoo",
+                "status": "not_found",
+                "found": False,
+                "selected_model": model_name,
+                "aggregation_field": aggregation_field,
+                "odoo_method": "search_read_fallback",
+                "domain_used": domain,
+                "fields_used": ["id", aggregation_field],
+                "count_returned": 0,
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "no_records",
+                "message": "Aucun fournisseur n'a été trouvé dans les bons de commande.",
+                "read_group_error": str(read_group_error),
+            }
+
+    def rank_sale_order_customers(self, limit: int = 10):
+        model_name = "sale.order"
+        aggregation_field = "partner_id"
+        bounded_limit = max(1, min(int(limit or 10), DYNAMIC_READ_MAX_LIMIT))
+        domain = []
+
+        if model_name not in ALLOWED_GENERIC_READ_MODELS:
+            return {
+                "success": False,
+                "source": "real_odoo",
+                "status": "unsupported",
+                "found": False,
+                "selected_model": model_name,
+                "aggregation_field": aggregation_field,
+                "odoo_method": None,
+                "domain_used": domain,
+                "fields_used": [],
+                "count_returned": 0,
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "unsupported_by_policy",
+                "message": "La lecture des clients de commandes client n'est pas autorisée par la politique actuelle.",
+            }
+
+        try:
+            fields = self._existing_fields(model_name, ["id", aggregation_field])
+        except Exception as error:
+            return {
+                "success": False,
+                "source": "real_odoo_error",
+                "status": "unsupported",
+                "found": False,
+                "selected_model": model_name,
+                "aggregation_field": aggregation_field,
+                "odoo_method": None,
+                "domain_used": domain,
+                "fields_used": [],
+                "count_returned": 0,
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "missing_model",
+                "message": "Le modèle sale.order n'est pas disponible pour cette lecture.",
+                "error": str(error),
+            }
+
+        if aggregation_field not in fields:
+            return {
+                "success": False,
+                "source": "real_odoo",
+                "status": "unsupported",
+                "found": False,
+                "selected_model": model_name,
+                "aggregation_field": aggregation_field,
+                "odoo_method": None,
+                "domain_used": domain,
+                "fields_used": fields,
+                "count_returned": 0,
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "missing_field",
+                "message": "Le champ client partner_id n'est pas disponible sur les commandes client.",
+            }
+
+        try:
+            raw_groups = self._models().execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                model_name,
+                "read_group",
+                [domain, [aggregation_field], [aggregation_field]],
+                {
+                    "context": {"active_test": False},
+                    "lazy": False,
+                    "limit": min(DYNAMIC_READ_AGGREGATE_MAX_GROUPS, max(bounded_limit, 10)),
+                },
+            )
+            records = []
+
+            for raw_group in raw_groups or []:
+                group_value = self._normalize_group_value(raw_group.get(aggregation_field))
+
+                if not isinstance(group_value, dict):
+                    continue
+
+                count = raw_group.get("__count")
+
+                if count is None:
+                    count = raw_group.get(f"{aggregation_field}_count", 0)
+
+                records.append({
+                    "customer_id": group_value.get("id"),
+                    "customer": group_value.get("display_name"),
+                    "count": int(count or 0),
+                })
+
+            records = [
+                record
+                for record in records
+                if record.get("customer") and record.get("count", 0) > 0
+            ]
+            records.sort(key=lambda item: item["count"], reverse=True)
+            records = records[:bounded_limit]
+
+            if records:
+                return {
+                    "success": True,
+                    "source": "real_odoo",
+                    "status": "completed",
+                    "found": True,
+                    "selected_model": model_name,
+                    "aggregation_field": aggregation_field,
+                    "odoo_method": "read_group",
+                    "domain_used": domain,
+                    "fields_used": [aggregation_field],
+                    "count_returned": len(records),
+                    "records": records,
+                    "record_count": len(records),
+                    "failure_reason": None,
+                    "message": "Customer ranking read from sale orders.",
+                }
+
+            return {
+                "success": False,
+                "source": "real_odoo",
+                "status": "not_found",
+                "found": False,
+                "selected_model": model_name,
+                "aggregation_field": aggregation_field,
+                "odoo_method": "read_group",
+                "domain_used": domain,
+                "fields_used": [aggregation_field],
+                "count_returned": 0,
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "no_records",
+                "message": "Aucun client n'a été trouvé dans les commandes client.",
+            }
+        except Exception as read_group_error:
+            try:
+                raw_records = self._models().execute_kw(
+                    self.database,
+                    self.uid,
+                    self.auth_secret,
+                    model_name,
+                    "search_read",
+                    [domain],
+                    {
+                        "fields": ["id", aggregation_field],
+                        "limit": min(DYNAMIC_READ_AGGREGATE_MAX_GROUPS, max(bounded_limit, 10)),
+                        "context": {"active_test": False},
+                    },
+                )
+            except Exception as fallback_error:
+                return {
+                    "success": False,
+                    "source": "real_odoo_error",
+                    "status": "failed",
+                    "found": False,
+                    "selected_model": model_name,
+                    "aggregation_field": aggregation_field,
+                    "odoo_method": "read_group",
+                    "domain_used": domain,
+                    "fields_used": [aggregation_field],
+                    "count_returned": 0,
+                    "records": [],
+                    "record_count": 0,
+                    "failure_reason": "read_group_failed",
+                    "message": "Le classement des clients n'a pas pu être lu dans Odoo.",
+                    "error": str(fallback_error),
+                    "read_group_error": str(read_group_error),
+                }
+
+            counts = {}
+
+            for record in raw_records or []:
+                partner = record.get(aggregation_field)
+                customer_name = self._m2o_name(partner)
+                customer_id = self._m2o_id(partner)
+
+                if not customer_name:
+                    continue
+
+                key = (customer_id, customer_name)
+                counts[key] = counts.get(key, 0) + 1
+
+            records = [
+                {
+                    "customer_id": customer_id,
+                    "customer": customer_name,
+                    "count": count,
+                }
+                for (customer_id, customer_name), count in counts.items()
+            ]
+            records.sort(key=lambda item: item["count"], reverse=True)
+            records = records[:bounded_limit]
+
+            if records:
+                return {
+                    "success": True,
+                    "source": "real_odoo",
+                    "status": "completed",
+                    "found": True,
+                    "selected_model": model_name,
+                    "aggregation_field": aggregation_field,
+                    "odoo_method": "search_read_fallback",
+                    "domain_used": domain,
+                    "fields_used": ["id", aggregation_field],
+                    "count_returned": len(records),
+                    "records": records,
+                    "record_count": len(records),
+                    "failure_reason": None,
+                    "message": "Customer ranking read from bounded sale order search.",
+                    "read_group_error": str(read_group_error),
+                }
+
+            return {
+                "success": False,
+                "source": "real_odoo",
+                "status": "not_found",
+                "found": False,
+                "selected_model": model_name,
+                "aggregation_field": aggregation_field,
+                "odoo_method": "search_read_fallback",
+                "domain_used": domain,
+                "fields_used": ["id", aggregation_field],
+                "count_returned": 0,
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "no_records",
+                "message": "Aucun client n'a été trouvé dans les commandes client.",
+                "read_group_error": str(read_group_error),
+            }
+
     def agent_search_records(
         self,
         model_name: str,
@@ -2501,7 +3253,11 @@ class OdooConnector:
             ],
             "sale.order": ["id", "name", "display_name", "partner_id", "state", "date_order"],
             "purchase.order": ["id", "name", "display_name", "partner_id", "state", "date_order"],
-            "account.move": ["id", "name", "display_name", "partner_id", "state", "invoice_date", "move_type", "ref"],
+            "account.bank.statement": SAFE_ACCOUNTING_BANK_FIELDS["account.bank.statement"],
+            "account.bank.statement.line": SAFE_ACCOUNTING_BANK_FIELDS["account.bank.statement.line"],
+            "account.journal": SAFE_ACCOUNTING_BANK_FIELDS["account.journal"],
+            "account.move": SAFE_ACCOUNTING_BANK_FIELDS["account.move"],
+            "account.move.line": SAFE_ACCOUNTING_BANK_FIELDS["account.move.line"],
             "stock.picking": ["id", "name", "display_name", "partner_id", "state", "scheduled_date", "origin"],
             "account.analytic.account": ["id", "name", "display_name", "x_studio_pointage"],
         }
@@ -2561,6 +3317,37 @@ class OdooConnector:
                 "date": date_value or "",
             }
 
+        if model_name in ACCOUNTING_BANK_READ_MODELS:
+            amount = (
+                record.get("amount")
+                if "amount" in record
+                else record.get("amount_total")
+            )
+            balance = (
+                record.get("balance")
+                if "balance" in record
+                else record.get("balance_end_real")
+            )
+            return {
+                "id": record_id,
+                "model": model_name,
+                "document": record.get("display_name") or record.get("name") or "",
+                "reference": (
+                    record.get("payment_ref")
+                    or record.get("ref")
+                    or record.get("name")
+                    or ""
+                ),
+                "date": record.get("date") or record.get("invoice_date") or "",
+                "journal": self._m2o_name(record.get("journal_id")),
+                "partner": partner,
+                "amount": amount,
+                "balance": balance,
+                "status": record.get("state") or record.get("type") or "",
+                "move": self._m2o_name(record.get("move_id")),
+                "statement": self._m2o_name(record.get("statement_id")),
+            }
+
         if model_name == "account.analytic.account":
             return {
                 "id": record_id,
@@ -2573,6 +3360,275 @@ class OdooConnector:
             "id": record_id,
             "model": model_name,
             "name": record.get("display_name") or record.get("name") or "",
+        }
+
+    def _accounting_bank_query_domain(self, model_name: str, keyword: str, fields: list[str]):
+        query_conditions = []
+
+        for field in ["name", "display_name", "ref", "payment_ref", "code"]:
+            if field in fields:
+                query_conditions.append([field, "ilike", keyword])
+
+        for field in ["journal_id", "partner_id", "move_id", "statement_id"]:
+            if field in fields:
+                query_conditions.append([f"{field}.name", "ilike", keyword])
+
+        return self._or_domain(query_conditions)
+
+    def _accounting_bank_date_domain(self, message: str, fields: list[str]):
+        date_field = next(
+            (
+                field
+                for field in ["date", "invoice_date"]
+                if field in fields
+            ),
+            None,
+        )
+        period = _parse_month_year_period(message)
+
+        if not period:
+            return [], None
+
+        if not date_field:
+            return None, {
+                "failure_reason": "missing_field",
+                "message": "No safe date field is available for this accounting model.",
+            }
+
+        start, end = period
+        return [[date_field, ">=", start], [date_field, "<", end]], {
+            "date_field": date_field,
+            "start": start,
+            "end": end,
+        }
+
+    def search_bank_accounting_records(
+        self,
+        keyword: str,
+        message: str = "",
+        limit: int = 10,
+        candidate_models: list[str] | None = None,
+    ):
+        if self.mock_mode:
+            return {
+                "success": False,
+                "source": "mock_odoo",
+                "status": "failed",
+                "found": False,
+                "candidate_models": [],
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "odoo_unavailable",
+                "message": "Odoo credentials are missing.",
+            }
+
+        candidate_models = candidate_models or list(ACCOUNTING_BANK_READ_MODELS)
+        bounded_limit = max(1, min(int(limit or 10), DYNAMIC_READ_MAX_LIMIT))
+        allowed_models = [
+            model
+            for model in candidate_models
+            if model in ALLOWED_GENERIC_READ_MODELS
+            and model in ACCOUNTING_BANK_READ_MODELS
+        ]
+
+        if not allowed_models:
+            return {
+                "success": False,
+                "source": "real_odoo",
+                "status": "unsupported",
+                "found": False,
+                "candidate_models": [],
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "unsupported_by_policy",
+                "message": (
+                    "Odoo est connecté, mais le modèle nécessaire aux relevés bancaires "
+                    "n’est pas disponible dans cette base ou n’est pas autorisé par la politique de lecture."
+                ),
+            }
+
+        try:
+            models = self._models()
+        except Exception as error:
+            return {
+                "success": False,
+                "source": "real_odoo_error",
+                "status": "failed",
+                "found": False,
+                "candidate_models": allowed_models,
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "odoo_unavailable",
+                "message": "Odoo search is unavailable for this request.",
+                "error": str(error),
+            }
+
+        model_diagnostics = []
+        queried_model_count = 0
+        last_queried_diagnostic = {}
+
+        for model_name in allowed_models:
+            try:
+                fields = self._existing_fields(
+                    model_name,
+                    SAFE_ACCOUNTING_BANK_FIELDS[model_name],
+                )
+            except Exception as error:
+                model_diagnostics.append({
+                    "model": model_name,
+                    "failure_reason": "missing_model",
+                    "message": str(error),
+                })
+                continue
+
+            if not fields:
+                model_diagnostics.append({
+                    "model": model_name,
+                    "failure_reason": "missing_field",
+                    "fields_used": [],
+                })
+                continue
+
+            date_domain, date_metadata = self._accounting_bank_date_domain(
+                message or keyword,
+                fields,
+            )
+
+            if date_domain is None:
+                model_diagnostics.append({
+                    "model": model_name,
+                    "failure_reason": date_metadata["failure_reason"],
+                    "fields_used": fields,
+                    "message": date_metadata["message"],
+                })
+                continue
+
+            query_domain = self._accounting_bank_query_domain(model_name, keyword, fields)
+            domain = []
+
+            if date_domain:
+                domain.extend(date_domain)
+
+            if query_domain:
+                domain.extend(query_domain)
+
+            try:
+                raw_records = models.execute_kw(
+                    self.database,
+                    self.uid,
+                    self.auth_secret,
+                    model_name,
+                    "search_read",
+                    [domain],
+                    {
+                        "fields": fields,
+                        "limit": bounded_limit,
+                        "context": {"active_test": False},
+                    },
+                )
+                queried_model_count += 1
+            except Exception as error:
+                model_diagnostics.append({
+                    "model": model_name,
+                    "failure_reason": "missing_model",
+                    "fields_used": fields,
+                    "domain_used": domain,
+                    "message": str(error),
+                })
+                continue
+
+            records = [
+                self._format_generic_record(model_name, record)
+                for record in raw_records
+            ]
+
+            diagnostic = {
+                "model": model_name,
+                "fields_used": fields,
+                "domain_used": domain,
+                "count_returned": len(records),
+                "date_filter": date_metadata,
+            }
+            model_diagnostics.append(diagnostic)
+            last_queried_diagnostic = diagnostic
+
+            if records:
+                period_label = _accounting_period_label(date_metadata)
+                return {
+                    "success": True,
+                    "source": "real_odoo",
+                    "status": "completed",
+                    "found": True,
+                    "candidate_models": allowed_models,
+                    "selected_model": model_name,
+                    "model": model_name,
+                    "keyword": keyword,
+                    "fields_used": fields,
+                    "domain_used": domain,
+                    "count_returned": len(records),
+                    "date_filter": date_metadata,
+                    "period_label": period_label,
+                    "records": records,
+                    "record_count": len(records),
+                    "model_diagnostics": model_diagnostics,
+                    "failure_reason": None,
+                    "message": "Matching bank/accounting records found in Odoo.",
+                }
+
+        any_model_available = any(
+            item.get("failure_reason") != "missing_model"
+            for item in model_diagnostics
+        )
+        missing_field = next(
+            (
+                item
+                for item in model_diagnostics
+                if item.get("failure_reason") == "missing_field"
+            ),
+            None,
+        )
+
+        if not any_model_available:
+            failure_reason = "missing_model"
+            message_text = (
+                "Odoo est connecté, mais le modèle nécessaire aux relevés bancaires "
+                "n’est pas disponible dans cette base ou n’est pas autorisé par la politique de lecture."
+            )
+        elif missing_field and queried_model_count == 0:
+            failure_reason = "missing_field"
+            message_text = (
+                "Le modèle existe, mais les champs nécessaires pour filtrer par banque/date "
+                "ne sont pas disponibles."
+            )
+        else:
+            failure_reason = "no_records"
+            period_label = _accounting_period_label(last_queried_diagnostic.get("date_filter"))
+            period_text = f" {period_label}" if period_label else " sur la période demandée"
+            message_text = (
+                f"Aucun relevé ou transaction bancaire correspondant à {keyword}"
+                f"{period_text} n’a été trouvé."
+            )
+
+        last_diagnostic = last_queried_diagnostic or (model_diagnostics[-1] if model_diagnostics else {})
+        return {
+            "success": False,
+            "source": "real_odoo",
+            "status": "not_found" if failure_reason == "no_records" else "unsupported",
+            "found": False,
+            "candidate_models": allowed_models,
+            "selected_model": last_diagnostic.get("model"),
+            "model": last_diagnostic.get("model"),
+            "keyword": keyword,
+            "fields_used": last_diagnostic.get("fields_used") or [],
+            "domain_used": last_diagnostic.get("domain_used") or [],
+            "count_returned": 0,
+            "date_filter": last_diagnostic.get("date_filter"),
+            "period_label": _accounting_period_label(last_diagnostic.get("date_filter")),
+            "records": [],
+            "record_count": 0,
+            "model_diagnostics": model_diagnostics,
+            "failure_reason": failure_reason,
+            "message": message_text,
         }
 
     def generic_search_records(self, model_name: str, keyword: str, limit: int = 6):
@@ -4302,6 +5358,161 @@ class OdooConnector:
             ["code", operator, record_query],
         ]
 
+    def _format_analytic_account_candidate(self, account: dict):
+        record_id = account.get("id")
+        display_name = account.get("display_name") or account.get("name") or str(record_id)
+
+        return {
+            "record_id": record_id,
+            "id": record_id,
+            "name": account.get("name") or display_name,
+            "display_name": display_name,
+            "code": account.get("code"),
+            "label": (
+                f"{account.get('code')} - {display_name}"
+                if account.get("code")
+                else display_name
+            ),
+        }
+
+    def resolve_analytic_account(self, record_query: str, limit: int = 6):
+        record_query = (record_query or "").strip()
+
+        if self.mock_mode:
+            return {
+                "success": False,
+                "source": "mock_odoo",
+                "model": "account.analytic.account",
+                "record_query": record_query,
+                "record_id": None,
+                "found": False,
+                "ambiguous": False,
+                "candidates": [],
+                "message": "Odoo credentials are missing.",
+            }
+
+        if not record_query:
+            return {
+                "success": False,
+                "source": "real_odoo",
+                "model": "account.analytic.account",
+                "record_query": record_query,
+                "record_id": None,
+                "found": False,
+                "ambiguous": False,
+                "candidates": [],
+                "failure_reason": "missing_record_query",
+                "message": "Analytic account reference or name is required.",
+            }
+
+        try:
+            models = self._models()
+            fields = self._existing_fields(
+                "account.analytic.account",
+                ["id", "name", "display_name", "code"],
+            )
+            search_fields = [
+                field
+                for field in ["code", "name", "display_name"]
+                if field in fields
+            ]
+
+            if not search_fields:
+                return {
+                    "success": False,
+                    "source": "real_odoo",
+                    "model": "account.analytic.account",
+                    "record_query": record_query,
+                    "record_id": None,
+                    "found": False,
+                    "ambiguous": False,
+                    "candidates": [],
+                    "failure_reason": "missing_search_field",
+                    "message": "No safe analytic account search field is available.",
+                }
+
+            for exact in [True, False]:
+                operator = "=ilike" if exact else "ilike"
+                domain = self._or_domain([
+                    [field, operator, record_query]
+                    for field in search_fields
+                ])
+                accounts = models.execute_kw(
+                    self.database,
+                    self.uid,
+                    self.auth_secret,
+                    "account.analytic.account",
+                    "search_read",
+                    [domain],
+                    {
+                        "fields": fields,
+                        "limit": max(2, min(int(limit or 6), 10)),
+                    },
+                )
+
+                if not accounts:
+                    continue
+
+                candidates = [
+                    self._format_analytic_account_candidate(account)
+                    for account in accounts
+                ]
+
+                if len(candidates) == 1:
+                    candidate = candidates[0]
+                    return {
+                        "success": True,
+                        "source": "real_odoo",
+                        "model": "account.analytic.account",
+                        "record_query": record_query,
+                        "record_id": candidate.get("record_id"),
+                        "record": candidate.get("display_name"),
+                        "record_name": candidate.get("name"),
+                        "record_code": candidate.get("code"),
+                        "found": True,
+                        "ambiguous": False,
+                        "candidates": candidates,
+                        "match_mode": "exact" if exact else "partial",
+                    }
+
+                return {
+                    "success": False,
+                    "source": "real_odoo",
+                    "model": "account.analytic.account",
+                    "record_query": record_query,
+                    "record_id": None,
+                    "found": True,
+                    "ambiguous": True,
+                    "candidates": candidates,
+                    "match_mode": "exact" if exact else "partial",
+                    "message": "Multiple analytic accounts match this reference or name.",
+                }
+
+            return {
+                "success": False,
+                "source": "real_odoo",
+                "model": "account.analytic.account",
+                "record_query": record_query,
+                "record_id": None,
+                "found": False,
+                "ambiguous": False,
+                "candidates": [],
+                "message": "No analytic account found in Odoo.",
+            }
+
+        except Exception as error:
+            return {
+                "success": False,
+                "source": "real_odoo_error",
+                "model": "account.analytic.account",
+                "record_query": record_query,
+                "record_id": None,
+                "found": False,
+                "ambiguous": False,
+                "candidates": [],
+                "message": str(error),
+            }
+
     def _search_analytic_account(self, record_query: str):
         models = self._models()
 
@@ -4343,6 +5554,7 @@ class OdooConnector:
         record_query: str,
         field_name: str,
         new_value: bool,
+        record_id=None,
     ):
         if self.mock_mode:
             return {
@@ -4364,7 +5576,64 @@ class OdooConnector:
 
         try:
             models = self._models()
-            account = self._search_analytic_account(record_query)
+            if record_id is not None:
+                try:
+                    resolved_id = int(record_id)
+                except (TypeError, ValueError):
+                    resolved_id = None
+
+                account_records = (
+                    models.execute_kw(
+                        self.database,
+                        self.uid,
+                        self.auth_secret,
+                        "account.analytic.account",
+                        "read",
+                        [[resolved_id]],
+                        {
+                            "fields": self._existing_fields(
+                                "account.analytic.account",
+                                ["id", "name", "display_name", "code"],
+                            ),
+                        },
+                    )
+                    if resolved_id is not None
+                    else []
+                )
+                account = account_records[0] if account_records else None
+            else:
+                resolved = self.resolve_analytic_account(record_query)
+
+                if resolved.get("ambiguous"):
+                    return {
+                        "success": False,
+                        "source": resolved.get("source"),
+                        "model": "account.analytic.account",
+                        "action": "toggle_boolean_field",
+                        "record_query": record_query,
+                        "record": None,
+                        "record_id": None,
+                        "field_name": field_name,
+                        "requested_value": bool(new_value),
+                        "new_value": None,
+                        "executed": False,
+                        "verified": False,
+                        "found": True,
+                        "ambiguous": True,
+                        "candidates": resolved.get("candidates", []),
+                        "message": "Analytic account is ambiguous. Field was not changed.",
+                    }
+
+                account = (
+                    {
+                        "id": resolved.get("record_id"),
+                        "name": resolved.get("record_name") or resolved.get("record"),
+                        "display_name": resolved.get("record"),
+                        "code": resolved.get("record_code"),
+                    }
+                    if resolved.get("found") and resolved.get("record_id") is not None
+                    else None
+                )
 
             if not account:
                 return {

@@ -13,6 +13,10 @@ from agents.server_agent import (
     is_vague_server_problem,
 )
 from models.openai_router import classify_with_openai_router
+from orchestrator.action_capability_registry import (
+    enrich_route_with_capability_contract,
+    route_from_business_capability,
+)
 from orchestrator.intent_classifier import classify_with_confidence
 from orchestrator.tool_registry import get_capability_metadata
 
@@ -202,6 +206,69 @@ SERVER_RESOURCE_TERMS = {
     "stockage interne",
 }
 
+ENTERPRISE_SYSTEM_TERMS = (
+    SERVER_CONTEXT_TERMS
+    | SERVER_DIAGNOSTIC_TERMS
+    | SERVER_METRIC_TERMS
+    | SUPPORT_ISSUE_TERMS
+    | {
+        "api key",
+        "approval",
+        "approve",
+        "approbation",
+        "audit",
+        "business",
+        "cle ssh",
+        "clés ssh",
+        "database",
+        "env",
+        "erp",
+        "facture",
+        "fichier",
+        "fichiers",
+        "internal",
+        "interne",
+        "inventory",
+        "inventaire",
+        "invoice",
+        "jamain",
+        "odoo",
+        "password",
+        "produit",
+        "product",
+        "rag",
+        "secret",
+        "shell",
+        "ssh",
+        "stock",
+        "token",
+    }
+)
+
+BACKEND_ACTION_TERMS = {
+    "approve",
+    "book",
+    "buy",
+    "cancel",
+    "change",
+    "changer",
+    "create",
+    "delete",
+    "execute",
+    "install",
+    "modifier",
+    "modify",
+    "pay",
+    "remove",
+    "reserve",
+    "réserve",
+    "run",
+    "send",
+    "set",
+    "transfer",
+    "update",
+}
+
 SERVER_DOCUMENTATION_OPERATIONS = {
     "documentation",
     "document",
@@ -210,6 +277,99 @@ SERVER_DOCUMENTATION_OPERATIONS = {
     "resume",
     "résume",
     "summarize",
+}
+
+BANK_ACCOUNTING_READ_TERMS = {
+    "releve bancaire",
+    "releves bancaires",
+    "bank statement",
+    "bank statements",
+    "transaction bancaire",
+    "transactions bancaires",
+    "ecriture bancaire",
+    "ecritures bancaires",
+    "journal bancaire",
+    "journaux bancaires",
+    "bank transaction",
+    "bank transactions",
+    "accounting transaction",
+    "accounting transactions",
+}
+
+SUPPLIER_RANKING_TERMS = {
+    "apparait",
+    "apparaissent",
+    "classement",
+    "count",
+    "distribution",
+    "frequence",
+    "frequency",
+    "le plus",
+    "les plus",
+    "most",
+    "nombre",
+    "par",
+    "ranking",
+    "repartition",
+    "répartition",
+    "top",
+}
+
+SUPPLIER_TERMS = {
+    "fournisseur",
+    "fournisseurs",
+    "supplier",
+    "suppliers",
+    "vendor",
+    "vendors",
+}
+
+CUSTOMER_TERMS = {
+    "client",
+    "clients",
+    "customer",
+    "customers",
+}
+
+PURCHASE_ORDER_TERMS = {
+    "bon de commande",
+    "bons de commande",
+    "commande fournisseur",
+    "commandes fournisseur",
+    "commandes fournisseurs",
+    "purchase order",
+    "purchase orders",
+}
+
+SALE_ORDER_TERMS = {
+    "commande client",
+    "commandes client",
+    "commande de vente",
+    "commandes de vente",
+    "sale order",
+    "sale orders",
+    "sales order",
+    "sales orders",
+    "devis",
+    "quotation",
+    "quotations",
+}
+
+ORDER_LIST_TERMS = {
+    "dernier",
+    "derniers",
+    "donne",
+    "liste",
+    "lister",
+    "quelques",
+    "recent",
+    "recents",
+    "recentes",
+    "récent",
+    "récents",
+    "récentes",
+    "show",
+    "list",
 }
 
 KNOWLEDGE_RETRIEVAL_SIGNALS = {
@@ -551,6 +711,49 @@ def _server_diagnostic_capability_from_message(message: str) -> str | None:
     return None
 
 
+def _cheap_safe_general_route(message: str) -> dict | None:
+    text = _normalize_text(message)
+
+    if not text:
+        return None
+
+    tokens = re.findall(r"[a-z0-9]+", text)
+
+    if len(tokens) > 6:
+        return None
+
+    if any(term in text for term in ENTERPRISE_SYSTEM_TERMS):
+        return None
+
+    if any(re.search(rf"\b{re.escape(term)}\b", text) for term in BACKEND_ACTION_TERMS):
+        return None
+
+    if is_general_information_question(message):
+        return None
+
+    if is_internal_knowledge_question(message):
+        return None
+
+    return _route(
+        intent="general_information_question",
+        selected_agent="knowledge_agent",
+        action="answer_question",
+        risk_level="low",
+        requires_approval=False,
+        confidence="high",
+        reason=(
+            "Cheap safety pre-router selected direct LLM for harmless general "
+            "conversation without backend action signals."
+        ),
+        source="safe_general_pre_router",
+        capability="knowledge.general_answer",
+        request_type="general_knowledge",
+        domain="knowledge",
+        execution_mode="llm_direct",
+        parameters={},
+    )
+
+
 def _is_odoo_access_issue(message: str) -> bool:
     text = _normalize_text(message)
 
@@ -617,6 +820,15 @@ def _is_odoo_write_request(message: str) -> bool:
             "email",
             "pointage",
             "analytique",
+            "releve bancaire",
+            "releves bancaires",
+            "bank statement",
+            "transaction bancaire",
+            "transactions bancaires",
+            "ecriture bancaire",
+            "ecritures bancaires",
+            "journal bancaire",
+            "accounting transaction",
         ]
     )
 
@@ -627,6 +839,14 @@ def _is_odoo_read_request(message: str) -> bool:
     text = _normalize_text(message)
 
     if is_odoo_document_request(message):
+        return True
+
+    if (
+        _is_odoo_connection_status_message(message)
+        or _is_sale_customer_ranking_message(message)
+        or _is_sale_order_list_message(message)
+        or _is_purchase_order_list_message(message)
+    ):
         return True
 
     business_terms = {
@@ -644,14 +864,33 @@ def _is_odoo_read_request(message: str) -> bool:
         "partner",
         "partenaire",
         "contact",
+        "commande client",
+        "commandes client",
+        "commande fournisseur",
+        "commandes fournisseur",
         "analytic",
         "analytique",
+        "releve bancaire",
+        "releves bancaires",
+        "bank statement",
+        "bank statements",
+        "transaction bancaire",
+        "transactions bancaires",
+        "ecriture bancaire",
+        "ecritures bancaires",
+        "journal bancaire",
+        "journaux bancaires",
+        "bank transaction",
+        "bank transactions",
+        "accounting transaction",
+        "accounting transactions",
     }
     inventory_existence_terms = {
         "available",
         "categorie",
         "category",
         "contient",
+        "contiennent",
         "correspond",
         "existe",
         "existent",
@@ -666,6 +905,7 @@ def _is_odoo_read_request(message: str) -> bool:
         "available",
         "combien",
         "count",
+        "donne",
         "detail",
         "details",
         "disponible",
@@ -674,6 +914,10 @@ def _is_odoo_read_request(message: str) -> bool:
         "liste",
         "lister",
         "montre",
+        "quel est",
+        "quelle est",
+        "quels sont",
+        "quelles sont",
         "read",
         "cherche",
         "recherche",
@@ -717,7 +961,64 @@ def _odoo_read_route(message: str, error=None):
     capability = "odoo.product_stock"
     parameters = {}
 
-    if is_odoo_document_request(message):
+    if _is_odoo_connection_status_message(message):
+        intent = "odoo_connection_status"
+        action = "odoo_status"
+        capability = "odoo.connection_status"
+        parameters = {}
+    elif _is_purchase_supplier_ranking_message(message):
+        intent = "odoo_purchase_supplier_ranking"
+        action = "supplier_ranking"
+        capability = "odoo.purchase_supplier_ranking"
+        parameters = {
+            "operation": "aggregate",
+            "business_object": "purchase_order_suppliers",
+            "model": "purchase.order",
+            "model_hint": "purchase.order",
+            "group_by": ["partner_id"],
+            "aggregate": {"operation": "count", "field": "id", "alias": "record_count"},
+            "sort": [{"field": "record_count", "direction": "desc"}],
+            "limit": 10,
+        }
+    elif _is_sale_customer_ranking_message(message):
+        intent = "odoo_sale_customer_ranking"
+        action = "customer_ranking"
+        capability = "odoo.sale_customer_ranking"
+        parameters = {
+            "operation": "aggregate",
+            "business_object": "sale_order_customers",
+            "model": "sale.order",
+            "model_hint": "sale.order",
+            "group_by": ["partner_id"],
+            "aggregate": {"operation": "count", "field": "id", "alias": "record_count"},
+            "sort": [{"field": "record_count", "direction": "desc"}],
+            "limit": 10,
+        }
+    elif _is_sale_order_list_message(message):
+        intent = "odoo_generic_read"
+        action = "odoo_generic_read"
+        capability = "odoo.generic_read"
+        parameters = {
+            "operation": "list",
+            "business_object": "commandes client",
+            "model": "sale.order",
+            "model_hint": "sale.order",
+            "requested_fields": ["name", "partner_id", "state", "date_order"],
+            "limit": 10,
+        }
+    elif _is_purchase_order_list_message(message):
+        intent = "odoo_generic_read"
+        action = "odoo_generic_read"
+        capability = "odoo.generic_read"
+        parameters = {
+            "operation": "list",
+            "business_object": "bons de commande fournisseur",
+            "model": "purchase.order",
+            "model_hint": "purchase.order",
+            "requested_fields": ["name", "partner_id", "state", "date_order"],
+            "limit": 10,
+        }
+    elif is_odoo_document_request(message):
         intent = odoo_document_intent(message)
         action = "search_document" if is_odoo_document_search_request(message) else "read_document"
         capability = (
@@ -725,6 +1026,17 @@ def _odoo_read_route(message: str, error=None):
             if is_odoo_document_search_request(message)
             else "odoo.document_details"
         )
+    elif any(term in text for term in BANK_ACCOUNTING_READ_TERMS):
+        intent = "odoo_bank_accounting_search"
+        action = "bank_accounting_search"
+        capability = "odoo.accounting_bank_read"
+        parameters = {
+            "operation": "search",
+            "business_object": "bank_accounting",
+            "model": "account.bank.statement",
+            "model_hint": "account.bank.statement",
+            "limit": 10,
+        }
     elif "combien" in text or "how many" in text or "count" in text or "total" in text:
         intent = "inventory_summary"
         action = "inventory_summary"
@@ -748,6 +1060,7 @@ def _odoo_read_route(message: str, error=None):
                 "mot cle",
                 "present",
                 "trouver",
+                "contiennent",
             }
         )
     ):
@@ -776,6 +1089,118 @@ def _odoo_read_route(message: str, error=None):
         execution_mode="tool",
         parameters=parameters,
     )
+
+
+def _is_bank_accounting_read_message(message: str) -> bool:
+    text = _normalize_text(message)
+    return any(term in text for term in BANK_ACCOUNTING_READ_TERMS)
+
+
+def _is_purchase_supplier_ranking_message(message: str) -> bool:
+    text = _normalize_text(message)
+    has_supplier = any(term in text for term in SUPPLIER_TERMS)
+    has_purchase_order = any(term in text for term in PURCHASE_ORDER_TERMS)
+    has_ranking = any(term in text for term in SUPPLIER_RANKING_TERMS)
+    return has_supplier and has_purchase_order and has_ranking
+
+
+def _is_sale_customer_ranking_message(message: str) -> bool:
+    text = _normalize_text(message)
+    has_customer = any(term in text for term in CUSTOMER_TERMS)
+    has_sale_order = any(term in text for term in SALE_ORDER_TERMS)
+    has_ranking = any(term in text for term in SUPPLIER_RANKING_TERMS)
+    return has_customer and has_sale_order and has_ranking
+
+
+def _is_odoo_connection_status_message(message: str) -> bool:
+    text = _normalize_text(message)
+    if "odoo" not in text:
+        return False
+
+    business_action_signal = any(
+        term in text
+        for term in {
+            "activer",
+            "changer",
+            "cocher",
+            "coche",
+            "compte analytique",
+            "create",
+            "creer",
+            "delete",
+            "inventaire",
+            "modifier",
+            "mettre a jour",
+            "pointage",
+            "price",
+            "prix",
+            "product",
+            "produit",
+            "stock",
+            "supprimer",
+            "update",
+            "valider",
+        }
+    )
+
+    if business_action_signal:
+        return False
+
+    return any(
+        re.search(pattern, text)
+        for pattern in (
+            r"\bconnecte(?:e|s|es)?\b",
+            r"\bconnexion\b",
+            r"\bconnected\b",
+            r"\bconnection\b",
+            r"\bdisponible\b",
+            r"\bstatus\b",
+            r"\bstatut\b",
+            r"\betat\b",
+            r"\bonline\b",
+            r"\baccessible\b",
+        )
+    )
+
+
+def _is_sale_order_list_message(message: str) -> bool:
+    text = _normalize_text(message)
+    return any(term in text for term in SALE_ORDER_TERMS) and any(
+        term in text for term in ORDER_LIST_TERMS
+    )
+
+
+def _is_purchase_order_list_message(message: str) -> bool:
+    text = _normalize_text(message)
+    return any(term in text for term in PURCHASE_ORDER_TERMS) and any(
+        term in text for term in ORDER_LIST_TERMS
+    )
+
+
+def _is_project_orchestrator_explanation_message(message: str) -> bool:
+    text = _normalize_text(message)
+    has_orchestrator_subject = any(
+        term in text for term in {"orchestrateur", "orchestrator", "orchestrateur ia"}
+    )
+    has_explanation_intent = any(
+        term in text
+        for term in {
+            "role",
+            "rôle",
+            "sert",
+            "fait",
+            "fonctionne",
+            "explique",
+            "c est quoi",
+            "c'est quoi",
+            "what is",
+            "what can",
+            "capabilite",
+            "capacite",
+            "capability",
+        }
+    )
+    return has_orchestrator_subject and has_explanation_intent
 
 
 def _knowledge_intent_for(message: str) -> str:
@@ -864,6 +1289,41 @@ def _knowledge_route_requires_retrieval(route: dict) -> bool:
         return True
 
     return bool(_route_text_signals(route) & KNOWLEDGE_RETRIEVAL_SIGNALS)
+
+
+def _is_general_direct_llm_route(route: dict) -> bool:
+    selected_agent = route.get("selected_agent") or route.get("agent")
+    domain = route.get("domain") or route.get("target_system")
+    capability = route.get("capability")
+    request_type = route.get("request_type")
+    action = str(route.get("action") or "").strip().lower()
+    intent = str(route.get("intent") or "").strip().lower()
+
+    if capability not in {None, "", "general", "knowledge"}:
+        return False
+
+    if selected_agent not in {None, "", "general_agent", "knowledge_agent"}:
+        return False
+
+    if domain not in {None, "", "general", "knowledge"}:
+        return False
+
+    if request_type in {
+        "conversational",
+        "creative_generation",
+        "general_knowledge",
+        "writing_assistance",
+    }:
+        return True
+
+    if request_type == "enterprise_action":
+        return False
+
+    return intent in {"general", "knowledge"} and action in {
+        "",
+        "answer_question",
+        "answer",
+    }
 
 
 def _documentation_summary_intent(route: dict) -> str | None:
@@ -982,6 +1442,25 @@ def normalize_semantic_boundaries(route: dict) -> dict:
     if domain == "server" and documentation_intent:
         return _apply_knowledge_capability(normalized, "knowledge.general_answer")
 
+    if _is_project_orchestrator_explanation_message(
+        str(
+            _route_values(normalized).get("knowledge_topic")
+            or _route_values(normalized).get("topic")
+            or normalized.get("message")
+            or normalized.get("user_message")
+            or ""
+        )
+    ) or (
+        normalized.get("selected_agent") == "knowledge_agent"
+        and _is_project_orchestrator_explanation_message(
+            str(_route_values(normalized).get("topic") or normalized.get("intent") or "")
+        )
+    ):
+        return _apply_knowledge_capability(normalized, "knowledge.general_answer")
+
+    if _is_general_direct_llm_route(normalized):
+        return _apply_knowledge_capability(normalized, "knowledge.general_answer")
+
     if (
         normalized.get("selected_agent") == "knowledge_agent"
         or domain == "knowledge"
@@ -1067,8 +1546,32 @@ def apply_backend_safety_overrides(message: str, route: dict | None = None) -> d
             "Request asks for a destructive or dangerous operation.",
         )
 
+    capability_route = (
+        route_from_business_capability(message, route)
+        if isinstance(route, dict)
+        else None
+    )
+
+    if capability_route:
+        return capability_route
+
+    if _is_bank_accounting_read_message(message):
+        return enrich_route_with_capability_contract(message, _odoo_read_route(message))
+
+    if _is_odoo_connection_status_message(message):
+        return enrich_route_with_capability_contract(message, _odoo_read_route(message))
+
+    if _is_purchase_supplier_ranking_message(message):
+        return enrich_route_with_capability_contract(message, _odoo_read_route(message))
+
+    if _is_sale_customer_ranking_message(message):
+        return enrich_route_with_capability_contract(message, _odoo_read_route(message))
+
+    if _is_sale_order_list_message(message) or _is_purchase_order_list_message(message):
+        return enrich_route_with_capability_contract(message, _odoo_read_route(message))
+
     if is_odoo_document_request(message):
-        return _odoo_read_route(message)
+        return enrich_route_with_capability_contract(message, _odoo_read_route(message))
 
     if _is_unsupported_server_resource_request(message):
         return _route(
@@ -1131,7 +1634,10 @@ def apply_backend_safety_overrides(message: str, route: dict | None = None) -> d
         message_server_capability
         and (route_domain == "server" or selected_agent == "server_agent")
     ):
-        return _apply_server_capability(route, message_server_capability)
+        return enrich_route_with_capability_contract(
+            message,
+            _apply_server_capability(route, message_server_capability),
+        )
 
     normalized_route = normalize_semantic_boundaries(route)
     selected_agent = normalized_route.get("selected_agent") or normalized_route.get("agent")
@@ -1143,6 +1649,8 @@ def apply_backend_safety_overrides(message: str, route: dict | None = None) -> d
         or INTENT_TARGET_MAP.get(normalized_route.get("intent"))
         or "general"
     )
+
+    normalized_route = enrich_route_with_capability_contract(message, normalized_route)
 
     if _is_odoo_write_route(normalized_route):
         normalized_route["requires_approval"] = True
@@ -1318,7 +1826,10 @@ def _deterministic_fallback(message: str, error=None):
         )
 
     if is_general_information_question(message):
-        internal_knowledge = is_internal_knowledge_question(message)
+        internal_knowledge = (
+            is_internal_knowledge_question(message)
+            and not _is_project_orchestrator_explanation_message(message)
+        )
         return _route(
             intent=_knowledge_intent_for(message),
             selected_agent="knowledge_agent",
@@ -1404,6 +1915,11 @@ def classify_message(
 
     if blocked_override:
         return blocked_override
+
+    safe_general_route = _cheap_safe_general_route(message)
+
+    if safe_general_route:
+        return apply_backend_safety_overrides(message, safe_general_route)
 
     optional_provider_route = _classify_with_optional_provider(message)
 

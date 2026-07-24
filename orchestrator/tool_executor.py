@@ -55,6 +55,24 @@ def execute_tool(tool_name: str, **kwargs):
             keyword=kwargs.get("keyword", ""),
         )
 
+    elif tool_name == "odoo_search_bank_accounting":
+        result = odoo.search_bank_accounting_records(
+            keyword=kwargs.get("keyword", ""),
+            message=kwargs.get("message", ""),
+            limit=kwargs.get("limit", 10),
+            candidate_models=kwargs.get("candidate_models"),
+        )
+
+    elif tool_name == "odoo_rank_purchase_order_suppliers":
+        result = odoo.rank_purchase_order_suppliers(
+            limit=kwargs.get("limit", 10),
+        )
+
+    elif tool_name == "odoo_rank_sale_order_customers":
+        result = odoo.rank_sale_order_customers(
+            limit=kwargs.get("limit", 10),
+        )
+
     elif tool_name == "odoo_prepare_update_field":
         result = odoo.prepare_generic_update_field(
             model_name=kwargs.get("model_name", ""),
@@ -89,12 +107,22 @@ def execute_tool(tool_name: str, **kwargs):
     elif tool_name == "odoo_list_analytic_boolean_fields":
         result = odoo.get_analytic_boolean_fields()
 
-    elif tool_name == "odoo_update_analytic_boolean_field":
-        result = odoo.update_analytic_boolean_field(
-            record_query=kwargs.get("record_query", ""),
-            field_name=kwargs.get("field_name", ""),
-            new_value=kwargs.get("new_value") is True,
+    elif tool_name == "odoo_resolve_analytic_account":
+        result = odoo.resolve_analytic_account(
+            kwargs.get("record_query", ""),
         )
+
+    elif tool_name == "odoo_update_analytic_boolean_field":
+        tool_kwargs = {
+            "record_query": kwargs.get("record_query", ""),
+            "field_name": kwargs.get("field_name", ""),
+            "new_value": kwargs.get("new_value") is True,
+        }
+
+        if kwargs.get("record_id") is not None:
+            tool_kwargs["record_id"] = kwargs.get("record_id")
+
+        result = odoo.update_analytic_boolean_field(**tool_kwargs)
 
     elif tool_name == "odoo_search_sale_order":
         result = odoo.search_sale_order(kwargs.get("query", ""))

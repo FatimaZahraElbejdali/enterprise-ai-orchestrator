@@ -38,6 +38,9 @@ SUPPORTED_ODOO_ACTIONS = {
     "inventory_product_search",
     "product_details",
     "inventory_summary",
+    "supplier_ranking",
+    "customer_ranking",
+    "odoo_status",
     "odoo_search_records",
     "odoo_generic_read",
     "odoo_get_record_details",
@@ -45,6 +48,7 @@ SUPPORTED_ODOO_ACTIONS = {
     "odoo_update_field_request",
     "odoo_unsupported_action",
     "clarification_required",
+    "toggle_boolean_field",
     "update_product_price",
     "document_search",
     "document_details",
@@ -62,6 +66,9 @@ BUSINESS_TO_INTERNAL_ACTION = {
     "inventory_product_search": "inventory_product_search",
     "product_details": "product_details",
     "inventory_summary": "inventory_summary",
+    "supplier_ranking": "supplier_ranking",
+    "customer_ranking": "customer_ranking",
+    "odoo_status": "odoo_status",
     "odoo_search_records": "odoo_search_records",
     "odoo_generic_read": "odoo_generic_read",
     "odoo_get_record_details": "odoo_get_record_details",
@@ -69,6 +76,7 @@ BUSINESS_TO_INTERNAL_ACTION = {
     "odoo_update_field_request": "odoo_update_field_request",
     "odoo_unsupported_action": "unknown",
     "clarification_required": "unknown",
+    "toggle_boolean_field": "toggle_boolean_field",
     "update_product_price": "change_price",
     "document_search": "search_document",
     "document_details": "document_details",
@@ -86,11 +94,15 @@ INTERNAL_TO_BUSINESS_ACTION = {
     "check_unit": "product_details",
     "check_product_details": "product_details",
     "change_price": "update_product_price",
+    "toggle_boolean_field": "toggle_boolean_field",
     "search_document": "document_search",
     "document_details": "document_details",
     "update_document_date": "update_document_date",
     "update_document_partner": "update_partner",
     "inventory_summary": "inventory_summary",
+    "supplier_ranking": "supplier_ranking",
+    "customer_ranking": "customer_ranking",
+    "odoo_status": "odoo_status",
     "odoo_search_records": "odoo_search_records",
     "odoo_generic_read": "odoo_generic_read",
     "odoo_get_record_details": "odoo_get_record_details",
@@ -121,6 +133,9 @@ ODOO_ACTION_SCHEMA = {
                     "inventory_product_search",
                     "product_details",
                     "inventory_summary",
+                    "supplier_ranking",
+                    "customer_ranking",
+                    "odoo_status",
                     "odoo_search_records",
                     "odoo_generic_read",
                     "odoo_get_record_details",
@@ -128,6 +143,7 @@ ODOO_ACTION_SCHEMA = {
                     "odoo_update_field_request",
                     "odoo_unsupported_action",
                     "clarification_required",
+                    "toggle_boolean_field",
                     "update_product_price",
                     "document_search",
                     "document_details",
@@ -280,6 +296,8 @@ def extract_product_name(message: str) -> str:
     patterns = [
         r"(?:stock|inventory|inventaire)\s+(?:for|of|du|de|pour)\s+(.+)",
         r"(?:check|show|view|verify|get|consult|search)\s+(?:the\s+)?(?:stock|inventory|product|details|information)\s+(?:for|of)?\s*(.+)",
+        r"(?:donne(?:-moi)?|donner|liste(?:-moi)?|lister|montre(?:-moi)?|affiche(?:-moi)?)\s+(?:le\s+|la\s+|les\s+|des\s+)?(?:détails|details|informations?|fiche)\s+(?:du|de\s+la|de\s+l['’]?|de|pour)\s+(?:produit|product|article)?\s*(.+)",
+        r"(?:donne(?:-moi)?|donner|montre(?:-moi)?|affiche(?:-moi)?)\s+(?:le\s+|la\s+|les\s+)?(?:produit|product|article)\s+(.+)",
         r"(?:vérifier|verifier|consulter|afficher|chercher|rechercher)\s+(?:le\s+|la\s+|les\s+)?(?:stock|inventaire|produit|détails|details|informations?)\s+(?:de|du|pour)?\s*(.+)",
 
         r"(?:change|modify|update|set)\s+(?:the\s+)?(?:sale\s+)?price\s+(?:of|for)\s+(.+?)\s+(?:to|à|a)\s+",
@@ -300,21 +318,21 @@ def extract_product_name(message: str) -> str:
     fallback = text
 
     fallback = re.sub(
-        r"^(check|show|view|get|verify|consult|search|find)\s+",
+        r"^(check|show|view|get|verify|consult|search|find|give|list)\s+",
         "",
         fallback,
         flags=re.IGNORECASE,
     )
 
     fallback = re.sub(
-        r"^(vérifier|verifier|afficher|voir|consulter|chercher|rechercher)\s+",
+        r"^(donne(?:-moi)?|donner|liste(?:-moi)?|lister|montre(?:-moi)?|affiche(?:-moi)?|vérifier|verifier|afficher|voir|consulter|chercher|rechercher)\s+",
         "",
         fallback,
         flags=re.IGNORECASE,
     )
 
     fallback = re.sub(
-        r"^(stock|inventory|inventaire|product|produit|details|détails|informations?)\s+(for|of|de|du|pour)?\s*",
+        r"^(stock|inventory|inventaire|product|produit|article|details|détails|fiche|informations?)\s+(for|of|de|du|pour)?\s*",
         "",
         fallback,
         flags=re.IGNORECASE,
@@ -365,6 +383,7 @@ def is_inventory_product_existence_request(message: str) -> bool:
             "matching",
             "correspond",
             "contient",
+            "contiennent",
             "contenant",
             "categorie",
             "category",
@@ -375,7 +394,23 @@ def is_inventory_product_existence_request(message: str) -> bool:
     )
 
     return (
-        (has_inventory_context or ("odoo" in normalized and has_product_context))
+        (
+            has_inventory_context
+            or ("odoo" in normalized and has_product_context)
+            or (
+                has_product_context
+                and any(
+                    term in normalized
+                    for term in {
+                        "contient",
+                        "contiennent",
+                        "contenant",
+                        "matching",
+                        "correspond",
+                    }
+                )
+            )
+        )
         and has_existence_intent
         and has_product_context
     )
@@ -402,7 +437,7 @@ def extract_inventory_product_keyword(message: str) -> str:
         return clean_inventory_keyword(quoted_match.group(1))
 
     patterns = [
-        r"(?:matching|correspond(?:ant|ants)?\s+(?:à|a|to)|contenant|contient|avec|keyword|mot\s+cl[ée]|cat[ée]gorie|category|famille)\s+(.+?)(?:\s+(?:dans|in|sur|on|est|sont|are|is)\b|[?.!,;:]|$)",
+        r"(?:matching|correspond(?:ant|ants)?\s+(?:à|a|to)|contenant|contient|contiennent|avec|keyword|mot\s+cl[ée]|cat[ée]gorie|category|famille)\s+(.+?)(?:\s+(?:dans|in|sur|on|est|sont|are|is)\b|[?.!,;:]|$)",
         r"(?:produits?|products?|articles?)\s+(?:de|du|d['’]|of|type|cat[ée]gorie|category|famille)\s+(.+?)(?:\s+(?:dans|in|sur|on|est|sont|are|is)\b|[?.!,;:]|$)",
         r"(?:produit|product|article)\s+(.+?)\s+(?:est|is|existe|exists|dans|in|int[ée]gr[ée]|integrated)",
         r"(?:est-ce que|est ce que|is|are|check if|verify if|v[ée]rifie si|verifie si)\s+(.+?)\s+(?:est|sont|is|are|existe|exists|int[ée]gr[ée]|integrated|pr[ée]sent|present)",
@@ -447,6 +482,9 @@ def clean_inventory_keyword(value: str) -> str:
         "chercher",
         "client",
         "contact",
+        "contient",
+        "contiennent",
+        "contenant",
         "customer",
         "dans",
         "de",
@@ -515,6 +553,12 @@ def clean_record_keyword(value: str) -> str:
     normalized = re.sub(r"[?!,;:]+", " ", value or "")
     normalized = re.sub(r"\s+", " ", normalized).strip()
     normalized = re.sub(
+        r"\s+(?:sur|dans|in|on)\s+odoo\b.*$",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
         r"^(?:cherche|chercher|recherche|rechercher|trouve|trouver|find|search|show|montre|affiche|donne(?:-moi)?|liste|lister)\s+",
         "",
         normalized,
@@ -528,6 +572,12 @@ def clean_record_keyword(value: str) -> str:
     )
     normalized = re.sub(
         r"^(?:client|customer|fournisseur|supplier|vendor|contact|partenaire|partner|produit|product|article)\s+",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"^(?:compte\s+analytique|analytic\s+account|account\s+analytic\s+account)\s+",
         "",
         normalized,
         flags=re.IGNORECASE,
@@ -552,12 +602,16 @@ def is_vague_product_keyword(value: str) -> bool:
 
 
 ALLOWED_GENERIC_READ_MODELS = {
+    "account.bank.statement",
+    "account.bank.statement.line",
+    "account.journal",
     "product.product",
     "product.template",
     "res.partner",
     "sale.order",
     "purchase.order",
     "account.move",
+    "account.move.line",
     "stock.picking",
 }
 
@@ -651,6 +705,189 @@ def infer_generic_model(message: str, parsed_action: dict | None = None) -> str 
         return "product.template" if any(term in normalized for term in ["prix", "price", "cout", "cost"]) else "product.product"
 
     return None
+
+
+def is_bank_accounting_read_request(message: str) -> bool:
+    normalized = normalize_label(message)
+    has_bank_accounting_subject = any(
+        term in normalized
+        for term in [
+            "releve bancaire",
+            "releves bancaires",
+            "bank statement",
+            "bank statements",
+            "transaction bancaire",
+            "transactions bancaires",
+            "ecriture bancaire",
+            "ecritures bancaires",
+            "journal bancaire",
+            "journaux bancaires",
+            "bank transaction",
+            "bank transactions",
+            "accounting transaction",
+            "accounting transactions",
+        ]
+    )
+    has_read_intent = any(
+        term in normalized
+        for term in [
+            "donne",
+            "information",
+            "informations",
+            "liste",
+            "lister",
+            "montre",
+            "recherche",
+            "chercher",
+            "trouve",
+            "search",
+            "show",
+            "list",
+            "find",
+            "details",
+            "detail",
+        ]
+    )
+
+    return has_bank_accounting_subject and has_read_intent
+
+
+def is_purchase_supplier_ranking_request(message: str) -> bool:
+    normalized = normalize_label(message)
+    supplier_terms = {
+        "fournisseur",
+        "fournisseurs",
+        "supplier",
+        "suppliers",
+        "vendor",
+        "vendors",
+    }
+    purchase_order_terms = {
+        "bon de commande",
+        "bons de commande",
+        "commande fournisseur",
+        "commandes fournisseur",
+        "commandes fournisseurs",
+        "purchase order",
+        "purchase orders",
+    }
+    ranking_terms = {
+        "apparait",
+        "apparaissent",
+        "classement",
+        "count",
+        "distribution",
+        "frequence",
+        "frequency",
+        "le plus",
+        "les plus",
+        "most",
+        "nombre",
+        "par",
+        "ranking",
+        "repartition",
+        "top",
+    }
+
+    return (
+        any(term in normalized for term in supplier_terms)
+        and any(term in normalized for term in purchase_order_terms)
+        and any(term in normalized for term in ranking_terms)
+    )
+
+
+def is_sale_customer_ranking_request(message: str) -> bool:
+    normalized = normalize_label(message)
+    customer_terms = {
+        "client",
+        "clients",
+        "customer",
+        "customers",
+    }
+    sale_order_terms = {
+        "commande client",
+        "commandes client",
+        "commande de vente",
+        "commandes de vente",
+        "sale order",
+        "sale orders",
+        "sales order",
+        "sales orders",
+    }
+    ranking_terms = {
+        "apparait",
+        "apparaissent",
+        "classement",
+        "count",
+        "distribution",
+        "frequence",
+        "frequency",
+        "le plus",
+        "les plus",
+        "most",
+        "nombre",
+        "par",
+        "ranking",
+        "repartition",
+        "top",
+    }
+
+    return (
+        any(term in normalized for term in customer_terms)
+        and any(term in normalized for term in sale_order_terms)
+        and any(term in normalized for term in ranking_terms)
+    )
+
+
+def is_odoo_status_request(message: str) -> bool:
+    normalized = normalize_label(message)
+    if "odoo" not in normalized:
+        return False
+
+    business_action_signal = any(
+        term in normalized
+        for term in {
+            "activer",
+            "changer",
+            "cocher",
+            "coche",
+            "compte analytique",
+            "create",
+            "creer",
+            "delete",
+            "inventaire",
+            "modifier",
+            "mettre a jour",
+            "pointage",
+            "price",
+            "prix",
+            "product",
+            "produit",
+            "stock",
+            "supprimer",
+            "update",
+            "valider",
+        }
+    )
+
+    if business_action_signal:
+        return False
+
+    return any(
+        re.search(pattern, normalized)
+        for pattern in (
+            r"\bconnecte(?:e|s|es)?\b",
+            r"\bconnexion\b",
+            r"\bconnected\b",
+            r"\bconnection\b",
+            r"\bdisponible\b",
+            r"\betat\b",
+            r"\bstatus\b",
+            r"\bstatut\b",
+            r"\bonline\b",
+            r"\baccessible\b",
+        )
+    )
 
 
 def normalize_generic_field(model_name: str | None, field_value: str | None, message: str = "") -> str | None:
@@ -796,6 +1033,9 @@ def detect_odoo_action(message: str) -> str:
 
     has_change = any(keyword in text for keyword in CHANGE_KEYWORDS)
 
+    if is_odoo_status_request(message):
+        return "odoo_status"
+
     if "price" in text or "prix" in text:
         return "change_price" if has_change else "check_price"
 
@@ -803,6 +1043,12 @@ def detect_odoo_action(message: str) -> str:
         field_name = normalize_generic_field(infer_generic_model(message), None, message)
         if field_name:
             return "odoo_update_field_request"
+
+    if is_purchase_supplier_ranking_request(message):
+        return "supplier_ranking"
+
+    if is_sale_customer_ranking_request(message):
+        return "customer_ranking"
 
     if is_odoo_document_details_request(message):
         return "document_details"
@@ -826,14 +1072,21 @@ def detect_odoo_action(message: str) -> str:
     if is_inventory_product_existence_request(message):
         return "inventory_product_search"
 
+    if is_bank_accounting_read_request(message):
+        return "bank_accounting_search"
+
+    if any(term in normalized for term in ["details", "detail", "détails", "détail", "fiche", "information", "informations"]):
+        inferred_model = infer_generic_model(message)
+        if inferred_model in {"product.product", "product.template"}:
+            return "check_product_details"
+        if inferred_model:
+            return "odoo_get_record_details"
+        return "check_product_details"
+
     if any(term in normalized for term in ["cherche", "chercher", "recherche", "rechercher", "trouve", "trouver", "search", "find", "liste", "lister", "montre", "show"]):
         if infer_generic_model(message):
             return "odoo_search_records"
         return "product_search"
-
-    if any(term in normalized for term in ["details", "detail", "détails", "détail", "fiche", "information", "informations"]):
-        if infer_generic_model(message):
-            return "odoo_get_record_details"
 
     if "unit" in text or "unité" in text or "unite" in text:
         return "change_unit" if has_change else "check_unit"
@@ -1060,11 +1313,11 @@ def _empty_parse() -> dict:
 def _parse_toggle_boolean_fallback(message: str):
     patterns = [
         (
-            r"^(?:cocher|activer|enable|check|tick)\s+(.+?)\s+(?:pour|for)\s+(.+)$",
+            r"^(?:coche|cocher|active|activer|enable|check|tick)\s+(.+?)\s+(?:pour|for)\s+(.+)$",
             True,
         ),
         (
-            r"^(?:décocher|decocher|désactiver|desactiver|disable|uncheck|untick)\s+(.+?)\s+(?:pour|for)\s+(.+)$",
+            r"^(?:décoche|decoche|décocher|decocher|désactive|desactive|désactiver|desactiver|disable|uncheck|untick)\s+(.+?)\s+(?:pour|for)\s+(.+)$",
             False,
         ),
     ]
@@ -1081,8 +1334,8 @@ def _parse_toggle_boolean_fallback(message: str):
             "risk": "medium",
             "requires_approval": True,
             "target_model": "account.analytic.account",
-            "record_query": match.group(2).strip(),
-            "field_label": match.group(1).strip(),
+            "record_query": clean_record_keyword(match.group(2)),
+            "field_label": clean_record_keyword(match.group(1)),
             "field_name": None,
             "new_value": new_value,
             "confidence": 0.85,
@@ -1100,6 +1353,23 @@ def parse_odoo_action_deterministic(message: str) -> dict:
         return toggle_parse
 
     action = detect_odoo_action(message)
+
+    if action == "odoo_status":
+        return {
+            "intent": "odoo",
+            "action": "odoo_status",
+            "business_action": "odoo_status",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": None,
+            "record_query": None,
+            "field_label": None,
+            "field_name": None,
+            "new_value": None,
+            "confidence": 0.9,
+            "parser_source": "local_rules",
+            "parser_error": None,
+        }
 
     if action == "change_price":
         return {
@@ -1165,6 +1435,60 @@ def parse_odoo_action_deterministic(message: str) -> dict:
             "field_name": None,
             "new_value": None,
             "confidence": 0.72,
+            "parser_source": "local_rules",
+            "parser_error": None,
+        }
+
+    if action == "bank_accounting_search":
+        return {
+            "intent": "odoo",
+            "action": "bank_accounting_search",
+            "business_action": "bank_accounting_search",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "account.bank.statement",
+            "model": "account.bank.statement",
+            "record_query": extract_generic_keyword(message),
+            "field_label": None,
+            "field_name": None,
+            "new_value": None,
+            "confidence": 0.76,
+            "parser_source": "local_rules",
+            "parser_error": None,
+        }
+
+    if action == "supplier_ranking":
+        return {
+            "intent": "odoo",
+            "action": "supplier_ranking",
+            "business_action": "supplier_ranking",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "purchase.order",
+            "model": "purchase.order",
+            "record_query": None,
+            "field_label": "fournisseur",
+            "field_name": "partner_id",
+            "new_value": None,
+            "confidence": 0.82,
+            "parser_source": "local_rules",
+            "parser_error": None,
+        }
+
+    if action == "customer_ranking":
+        return {
+            "intent": "odoo",
+            "action": "customer_ranking",
+            "business_action": "customer_ranking",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "sale.order",
+            "model": "sale.order",
+            "record_query": None,
+            "field_label": "client",
+            "field_name": "partner_id",
+            "new_value": None,
+            "confidence": 0.82,
             "parser_source": "local_rules",
             "parser_error": None,
         }
@@ -1450,6 +1774,10 @@ def normalize_openai_parse(
         "odoo_update_field_request",
         "clarification_required",
         "inventory_summary",
+        "bank_accounting_search",
+        "supplier_ranking",
+        "customer_ranking",
+        "odoo_status",
         "update_document_line",
         "update_document_partner",
         "update_document_date",
@@ -1463,6 +1791,8 @@ def normalize_openai_parse(
         normalize_odoo_model(parsed.get("target_model") or parsed.get("model") or entities.get("model"))
         or DOCUMENT_TYPE_TO_MODEL.get(document_type or "")
     )
+    if action == "toggle_boolean_field" and not target_model:
+        target_model = "account.analytic.account"
     record_query = parsed.get("record_query") or parsed_value(parsed, entities, "product_name")
     document_query = (
         parsed.get("document_query")
@@ -1494,9 +1824,16 @@ def normalize_openai_parse(
         "model": target_model,
         "document_query": document_query,
         "product_query": product_query,
-        "field_label": parsed.get("field_label"),
+        "field_label": parsed.get("field_label") or (
+            business_field if action == "toggle_boolean_field" else None
+        ),
         "field_name": (
             parsed.get("field_name")
+            or (
+                normalize_generic_field(target_model, business_field, message)
+                if action == "toggle_boolean_field"
+                else None
+            )
             or technical_field_for_document_action(
                 document_type,
                 business_field,
@@ -1564,6 +1901,41 @@ def normalize_openai_parse(
             "risk": "low",
             "requires_approval": False,
             "target_model": "product.template",
+        })
+
+    if action == "bank_accounting_search":
+        result.update({
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": result.get("target_model") or "account.bank.statement",
+            "model": result.get("model") or result.get("target_model") or "account.bank.statement",
+            "record_query": result.get("record_query") or extract_generic_keyword(message, result),
+        })
+
+    if action == "supplier_ranking":
+        result.update({
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "purchase.order",
+            "model": "purchase.order",
+            "field_name": "partner_id",
+        })
+
+    if action == "customer_ranking":
+        result.update({
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "sale.order",
+            "model": "sale.order",
+            "field_name": "partner_id",
+        })
+
+    if action == "odoo_status":
+        result.update({
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": None,
+            "record_query": None,
         })
 
     if action in {"odoo_search_records", "odoo_get_record_details", "odoo_check_inventory"}:
@@ -1800,8 +2172,10 @@ Supported Odoo actions:
 - inventory_product_search: check whether products matching a keyword/category are integrated in Odoo inventory. Read-only.
 - product_details: read product details for one named product.
 - inventory_summary: broad inventory count/summary questions such as "Combien de produits j’ai dans le stock ?" or "How many products do we have in inventory?". Do not treat these as product names.
+- supplier_ranking: rank suppliers/vendors by purchase order count. Read-only.
 - odoo_generic_read: broad read-only Odoo business data question when no specialized safe capability applies.
 - update_product_price: change the sale price of one product. Sensitive, requires approval.
+- toggle_boolean_field: toggle one approved boolean field on an analytic account. Sensitive, requires approval. Example classes include pointage/dotation on account.analytic.account, but the backend resolves the real safe field.
 - document_search: find a sale order, purchase order, invoice, or delivery.
 - document_details: read details/lines for a sale order, purchase order, invoice, or delivery.
 - update_document_date: change order/invoice/delivery/expected arrival dates. Sensitive, requires approval.
@@ -1826,6 +2200,7 @@ Return exactly the requested JSON structure:
 - entities.line_product is the line product for line price/quantity updates.
 - entities.field is expected_arrival_date, order_date, invoice_date, delivery_date, price_unit, quantity, partner, or unknown.
 - entities.new_value is the normalized target value. Convert French numeric dates like 15/06/2026 to 2026-06-15.
+- For toggle_boolean_field, set entities.model to account.analytic.account, entities.record_keyword to the analytic account reference/name, entities.field to the requested boolean label or technical field, and entities.new_value to true/false.
 - entities.filename and entities.content are null for Odoo actions.
 
 Document aliases:
@@ -2623,11 +2998,64 @@ def build_sensitive_approval_response(message: str, action: str, parsed_action: 
             (resolved_field or {}).get("label")
             or field_label
         )
+        if not product_name:
+            return build_needs_clarification_response(
+                message,
+                parsed_action,
+                ["compte analytique"],
+            )
+
+        resolved_account = unwrap_tool_response(
+            execute_tool(
+                "odoo_resolve_analytic_account",
+                record_query=product_name,
+            )
+        )
+
+        if isinstance(resolved_account, dict) and resolved_account.get("ambiguous"):
+            return build_ambiguous_response(
+                message,
+                parsed_action,
+                resolved_account.get("candidates", []),
+                entity_label="comptes analytiques",
+            )
+
+        if isinstance(resolved_account, dict) and resolved_account.get("found") is False:
+            return with_parser_debug({
+                "intent": "odoo",
+                "agent": "odoo_agent",
+                "risk": "low",
+                "requires_approval": False,
+                "approval_required": False,
+                "status": "not_found",
+                "message": "Aucun compte analytique correspondant trouvé dans Odoo. Aucune validation créée.",
+                "tool_used": "odoo_resolve_analytic_account",
+                "data": resolved_account,
+                "result": resolved_account,
+            }, parsed_action, action)
+
+        if not isinstance(resolved_account, dict) or not resolved_account.get("record_id"):
+            return build_safe_unsupported_document_response(
+                message,
+                {
+                    **parsed_action,
+                    "clarification_reason": "Action non disponible. Le compte analytique n’a pas pu être résolu avec un outil Odoo sécurisé.",
+                },
+            )
+
+        product_name = (
+            resolved_account.get("record")
+            or resolved_account.get("record_name")
+            or product_name
+        )
         requested_value = "true" if parsed_action.get("new_value") is True else "false"
         metadata.update({
             "tool_name": "odoo_update_analytic_boolean_field",
             "model": "account.analytic.account",
-            "record_query": product_name,
+            "record_query": resolved_account.get("record_query") or parsed_action.get("record_query"),
+            "record_id": resolved_account.get("record_id"),
+            "record_name": resolved_account.get("record_name") or resolved_account.get("record"),
+            "record_code": resolved_account.get("record_code"),
             "field_label": field_label,
             "field_name": field_name,
             "new_value": parsed_action.get("new_value") is True,
@@ -2801,6 +3229,7 @@ def build_sensitive_approval_response(message: str, action: str, parsed_action: 
             "product_query": parsed_action.get("product_query"),
             "field_label": parsed_action.get("field_label"),
             "field_name": metadata.get("field_name"),
+            "record_id": metadata.get("record_id"),
             "field": metadata.get("field"),
             "technical_field": metadata.get("technical_field"),
             "source": "approval_simulation",
@@ -2864,6 +3293,7 @@ def build_odoo_read_plan(message: str, classification: dict | None = None):
         "aggregate": values.get("aggregate") if isinstance(values.get("aggregate"), dict) else None,
         "record_id": values.get("record_id"),
         "query": query,
+        "memory_followup": values.get("memory_followup") is True,
     }
 
 
@@ -3140,6 +3570,336 @@ def build_dynamic_read_response(message: str, parsed_action: dict, raw_result: d
     }, parsed_action, "odoo_generic_read")
 
 
+def format_bank_accounting_summary(raw_result: dict, keyword: str) -> str:
+    failure_reason = raw_result.get("failure_reason")
+
+    if failure_reason in {"missing_model", "unsupported_by_policy"}:
+        return raw_result.get("message") or (
+            "Odoo est connecté, mais le modèle nécessaire aux relevés bancaires "
+            "n’est pas disponible dans cette base ou n’est pas autorisé par la politique de lecture."
+        )
+
+    if failure_reason == "missing_field":
+        return raw_result.get("message") or (
+            "Le modèle existe, mais les champs nécessaires pour filtrer par banque/date "
+            "ne sont pas disponibles."
+        )
+
+    if failure_reason == "odoo_unavailable":
+        return "Odoo n’est pas disponible pour cette recherche pour le moment."
+
+    if failure_reason == "no_records" or not raw_result.get("found"):
+        return raw_result.get("message") or (
+            f"Aucun relevé ou transaction bancaire correspondant à {keyword} "
+            "sur la période demandée n’a été trouvé."
+        )
+
+    records = raw_result.get("records") if isinstance(raw_result.get("records"), list) else []
+    lines = [
+        (
+            f"{raw_result.get('record_count', len(records))} relevé(s)/transaction(s) "
+            f"trouvé(s) dans Odoo"
+            f" via {raw_result.get('selected_model') or raw_result.get('model')}."
+        )
+    ]
+
+    for record in records[:10]:
+        if not isinstance(record, dict):
+            continue
+
+        parts = [
+            str(record.get("document") or record.get("reference") or f"ID {record.get('id')}").strip(),
+        ]
+
+        for label, key in [
+            ("date", "date"),
+            ("journal", "journal"),
+            ("partenaire", "partner"),
+            ("montant", "amount"),
+            ("solde", "balance"),
+            ("statut", "status"),
+        ]:
+            value = record.get(key)
+
+            if value not in {None, ""}:
+                parts.append(f"{label}: {value}")
+
+        lines.append("- " + " | ".join(parts))
+
+    return "\n".join(lines)
+
+
+def execute_bank_accounting_search(message: str, parsed_action: dict):
+    keyword = parsed_action.get("record_query") or extract_generic_keyword(message, parsed_action)
+    raw_result = unwrap_tool_response(
+        execute_tool(
+            "odoo_search_bank_accounting",
+            keyword=keyword,
+            message=message,
+            limit=10,
+        )
+    )
+
+    if not isinstance(raw_result, dict):
+        raw_result = {
+            "success": False,
+            "status": "failed",
+            "found": False,
+            "records": [],
+            "record_count": 0,
+            "failure_reason": "failed",
+            "message": "Odoo search is unavailable for this request.",
+        }
+
+    message_text = format_bank_accounting_summary(raw_result, keyword)
+    status = raw_result.get("status") or (
+        "completed" if raw_result.get("found") else "not_found"
+    )
+
+    log_request({
+        "event_type": "odoo_read",
+        "title": "Consultation comptable bancaire Odoo",
+        "system": "odoo",
+        "agent": "odoo_agent",
+        "status": status,
+        "risk": "low",
+        "approval_status": "not_required",
+        "user_message": message,
+        "action": "bank_accounting_search",
+        "model": raw_result.get("selected_model") or raw_result.get("model"),
+        "message": "Données comptables bancaires consultées dans Odoo sans modification.",
+        "data": {
+            "selected_model": raw_result.get("selected_model") or raw_result.get("model"),
+            "candidate_models": raw_result.get("candidate_models") or [],
+            "fields_used": raw_result.get("fields_used") or [],
+            "domain_used": raw_result.get("domain_used") or [],
+            "count_returned": raw_result.get("count_returned") or raw_result.get("record_count") or 0,
+            "failure_reason": raw_result.get("failure_reason"),
+        },
+    })
+
+    return with_parser_debug({
+        "intent": "odoo",
+        "agent": "odoo_agent",
+        "risk": "low",
+        "risk_level": "low",
+        "requires_approval": False,
+        "approval_required": False,
+        "status": status,
+        "message": message_text,
+        "tool_used": "odoo_search_bank_accounting",
+        "target_system": "odoo",
+        "capability": "odoo.accounting_bank_read",
+        "target_model": raw_result.get("selected_model") or raw_result.get("model"),
+        "odoo_model": raw_result.get("selected_model") or raw_result.get("model"),
+        "record_count": raw_result.get("record_count") or 0,
+            "selected_model_name": raw_result.get("selected_model") or raw_result.get("model"),
+            "candidate_models": raw_result.get("candidate_models") or [],
+            "fields_used": raw_result.get("fields_used") or [],
+        "domain_used": raw_result.get("domain_used") or [],
+        "count_returned": raw_result.get("count_returned") or raw_result.get("record_count") or 0,
+        "failure_reason": raw_result.get("failure_reason"),
+        "data": raw_result,
+        "result": raw_result,
+    }, parsed_action, "bank_accounting_search")
+
+
+def format_supplier_ranking_summary(raw_result: dict) -> str:
+    records = raw_result.get("records") if isinstance(raw_result.get("records"), list) else []
+
+    if raw_result.get("failure_reason") == "no_records" or not raw_result.get("found"):
+        return raw_result.get("message") or (
+            "Aucun fournisseur n'a été trouvé dans les bons de commande."
+        )
+
+    lines = ["Fournisseurs les plus présents dans les bons de commande :"]
+
+    for index, record in enumerate(records[:10], start=1):
+        if not isinstance(record, dict):
+            continue
+
+        supplier = record.get("supplier")
+        count = record.get("count")
+
+        if supplier and count is not None:
+            lines.append(f"{index}. {supplier} : {count} bon(s) de commande")
+
+    if len(lines) == 1:
+        return "Aucun fournisseur n'a été trouvé dans les bons de commande."
+
+    return "\n".join(lines)
+
+
+def execute_supplier_ranking(message: str, parsed_action: dict):
+    raw_result = unwrap_tool_response(
+        execute_tool(
+            "odoo_rank_purchase_order_suppliers",
+            limit=10,
+        )
+    )
+
+    if not isinstance(raw_result, dict):
+        raw_result = {
+            "success": False,
+            "status": "failed",
+            "found": False,
+            "records": [],
+            "record_count": 0,
+            "failure_reason": "failed",
+            "message": "Le classement des fournisseurs n'a pas pu être lu dans Odoo.",
+        }
+
+    message_text = format_supplier_ranking_summary(raw_result)
+    status = raw_result.get("status") or (
+        "completed" if raw_result.get("found") else "not_found"
+    )
+
+    log_request({
+        "event_type": "odoo_read",
+        "title": "Classement fournisseurs bons de commande",
+        "system": "odoo",
+        "agent": "odoo_agent",
+        "status": status,
+        "risk": "low",
+        "approval_status": "not_required",
+        "user_message": message,
+        "action": "supplier_ranking",
+        "model": raw_result.get("selected_model") or "purchase.order",
+        "message": "Classement fournisseur lu depuis les bons de commande sans modification.",
+        "data": {
+            "selected_model": raw_result.get("selected_model") or "purchase.order",
+            "aggregation_field": raw_result.get("aggregation_field"),
+            "odoo_method": raw_result.get("odoo_method"),
+            "count_returned": raw_result.get("count_returned") or raw_result.get("record_count") or 0,
+            "failure_reason": raw_result.get("failure_reason"),
+        },
+    })
+
+    return with_parser_debug({
+        "intent": "odoo",
+        "agent": "odoo_agent",
+        "risk": "low",
+        "risk_level": "low",
+        "requires_approval": False,
+        "approval_required": False,
+        "status": status,
+        "message": message_text,
+        "tool_used": "odoo_rank_purchase_order_suppliers",
+        "target_system": "odoo",
+        "capability": "odoo.purchase_supplier_ranking",
+        "target_model": raw_result.get("selected_model") or "purchase.order",
+        "odoo_model": raw_result.get("selected_model") or "purchase.order",
+        "selected_model_name": raw_result.get("selected_model") or "purchase.order",
+        "aggregation_field": raw_result.get("aggregation_field"),
+        "odoo_method": raw_result.get("odoo_method"),
+        "domain_used": raw_result.get("domain_used") or [],
+        "fields_used": raw_result.get("fields_used") or [],
+        "count_returned": raw_result.get("count_returned") or raw_result.get("record_count") or 0,
+        "record_count": raw_result.get("record_count") or 0,
+        "failure_reason": raw_result.get("failure_reason"),
+        "data": raw_result,
+        "result": raw_result,
+    }, parsed_action, "supplier_ranking")
+
+
+def format_customer_ranking_summary(raw_result: dict) -> str:
+    records = raw_result.get("records") if isinstance(raw_result.get("records"), list) else []
+
+    if raw_result.get("failure_reason") == "no_records" or not raw_result.get("found"):
+        return raw_result.get("message") or (
+            "Aucun client n'a été trouvé dans les commandes client."
+        )
+
+    lines = ["Clients les plus présents dans les commandes client :"]
+
+    for index, record in enumerate(records[:10], start=1):
+        if not isinstance(record, dict):
+            continue
+
+        customer = record.get("customer")
+        count = record.get("count")
+
+        if customer and count is not None:
+            lines.append(f"{index}. {customer} : {count} commande(s) client")
+
+    if len(lines) == 1:
+        return "Aucun client n'a été trouvé dans les commandes client."
+
+    return "\n".join(lines)
+
+
+def execute_customer_ranking(message: str, parsed_action: dict):
+    raw_result = unwrap_tool_response(
+        execute_tool(
+            "odoo_rank_sale_order_customers",
+            limit=10,
+        )
+    )
+
+    if not isinstance(raw_result, dict):
+        raw_result = {
+            "success": False,
+            "status": "failed",
+            "found": False,
+            "records": [],
+            "record_count": 0,
+            "failure_reason": "failed",
+            "message": "Le classement des clients n'a pas pu être lu dans Odoo.",
+        }
+
+    message_text = format_customer_ranking_summary(raw_result)
+    status = raw_result.get("status") or (
+        "completed" if raw_result.get("found") else "not_found"
+    )
+
+    log_request({
+        "event_type": "odoo_read",
+        "title": "Classement clients commandes client",
+        "system": "odoo",
+        "agent": "odoo_agent",
+        "status": status,
+        "risk": "low",
+        "approval_status": "not_required",
+        "user_message": message,
+        "action": "customer_ranking",
+        "model": raw_result.get("selected_model") or "sale.order",
+        "message": "Classement client lu depuis les commandes client sans modification.",
+        "data": {
+            "selected_model": raw_result.get("selected_model") or "sale.order",
+            "aggregation_field": raw_result.get("aggregation_field"),
+            "odoo_method": raw_result.get("odoo_method"),
+            "count_returned": raw_result.get("count_returned") or raw_result.get("record_count") or 0,
+            "failure_reason": raw_result.get("failure_reason"),
+        },
+    })
+
+    return with_parser_debug({
+        "intent": "odoo",
+        "agent": "odoo_agent",
+        "risk": "low",
+        "risk_level": "low",
+        "requires_approval": False,
+        "approval_required": False,
+        "status": status,
+        "message": message_text,
+        "tool_used": "odoo_rank_sale_order_customers",
+        "target_system": "odoo",
+        "capability": "odoo.sale_customer_ranking",
+        "target_model": raw_result.get("selected_model") or "sale.order",
+        "odoo_model": raw_result.get("selected_model") or "sale.order",
+        "selected_model_name": raw_result.get("selected_model") or "sale.order",
+        "aggregation_field": raw_result.get("aggregation_field"),
+        "odoo_method": raw_result.get("odoo_method"),
+        "domain_used": raw_result.get("domain_used") or [],
+        "fields_used": raw_result.get("fields_used") or [],
+        "count_returned": raw_result.get("count_returned") or raw_result.get("record_count") or 0,
+        "record_count": raw_result.get("record_count") or 0,
+        "failure_reason": raw_result.get("failure_reason"),
+        "data": raw_result,
+        "result": raw_result,
+    }, parsed_action, "customer_ranking")
+
+
 def build_agentic_read_response(message: str, parsed_action: dict, read_plan: dict):
     raw_result = run_odoo_read_agent(
         message,
@@ -3216,6 +3976,109 @@ def build_agentic_read_response(message: str, parsed_action: dict, read_plan: di
 def run(message: str, classification: dict | None = None):
     if (
         isinstance(classification, dict)
+        and classification.get("capability") == "odoo.connection_status"
+    ):
+        parsed_action = {
+            "intent": "odoo",
+            "action": "odoo_status",
+            "business_action": "odoo_status",
+            "risk": "low",
+            "requires_approval": False,
+            "confidence": 0.95,
+            "parser_source": classification.get("semantic_source") or classification.get("classifier_source") or "semantic_route",
+            "parser_error": classification.get("classifier_error"),
+            "entities": _semantic_read_values(classification),
+        }
+        raw_result = unwrap_tool_response(execute_tool("odoo_test_connection"))
+        connected = bool(raw_result.get("connected") or raw_result.get("success"))
+        status = "completed" if connected else "failed"
+        message_text = (
+            "Odoo est connecté."
+            if connected
+            else "Odoo n'est pas connecté ou ne répond pas pour le moment."
+        )
+        return with_parser_debug({
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "risk": "low",
+            "risk_level": "low",
+            "requires_approval": False,
+            "approval_required": False,
+            "status": status,
+            "message": message_text,
+            "tool_used": "odoo_test_connection",
+            "target_system": "odoo",
+            "capability": "odoo.connection_status",
+            "data": raw_result,
+            "result": raw_result,
+        }, parsed_action, "odoo_status")
+
+    if (
+        isinstance(classification, dict)
+        and classification.get("capability") == "odoo.purchase_supplier_ranking"
+    ):
+        parsed_action = {
+            "intent": "odoo",
+            "action": "supplier_ranking",
+            "business_action": "supplier_ranking",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "purchase.order",
+            "model": "purchase.order",
+            "field_name": "partner_id",
+            "confidence": 0.9,
+            "parser_source": classification.get("semantic_source") or classification.get("classifier_source") or "semantic_route",
+            "parser_error": classification.get("classifier_error"),
+            "entities": _semantic_read_values(classification),
+        }
+        return execute_supplier_ranking(message, parsed_action)
+
+    if (
+        isinstance(classification, dict)
+        and classification.get("capability") == "odoo.sale_customer_ranking"
+    ):
+        parsed_action = {
+            "intent": "odoo",
+            "action": "customer_ranking",
+            "business_action": "customer_ranking",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "sale.order",
+            "model": "sale.order",
+            "field_name": "partner_id",
+            "confidence": 0.9,
+            "parser_source": classification.get("semantic_source") or classification.get("classifier_source") or "semantic_route",
+            "parser_error": classification.get("classifier_error"),
+            "entities": _semantic_read_values(classification),
+        }
+        return execute_customer_ranking(message, parsed_action)
+
+    if (
+        isinstance(classification, dict)
+        and classification.get("capability") == "odoo.accounting_bank_read"
+    ):
+        parsed_action = {
+            "intent": "odoo",
+            "action": "bank_accounting_search",
+            "business_action": "bank_accounting_search",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "account.bank.statement",
+            "model": "account.bank.statement",
+            "record_query": (
+                _semantic_read_values(classification).get("query")
+                or _semantic_read_values(classification).get("record_query")
+                or extract_generic_keyword(message)
+            ),
+            "confidence": 0.9,
+            "parser_source": classification.get("semantic_source") or classification.get("classifier_source") or "semantic_route",
+            "parser_error": classification.get("classifier_error"),
+            "entities": _semantic_read_values(classification),
+        }
+        return execute_bank_accounting_search(message, parsed_action)
+
+    if (
+        isinstance(classification, dict)
         and classification.get("capability") == "odoo.generic_read"
     ):
         read_plan = build_odoo_read_plan(message, classification)
@@ -3232,6 +4095,18 @@ def run(message: str, classification: dict | None = None):
             "parser_error": classification.get("classifier_error"),
             "entities": _semantic_read_values(classification),
         }
+
+        if read_plan.get("memory_followup"):
+            raw_result = unwrap_tool_response(
+                execute_tool("odoo_generic_read", read_plan=read_plan)
+            )
+            result = build_dynamic_read_response(message, parsed_action, raw_result)
+            result["memory_context_used"] = True
+            result["resolved_from_previous_model"] = read_plan.get("model_hint")
+            result["resolved_business_object"] = read_plan.get("business_object")
+            result["follow_up_limit"] = read_plan.get("limit")
+            return result
+
         result = build_agentic_read_response(message, parsed_action, read_plan)
 
         return result
@@ -3463,35 +4338,105 @@ def run(message: str, classification: dict | None = None):
             "candidates": raw_result.get("candidates", []) if isinstance(raw_result, dict) else [],
         }, parsed_action, action)
 
+    if action == "bank_accounting_search":
+        return execute_bank_accounting_search(message, parsed_action)
+
+    if action == "supplier_ranking":
+        return execute_supplier_ranking(message, parsed_action)
+
+    if action == "customer_ranking":
+        return execute_customer_ranking(message, parsed_action)
+
+    if action == "odoo_status":
+        raw_result = unwrap_tool_response(execute_tool("odoo_test_connection"))
+        connected = bool(raw_result.get("connected") or raw_result.get("success"))
+        status = "completed" if connected else "failed"
+        message_text = (
+            "Odoo est connecté."
+            if connected
+            else "Odoo n'est pas connecté ou ne répond pas pour le moment."
+        )
+        return with_parser_debug({
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "risk": "low",
+            "risk_level": "low",
+            "requires_approval": False,
+            "approval_required": False,
+            "status": status,
+            "message": message_text,
+            "tool_used": "odoo_test_connection",
+            "target_system": "odoo",
+            "capability": "odoo.connection_status",
+            "data": raw_result,
+            "result": raw_result,
+        }, parsed_action, "odoo_status")
+
     if action in ["check_stock", "check_price", "check_unit", "check_product_details", "product_details"]:
         product_name = parsed_action.get("record_query") or extract_product_name(message)
         raw_result = check_stock(product_name)
         data = normalize_stock_result(raw_result, action)
 
         found = bool(data.get("found"))
-        message_text, normalized_read, synthesis = _synthesize_read_message(
-            message,
-            parsed_action,
-            {
-                **(raw_result if isinstance(raw_result, dict) else {}),
-                "found": found,
-                "success": found,
-                "record": data,
-                "records": [data] if found else [],
-            },
-            operation="read",
-            query_context={
-                "requested_entity": product_name,
-                "operation": "read",
-            },
+        connector_error = (
+            isinstance(raw_result, dict)
+            and raw_result.get("source") == "real_odoo_error"
         )
+
+        if connector_error:
+            message_text = (
+                "La connexion Odoo est indisponible pour le moment. "
+                "Je ne peux pas vérifier le stock de ce produit."
+            )
+            normalized_read = {
+                "status": "failed",
+                "operation": "read",
+                "model": raw_result.get("model"),
+                "record_count": 0,
+                "records": [],
+                "groups": [],
+                "query_context": {
+                    "requested_entity": product_name,
+                    "operation": "read",
+                },
+                "business_scope_status": "not_required",
+                "business_scope_evidence": [],
+                "truncated": False,
+                "error": "odoo_unavailable",
+            }
+            synthesis = {
+                "response": message_text,
+                "used_llm": False,
+                "provider": None,
+                "model": None,
+                "llm_error": None,
+            }
+        else:
+            message_text, normalized_read, synthesis = _synthesize_read_message(
+                message,
+                parsed_action,
+                {
+                    **(raw_result if isinstance(raw_result, dict) else {}),
+                    "found": found,
+                    "success": found,
+                    "record": data,
+                    "records": [data] if found else [],
+                },
+                operation="read",
+                query_context={
+                    "requested_entity": product_name,
+                    "operation": "read",
+                },
+            )
+
+        status = "failed" if connector_error else ("completed" if found else "not_found")
 
         log_request({
             "event_type": "odoo_read",
             "title": "Consultation produit Odoo",
             "system": "odoo",
             "agent": "odoo_agent",
-            "status": "completed" if found else "not_found",
+            "status": status,
             "risk": "low",
             "approval_status": "not_required",
             "user_message": message,
@@ -3508,7 +4453,7 @@ def run(message: str, classification: dict | None = None):
             "risk_level": "low",
             "requires_approval": False,
             "approval_required": False,
-            "status": "completed" if found else "not_found",
+            "status": status,
             "message": message_text,
             "tool_used": "odoo_check_stock",
             "normalized_read_result": normalized_read,

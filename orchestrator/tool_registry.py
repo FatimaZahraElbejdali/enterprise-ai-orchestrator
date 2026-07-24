@@ -1,10 +1,15 @@
 SAFE_ODOO_READ_MODELS = {
+    "account.analytic.account",
+    "account.bank.statement",
+    "account.bank.statement.line",
+    "account.journal",
     "product.product",
     "product.template",
     "res.partner",
     "sale.order",
     "purchase.order",
     "account.move",
+    "account.move.line",
     "stock.picking",
 }
 
@@ -54,6 +59,33 @@ CAPABILITY_OVERRIDES = {
         "required_parameters": ["model_name"],
         "allowed_models": sorted(SAFE_ODOO_READ_MODELS),
     },
+    "odoo_search_bank_accounting": {
+        "capability": "odoo.accounting_bank_read",
+        "permission_category": "odoo_document_read",
+        "io_mode": "read",
+        "required_parameters": ["keyword"],
+        "allowed_models": [
+            "account.bank.statement",
+            "account.bank.statement.line",
+            "account.move",
+            "account.move.line",
+            "account.journal",
+        ],
+    },
+    "odoo_rank_purchase_order_suppliers": {
+        "capability": "odoo.purchase_supplier_ranking",
+        "permission_category": "odoo_document_read",
+        "io_mode": "read",
+        "required_parameters": [],
+        "allowed_models": ["purchase.order"],
+    },
+    "odoo_rank_sale_order_customers": {
+        "capability": "odoo.sale_customer_ranking",
+        "permission_category": "odoo_document_read",
+        "io_mode": "read",
+        "required_parameters": [],
+        "allowed_models": ["sale.order"],
+    },
     "odoo_prepare_update_field": {
         "capability": "odoo.generic_write_prepare",
         "permission_category": "odoo_write",
@@ -83,6 +115,13 @@ CAPABILITY_OVERRIDES = {
         "permission_category": "odoo_write",
         "io_mode": "write_prepare",
         "required_parameters": [],
+    },
+    "odoo_resolve_analytic_account": {
+        "capability": "odoo.analytic_account_write_resolve",
+        "permission_category": "odoo_write",
+        "io_mode": "write_prepare",
+        "required_parameters": ["record_query"],
+        "allowed_models": ["account.analytic.account"],
     },
     "odoo_update_analytic_boolean_field": {
         "capability": "odoo.analytic_boolean_update",
@@ -360,6 +399,24 @@ TOOLS = {
         "risk_level": "low",
         "requires_approval": False,
     },
+    "odoo_search_bank_accounting": {
+        "description": "Safely search allowlisted Odoo bank statements and accounting transactions.",
+        "system": "odoo",
+        "risk_level": "low",
+        "requires_approval": False,
+    },
+    "odoo_rank_purchase_order_suppliers": {
+        "description": "Safely rank suppliers by purchase order count using purchase.order partner_id.",
+        "system": "odoo",
+        "risk_level": "low",
+        "requires_approval": False,
+    },
+    "odoo_rank_sale_order_customers": {
+        "description": "Safely rank customers by sale order count using sale.order partner_id.",
+        "system": "odoo",
+        "risk_level": "low",
+        "requires_approval": False,
+    },
     "odoo_prepare_update_field": {
         "description": "Resolve one allowlisted Odoo record and field before creating approval.",
         "system": "odoo",
@@ -392,6 +449,12 @@ TOOLS = {
     },
     "odoo_list_analytic_boolean_fields": {
         "description": "List boolean fields on Odoo analytic accounts.",
+        "system": "odoo",
+        "risk_level": "low",
+        "requires_approval": False,
+    },
+    "odoo_resolve_analytic_account": {
+        "description": "Resolve one Odoo analytic account by safe reference or name before an approved write.",
         "system": "odoo",
         "risk_level": "low",
         "requires_approval": False,

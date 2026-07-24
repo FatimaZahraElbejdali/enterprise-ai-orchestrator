@@ -398,6 +398,75 @@ def test_general_advice_question_uses_llm_not_internal_docs(monkeypatch):
     assert len(calls) == 1
 
 
+def test_harmless_general_input_uses_direct_llm_without_internal_sources(monkeypatch):
+    generated_answer = "Réponse conversationnelle générée par le LLM de test."
+    calls = []
+
+    monkeypatch.setattr(
+        "agents.knowledge_agent.is_openai_configured",
+        lambda: True,
+    )
+
+    def fake_generate_response(prompt, system_prompt=None):
+        calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        return {
+            "provider": "openai",
+            "model": "test-model",
+            "success": True,
+            "content": generated_answer,
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        "agents.knowledge_agent.generate_response",
+        fake_generate_response,
+    )
+
+    response = client.post(
+        "/chat",
+        json={"message": "Just checking in."},
+        headers=auth_headers("employee@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["response"] == generated_answer
+    assert data["requires_approval"] is False
+    assert data["approval_id"] is None
+    assert data["sources"] == []
+    assert data["technical"]["agent"] == "knowledge_agent"
+    assert data["technical"]["domain"] == "knowledge"
+    assert data["technical"]["execution_mode"] == "llm_direct"
+    assert data["technical"]["tool_used"] == "public_llm_answer"
+    assert data["technical"]["provider"] == "openai"
+    assert len(calls) == 1
+
+
+def test_unsupported_backend_action_still_does_not_execute(monkeypatch):
+    monkeypatch.setattr(
+        app_module,
+        "run_server_agent",
+        lambda message: (_ for _ in ()).throw(
+            AssertionError("Unsupported server resource action must not execute")
+        ),
+    )
+
+    response = client.post(
+        "/chat",
+        json={"message": "Create an internal server file"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "unsupported"
+    assert data["requires_approval"] is False
+    assert data["technical"]["agent"] == "server_agent"
+    assert data["technical"]["capability"] == "unsupported_capability"
+    assert data["technical"].get("tool_used") is None
+
+
 def test_unknown_company_details_are_answered_carefully():
     response = client.post(
         "/chat",
@@ -483,6 +552,82 @@ def test_readonly_viewer_can_read_limited_odoo_product_info(monkeypatch):
     data = response.json()
     assert data["technical"]["agent"] == "odoo_agent"
     assert data["status"] == "completed"
+
+
+def test_chat_odoo_connection_status_uses_odoo_status_capability(monkeypatch):
+    captured = {}
+
+    def fake_run_odoo_agent(message, classification=None):
+        captured["classification"] = classification
+        return {
+            "intent": "odoo",
+            "agent": "odoo_agent",
+            "selected_agent": "odoo_agent",
+            "parsed_action": "odoo_status",
+            "tool_used": "odoo_test_connection",
+            "target_system": "odoo",
+            "capability": "odoo.connection_status",
+            "status": "completed",
+            "approval_required": False,
+            "requires_approval": False,
+            "message": "Odoo est connecté.",
+            "result": {"connected": True, "mode": "real_odoo"},
+        }
+
+    monkeypatch.setattr(app_module, "run_odoo_agent", fake_run_odoo_agent)
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+
+    response = client.post(
+        "/chat",
+        json={"message": "Est-ce que Odoo est connecté ?"},
+        headers=auth_headers("viewer@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["technical"]["agent"] == "odoo_agent"
+    assert data["technical"]["capability"] == "odoo.connection_status"
+    assert captured["classification"]["capability"] == "odoo.connection_status"
+    assert "connecté" in data["response"]
+
+
+def test_orchestrator_role_explanation_uses_direct_knowledge_not_rag(monkeypatch):
+    calls = []
+
+    def fake_generate_response(prompt, system_prompt=None, **kwargs):
+        calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        return {
+            "success": True,
+            "response": "L’orchestrateur IA aide à router les demandes et à appliquer les contrôles internes.",
+            "provider": "openai",
+            "model": "gpt-test",
+            "error": None,
+        }
+
+    monkeypatch.setattr("agents.knowledge_agent.is_openai_configured", lambda: True)
+    monkeypatch.setattr("agents.knowledge_agent.generate_response", fake_generate_response)
+    monkeypatch.setattr(
+        "agents.knowledge_agent.search_knowledge",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("project role explanation must not use RAG retrieval")
+        ),
+    )
+
+    response = client.post(
+        "/chat",
+        json={"message": "C’est quoi le rôle de l’orchestrateur IA ?"},
+        headers=auth_headers("employee@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["technical"]["agent"] == "knowledge_agent"
+    assert data["technical"]["capability"] == "knowledge.general_answer"
+    assert data["technical"]["execution_mode"] == "llm_direct"
+    assert data["sources"] == []
+    assert calls
 
 
 def test_odoo_manager_can_request_write_but_still_requires_approval(monkeypatch):

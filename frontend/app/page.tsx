@@ -21,21 +21,39 @@ type OdooStatus = {
 
 type ApprovalItem = {
   status?: string;
+  created_at?: string;
   [key: string]: unknown;
 };
 
-type AuditLog = unknown;
+type AuditLog = {
+  event_type?: string;
+  title?: string;
+  message?: string;
+  status?: string;
+  created_at?: string;
+  timestamp?: string;
+  [key: string]: unknown;
+};
 
 type OdooBadge = {
   label: "Odoo connecté" | "Odoo indisponible" | "Connexion requise" | "Session expirée";
   tone: "success" | "danger" | "warning";
 };
 
-const actions = [
-  { title: "Chat IA", href: "/chat" },
-  { title: "Odoo", href: "/odoo" },
-  { title: "Validations", href: "/approvals" },
-  { title: "Journaux d’audit", href: "/logs" },
+type NavAction = {
+  title: string;
+  href: string;
+  icon: IconName;
+};
+
+type IconName = "dashboard" | "chat" | "odoo" | "approval" | "logs" | "document" | "logout";
+
+const actions: NavAction[] = [
+  { title: "Tableau de bord", href: "/", icon: "dashboard" },
+  { title: "Console de chat", href: "/chat", icon: "chat" },
+  { title: "Odoo", href: "/odoo", icon: "odoo" },
+  { title: "Validations", href: "/approvals", icon: "approval" },
+  { title: "Journaux d’audit", href: "/logs", icon: "logs" },
 ];
 
 export default function Home() {
@@ -116,14 +134,58 @@ export default function Home() {
     return approvals.filter((item) => item.status === "pending").length;
   }, [approvals]);
 
+  const todayApprovals = useMemo(() => countToday(approvals), [approvals]);
+  const recentActivities = useMemo(() => {
+    const logItems = logs.slice(0, 4).map((log) => ({
+      label: activityLabel(log),
+      time: relativeTime(log.created_at || log.timestamp),
+      tone: activityTone(log),
+    }));
+
+    if (logItems.length > 0) return logItems;
+
+    return [
+      {
+        label: odooStatus?.connected ? "Connexion Odoo active" : "Connexion Odoo indisponible",
+        time: "maintenant",
+        tone: odooStatus?.connected ? "ok" : "err",
+      },
+      {
+        label: `${pendingApprovals} validation${pendingApprovals > 1 ? "s" : ""} en attente`,
+        time: "chargé",
+        tone: pendingApprovals > 0 ? "warn" : "ok",
+      },
+      {
+        label: "Session tableau de bord ouverte",
+        time: "maintenant",
+        tone: "info",
+      },
+    ];
+  }, [logs, odooStatus?.connected, pendingApprovals]);
+
   return (
     <main className="dashboard-shell">
       <style>{`
         .dashboard-shell {
+          --brand-blue: #28298f;
+          --brand-blue-mid: #3839a8;
+          --brand-blue-soft: #ececf8;
+          --brand-blue-xsoft: #f6f6fc;
+          --brand-border: #d6d7f0;
+          --surface: #ffffff;
+          --page-bg: #f3f3f7;
+          --text-strong: #191a3d;
+          --text-muted: #5e6090;
+          --text-faint: #989ac0;
+          --red: #d94040;
+          --red-bg: #fdeceb;
+          --green: #159862;
+          --green-bg: #e6f7f0;
+          --amber: #bf760c;
+          --amber-bg: #fff2dc;
           min-height: 100vh;
-          background:
-            linear-gradient(180deg, #f8fafc 0%, #f3f6fa 100%);
-          color: #111827;
+          background: var(--page-bg);
+          color: var(--text-strong);
           font-family: var(--font-geist-sans), Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
 
@@ -137,181 +199,328 @@ export default function Home() {
           position: sticky;
           top: 0;
           height: 100vh;
-          background: #111827;
-          color: #ffffff;
-          padding: 26px 20px 22px;
+          background: var(--surface);
+          border-right: 1px solid var(--brand-border);
           display: flex;
           flex-direction: column;
-          justify-content: space-between;
-          border-right: 1px solid rgba(255, 255, 255, 0.08);
         }
 
         .brand {
-          display: grid;
-          grid-template-columns: 56px 1fr;
+          min-height: 94px;
+          display: flex;
           align-items: center;
-          column-gap: 12px;
+          gap: 12px;
+          padding: 20px 18px;
+          border-bottom: 1px solid var(--brand-border);
         }
 
         .brand-mark {
-          width: 56px;
-          height: 56px;
+          width: 52px;
+          height: 52px;
+          border-radius: 10px;
           display: grid;
           place-items: center;
-          border-radius: 8px;
-          background: #ffffff;
+          background: var(--brand-blue-soft);
+          overflow: hidden;
+          flex: 0 0 auto;
         }
 
         .brand-logo {
-          width: 48px;
-          height: 48px;
+          width: 52px;
+          height: 52px;
           object-fit: contain;
           display: block;
         }
 
-        .brand-kicker {
+        .brand-name {
           margin: 0;
-          color: #9ca3af;
-          font-size: 12px;
-          font-weight: 700;
-          grid-column: 2;
+          color: var(--text-strong);
+          font-size: 14px;
+          font-weight: 800;
+          line-height: 1.15;
         }
 
-        .brand-title {
-          margin: -2px 0 0;
-          font-size: 20px;
-          line-height: 1.15;
-          font-weight: 800;
-          letter-spacing: 0;
-          grid-column: 2;
+        .brand-subtitle {
+          margin: 3px 0 0;
+          color: var(--text-faint);
+          font-size: 12px;
+          font-weight: 650;
         }
 
         .sidebar-nav {
-          margin-top: 30px;
+          flex: 1;
+          padding: 18px 12px;
+        }
+
+        .nav-label,
+        .section-label {
+          color: var(--text-faint);
+          font-size: 11px;
+          font-weight: 800;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+        }
+
+        .nav-label {
+          padding: 0 10px 10px;
+        }
+
+        .nav-list {
           display: grid;
           gap: 6px;
         }
 
-        .sidebar-link {
-          color: #d1d5db;
+        .nav-item {
+          min-height: 40px;
+          display: flex;
+          align-items: center;
+          gap: 11px;
+          padding: 9px 11px;
+          border-radius: 10px;
+          color: var(--text-muted);
           text-decoration: none;
-          padding: 11px 12px;
-          border-radius: 8px;
           font-size: 14px;
-          font-weight: 700;
+          font-weight: 750;
+          transition: background 160ms ease, color 160ms ease;
         }
 
-        .sidebar-link:hover,
-        .sidebar-link.active {
-          background: rgba(255, 255, 255, 0.08);
-          color: #ffffff;
+        .nav-item svg {
+          color: var(--text-faint);
+          flex: 0 0 auto;
+          transition: color 160ms ease;
+        }
+
+        .nav-item:hover {
+          background: var(--brand-blue-xsoft);
+          color: var(--text-strong);
+        }
+
+        .nav-item:hover svg,
+        .nav-item.active svg {
+          color: var(--brand-blue);
+        }
+
+        .nav-item.active {
+          background: var(--brand-blue-soft);
+          color: var(--brand-blue);
         }
 
         .sidebar-footer {
-          border-top: 1px solid rgba(255, 255, 255, 0.12);
-          padding-top: 18px;
-          color: #a7b0be;
+          padding: 14px 12px 18px;
+          border-top: 1px solid var(--brand-border);
+        }
+
+        .user-card {
+          min-width: 0;
+          display: grid;
+          grid-template-columns: 34px minmax(0, 1fr);
+          align-items: start;
+          gap: 10px;
+          padding: 10px;
+          border-radius: 10px;
+        }
+
+        .avatar {
+          width: 34px;
+          height: 34px;
+          border-radius: 999px;
+          display: grid;
+          place-items: center;
+          background: var(--brand-blue);
+          color: #ffffff;
+          font-size: 13px;
+          font-weight: 850;
+          position: relative;
+          flex: 0 0 auto;
+        }
+
+        .avatar::after {
+          content: "";
+          position: absolute;
+          right: 0;
+          bottom: 1px;
+          width: 9px;
+          height: 9px;
+          border-radius: 999px;
+          background: var(--green);
+          border: 2px solid var(--surface);
+        }
+
+        .user-info {
+          min-width: 0;
+          flex: 1;
+        }
+
+        .user-email {
+          overflow-wrap: anywhere;
+          color: var(--text-strong);
           font-size: 12px;
-          line-height: 1.7;
+          font-weight: 800;
+          line-height: 1.25;
+        }
+
+        .user-role {
+          margin-top: 2px;
+          color: var(--text-faint);
+          font-size: 11px;
+          line-height: 1.35;
         }
 
         .logout-button {
-          margin-top: 12px;
-          min-height: 36px;
+          grid-column: 1 / -1;
           width: 100%;
-          border: 1px solid rgba(255, 255, 255, 0.22);
-          border-radius: 8px;
-          background: transparent;
-          color: #ffffff;
-          font-weight: 800;
+          min-height: 38px;
+          border: 1px solid var(--brand-border);
+          border-radius: 10px;
+          background: var(--brand-blue-soft);
+          color: var(--brand-blue);
           cursor: pointer;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          padding: 9px 12px;
+          font-size: 12px;
+          font-weight: 850;
+          transition: color 160ms ease, background 160ms ease;
+        }
+
+        .logout-button:hover {
+          background: var(--red-bg);
+          color: var(--red);
+          border-color: rgba(217, 64, 64, 0.28);
         }
 
         .main {
-          padding: 28px 34px;
+          min-width: 0;
           display: flex;
-          align-items: flex-start;
+          flex-direction: column;
         }
 
-        .main-inner {
-          width: 100%;
-          max-width: 1120px;
-          margin: 0 auto;
-          display: grid;
-          gap: 20px;
+        .hero {
+          position: relative;
+          overflow: hidden;
+          background: var(--brand-blue);
+          padding: 34px 42px 36px;
         }
 
-        .header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 22px;
-          min-height: 96px;
-          padding: 22px 24px;
-          margin-bottom: 2px;
-          background: #ffffff;
-          border: 1px solid #dfe5ed;
-          border-radius: 10px;
-          box-shadow: 0 14px 30px rgba(17, 24, 39, 0.05);
+        .hero::before,
+        .hero::after {
+          content: "";
+          position: absolute;
+          pointer-events: none;
+          background: rgba(255, 255, 255, 0.08);
+          clip-path: polygon(50% 0%, 60% 40%, 100% 50%, 60% 60%, 50% 100%, 40% 60%, 0% 50%, 40% 40%);
         }
 
-        .header > div:first-child {
-          min-width: 280px;
+        .hero::before {
+          width: 190px;
+          height: 190px;
+          top: -38px;
+          right: 42px;
         }
 
-        .page-title {
-          margin: 0;
-          color: #111827;
-          font-size: 32px;
-          line-height: 1.1;
+        .hero::after {
+          width: 76px;
+          height: 76px;
+          left: 92px;
+          bottom: -24px;
+          opacity: 0.72;
+        }
+
+        .hero-inner {
+          position: relative;
+          z-index: 1;
+          max-width: 1220px;
+        }
+
+        .hero-eyebrow {
+          color: rgba(255, 255, 255, 0.42);
+          font-size: 11px;
           font-weight: 850;
-          letter-spacing: 0;
+          letter-spacing: 0.16em;
+          text-transform: uppercase;
         }
 
-        .page-subtitle {
-          margin: 9px 0 0;
-          color: #667085;
-          font-size: 15px;
-          line-height: 1.45;
+        .hero-title {
+          margin: 10px 0 16px;
+          color: #ffffff;
+          font-size: 34px;
+          line-height: 1.08;
+          letter-spacing: -0.02em;
+          font-weight: 900;
         }
 
-        .header-actions {
+        .hero-actions {
           display: flex;
           align-items: center;
-          justify-content: flex-end;
-          gap: 9px;
+          gap: 10px;
           flex-wrap: wrap;
-          max-width: 520px;
+        }
+
+        .button,
+        .status-badge {
+          min-height: 44px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          border-radius: 11px;
+          padding: 0 18px;
+          font-size: 14px;
+          font-weight: 850;
+          text-decoration: none;
+          transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+        }
+
+        .button:hover {
+          transform: translateY(-1px);
+        }
+
+        .button.primary {
+          background: #ffffff;
+          color: var(--brand-blue);
+          box-shadow: 0 12px 24px rgba(12, 13, 65, 0.18);
+        }
+
+        .button.primary:hover {
+          background: var(--brand-blue-xsoft);
+          box-shadow: 0 16px 30px rgba(12, 13, 65, 0.22);
+        }
+
+        .button.secondary {
+          background: transparent;
+          color: #ffffff;
+          border: 1.5px solid rgba(255, 255, 255, 0.18);
+        }
+
+        .button.secondary:hover {
+          background: rgba(255, 255, 255, 0.08);
         }
 
         .status-badge {
           min-height: 38px;
-          display: inline-flex;
-          align-items: center;
-          gap: 8px;
-          padding: 0 13px;
           border-radius: 999px;
+          padding: 0 15px;
           font-size: 13px;
-          font-weight: 800;
-          white-space: nowrap;
         }
 
         .status-badge.success {
-          color: #166534;
-          background: #dcfce7;
-          border: 1px solid #bbf7d0;
+          color: #86efac;
+          background: rgba(21, 152, 98, 0.15);
+          border: 1px solid rgba(21, 152, 98, 0.34);
         }
 
         .status-badge.danger {
-          color: #991b1b;
-          background: #fee2e2;
-          border: 1px solid #fecaca;
+          color: #ff8a8a;
+          background: rgba(217, 64, 64, 0.15);
+          border: 1px solid rgba(217, 64, 64, 0.34);
         }
 
         .status-badge.warning {
-          color: #92400e;
-          background: #fef3c7;
-          border: 1px solid #fde68a;
+          color: #ffd28a;
+          background: rgba(191, 118, 12, 0.16);
+          border: 1px solid rgba(191, 118, 12, 0.34);
         }
 
         .status-dot {
@@ -321,139 +530,219 @@ export default function Home() {
           background: currentColor;
         }
 
-        .button {
-          min-height: 38px;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          text-decoration: none;
-          padding: 0 14px;
-          border-radius: 8px;
-          font-size: 13px;
-          font-weight: 800;
-          white-space: nowrap;
+        .content {
+          flex: 1;
+          padding: 30px 42px 44px;
+          overflow-y: auto;
         }
 
-        .button.primary {
-          background: #111827;
-          color: #ffffff;
-          border: 1px solid #111827;
-          box-shadow: 0 8px 18px rgba(17, 24, 39, 0.12);
+        .content-inner {
+          max-width: 1220px;
+          display: grid;
+          gap: 28px;
         }
 
-        .button.secondary {
-          background: #ffffff;
-          color: #111827;
-          border: 1px solid #d9e0ea;
+        .section-label {
+          margin-bottom: 14px;
         }
 
-        .button:hover {
-          transform: translateY(-1px);
-        }
-
-        .stats {
+        .stat-grid {
           display: grid;
           grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 16px;
-          margin: 0;
         }
 
         .stat-card,
-        .action-card {
-          background: #ffffff;
-          border: 1px solid #dfe5ed;
-          border-radius: 8px;
-          box-shadow: 0 10px 24px rgba(17, 24, 39, 0.045);
+        .panel {
+          background: var(--surface);
+          border: 1px solid var(--brand-border);
+          border-radius: 16px;
+          box-shadow: 0 12px 28px rgba(40, 41, 143, 0.06);
         }
 
         .stat-card {
-          min-height: 126px;
+          min-height: 150px;
           padding: 22px;
+          position: relative;
+          overflow: hidden;
           display: flex;
           flex-direction: column;
           justify-content: space-between;
+          transition: transform 180ms ease, box-shadow 180ms ease;
         }
 
-        .stat-label {
-          margin: 0;
-          color: #667085;
-          font-size: 13px;
-          font-weight: 750;
-          line-height: 1.35;
+        .stat-card:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 18px 34px rgba(40, 41, 143, 0.1);
         }
 
-        .stat-value {
-          margin: 0;
-          color: #111827;
-          font-size: 36px;
-          line-height: 1;
-          font-weight: 850;
-          font-variant-numeric: tabular-nums;
+        .stat-card::before {
+          content: "";
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          height: 3px;
+          background: var(--card-accent, var(--brand-blue));
         }
 
-        .section-title {
-          margin: 4px 0 12px;
-          color: #111827;
-          font-size: 18px;
-          font-weight: 850;
-        }
+        .stat-card.warn { --card-accent: var(--amber); }
+        .stat-card.ok { --card-accent: var(--green); }
+        .stat-card.err { --card-accent: var(--red); }
 
-        .actions-grid {
-          display: grid;
-          grid-template-columns: repeat(4, minmax(0, 1fr));
-          gap: 16px;
-        }
-
-        .action-card {
-          min-height: 104px;
+        .stat-header {
           display: flex;
           align-items: center;
           justify-content: space-between;
           gap: 14px;
-          padding: 18px 20px;
-          color: inherit;
-          text-decoration: none;
-          transition:
-            border-color 160ms ease,
-            box-shadow 160ms ease,
-            transform 160ms ease;
         }
 
-        .action-card:hover {
-          border-color: #b8c3d1;
-          box-shadow: 0 16px 28px rgba(17, 24, 39, 0.08);
-          transform: translateY(-2px);
-        }
-
-        .action-title {
-          color: #111827;
-          font-size: 16px;
+        .stat-label {
+          margin: 0;
+          color: var(--text-muted);
+          font-size: 14px;
           font-weight: 850;
         }
 
-        .action-arrow {
-          width: 30px;
-          height: 30px;
+        .stat-icon {
+          width: 34px;
+          height: 34px;
           display: grid;
           place-items: center;
-          border-radius: 999px;
-          background: #f1f5f9;
-          color: #667085;
-          font-size: 18px;
+          border-radius: 10px;
+        }
+
+        .stat-icon.warn { color: var(--amber); background: var(--amber-bg); }
+        .stat-icon.ok { color: var(--green); background: var(--green-bg); }
+        .stat-icon.err { color: var(--red); background: var(--red-bg); }
+
+        .stat-value {
+          margin: 4px 0 0;
+          color: var(--text-strong);
+          font-size: 42px;
           line-height: 1;
-          transition:
-            background 160ms ease,
-            color 160ms ease,
-            transform 160ms ease;
+          font-weight: 900;
+          letter-spacing: -0.04em;
+          font-variant-numeric: tabular-nums;
         }
 
-        .action-card:hover .action-arrow {
-          background: #111827;
-          color: #ffffff;
-          transform: translateX(2px);
+        .stat-footer {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
         }
 
-        @media (max-width: 980px) {
+        .stat-tag {
+          display: inline-flex;
+          align-items: center;
+          min-height: 24px;
+          padding: 0 10px;
+          border-radius: 999px;
+          font-size: 12px;
+          font-weight: 850;
+        }
+
+        .stat-tag.warn { color: var(--amber); background: var(--amber-bg); }
+        .stat-tag.ok { color: var(--green); background: var(--green-bg); }
+        .stat-tag.err { color: var(--red); background: var(--red-bg); }
+
+        .stat-sub {
+          color: var(--text-faint);
+          font-size: 13px;
+          font-weight: 650;
+        }
+
+        .dashboard-bottom {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) minmax(300px, 330px);
+          gap: 18px;
+          align-items: start;
+        }
+
+        .recent-panel {
+          grid-column: 2;
+        }
+
+        .panel {
+          overflow: hidden;
+        }
+
+        .panel-header {
+          min-height: 58px;
+          padding: 16px 20px;
+          border-bottom: 1px solid var(--brand-border);
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 14px;
+        }
+
+        .panel-title {
+          color: var(--text-strong);
+          font-size: 15px;
+          font-weight: 900;
+        }
+
+        .panel-link {
+          color: var(--brand-blue);
+          font-size: 13px;
+          font-weight: 850;
+          text-decoration: none;
+        }
+
+        .feed-list {
+          padding: 0;
+        }
+
+        .feed-item {
+          display: flex;
+          gap: 12px;
+          padding: 14px 20px;
+          border-bottom: 1px solid var(--brand-border);
+          transition: background 160ms ease;
+        }
+
+        .feed-item:last-child {
+          border-bottom: 0;
+        }
+
+        .feed-item:hover {
+          background: var(--brand-blue-xsoft);
+        }
+
+        .feed-pip {
+          width: 8px;
+          height: 8px;
+          border-radius: 999px;
+          flex: 0 0 auto;
+          margin-top: 6px;
+        }
+
+        .feed-pip.warn { background: var(--amber); }
+        .feed-pip.err { background: var(--red); }
+        .feed-pip.ok { background: var(--green); }
+        .feed-pip.info { background: var(--text-faint); }
+
+        .feed-body {
+          min-width: 0;
+        }
+
+        .feed-msg {
+          color: var(--text-strong);
+          font-size: 14px;
+          font-weight: 750;
+          line-height: 1.35;
+        }
+
+        .feed-time {
+          margin-top: 3px;
+          color: var(--text-faint);
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        @media (max-width: 1040px) {
           .dashboard-layout {
             grid-template-columns: 1fr;
           }
@@ -461,142 +750,192 @@ export default function Home() {
           .sidebar {
             position: static;
             height: auto;
-            display: block;
+          }
+
+          .sidebar-nav {
+            padding-bottom: 10px;
+          }
+
+          .nav-list {
+            grid-template-columns: repeat(5, minmax(0, 1fr));
           }
 
           .sidebar-footer {
-            margin-top: 24px;
+            padding-top: 8px;
           }
 
-          .sidebar-nav {
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-          }
-
-          .main {
-            min-height: auto;
-          }
-        }
-
-        @media (max-width: 760px) {
-          .main {
-            padding: 22px;
-          }
-
-          .header {
-            flex-direction: column;
-            align-items: stretch;
-            min-height: auto;
-            padding: 20px;
-          }
-
-          .header-actions {
-            justify-content: stretch;
-            width: 100%;
-            max-width: none;
-          }
-
-          .header-actions > * {
-            flex: 1 1 auto;
-          }
-
-          .stats,
-          .actions-grid,
-          .sidebar-nav {
+          .dashboard-bottom {
             grid-template-columns: 1fr;
           }
 
-          .stat-card,
-          .action-card {
-            min-height: 96px;
+          .recent-panel {
+            grid-column: auto;
+          }
+        }
+
+        @media (max-width: 780px) {
+          .hero,
+          .content {
+            padding-left: 22px;
+            padding-right: 22px;
+          }
+
+          .hero-title {
+            font-size: 28px;
+          }
+
+          .hero-actions {
+            align-items: stretch;
+          }
+
+          .hero-actions > * {
+            flex: 1 1 180px;
+          }
+
+          .stat-grid,
+          .nav-list {
+            grid-template-columns: 1fr;
           }
         }
       `}</style>
 
       <div className="dashboard-layout">
         <aside className="sidebar">
-          <div>
-            <div className="brand">
-              <div className="brand-mark">
-                <Image
-                  className="brand-logo"
-                  src="/jamain-baco-logo.png"
-                  alt="Jamain Baco"
-                  width={48}
-                  height={48}
-                />
-              </div>
-              <p className="brand-kicker">Jamain Baco</p>
-              <h2 className="brand-title">Orchestrateur IA</h2>
+          <div className="brand">
+            <div className="brand-mark">
+              <Image
+                className="brand-logo"
+                src="/jamain-baco-logo.png"
+                alt="Jamain Baco"
+                width={52}
+                height={52}
+                priority
+              />
             </div>
+            <div>
+              <p className="brand-name">Jamain Baco</p>
+              <p className="brand-subtitle">Orchestrateur IA</p>
+            </div>
+          </div>
 
-            <nav className="sidebar-nav">
+          <nav className="sidebar-nav" aria-label="Navigation principale">
+            <div className="nav-label">Navigation</div>
+            <div className="nav-list">
               {actions.map((action) => (
                 <Link
                   key={action.title}
-                  className="sidebar-link"
+                  className={`nav-item${action.href === "/" ? " active" : ""}`}
                   href={action.href}
                 >
-                  {action.title}
+                  <Icon name={action.icon} size={17} />
+                  <span>{action.title}</span>
                 </Link>
               ))}
-            </nav>
-          </div>
+            </div>
+          </nav>
 
           <div className="sidebar-footer">
-            <span>{currentUser?.email || "Utilisateur connecté"}</span>
-            <br />
-            <span>Rôle : {getRoleLabel(currentUser)}</span>
-            <br />
-            <span>Département : {getDepartmentLabel(currentUser)}</span>
-            <button className="logout-button" type="button" onClick={handleLogout}>
-              Se déconnecter
-            </button>
+            <div className="user-card">
+              <div className="avatar" aria-hidden="true">
+                {userInitial(currentUser)}
+              </div>
+              <div className="user-info">
+                <div className="user-email">{currentUser?.email || "Utilisateur connecté"}</div>
+                <div className="user-role">
+                  {getRoleLabel(currentUser)} · {getDepartmentLabel(currentUser)}
+                </div>
+              </div>
+              <button
+                className="logout-button"
+                type="button"
+                onClick={handleLogout}
+                aria-label="Se déconnecter"
+                title="Se déconnecter"
+              >
+                <Icon name="logout" size={16} />
+                <span>Se déconnecter</span>
+              </button>
+            </div>
           </div>
         </aside>
 
         <section className="main">
-          <div className="main-inner">
-            <header className="header">
-              <div>
-                <h1 className="page-title">Tableau de bord opérationnel</h1>
-                <p className="page-subtitle">Supervision de l’orchestrateur IA.</p>
-              </div>
+          <header className="hero">
+            <div className="hero-inner">
+              <div className="hero-eyebrow">Tableau de bord opérationnel</div>
+              <h1 className="hero-title">Supervision de l’orchestrateur IA</h1>
 
-              <div className="header-actions">
+              <div className="hero-actions">
+                <Link href="/chat" className="button primary">
+                  <Icon name="chat" size={17} />
+                  Ouvrir le chat
+                </Link>
+                <Link href="/odoo" className="button secondary">
+                  <Icon name="odoo" size={17} />
+                  Ouvrir Odoo
+                </Link>
                 <span className={`status-badge ${odooBadge.tone}`}>
                   <span className="status-dot" />
                   {odooBadge.label}
                 </span>
-                <Link href="/chat" className="button primary">
-                  Ouvrir le chat
-                </Link>
-                <Link href="/odoo" className="button secondary">
-                  Ouvrir Odoo
-                </Link>
               </div>
-            </header>
+            </div>
+          </header>
 
-            <section className="stats">
-              <StatCard label="Validations en attente" value={pendingApprovals} />
-              <StatCard label="Événements d’audit" value={logs.length} />
-              <StatCard label="Systèmes connectés" value={odooStatus?.connected ? 1 : 0} />
-            </section>
+          <div className="content">
+            <div className="content-inner">
+              <section>
+                <div className="section-label">Métriques clés</div>
+                <div className="stat-grid">
+                  <StatCard
+                    label="Validations en attente"
+                    value={pendingApprovals}
+                    tone="warn"
+                    icon="approval"
+                    tag={pendingApprovals > 0 ? "Action requise" : "À jour"}
+                    sub={`${todayApprovals} ajoutée${todayApprovals > 1 ? "s" : ""} aujourd’hui`}
+                  />
+                  <StatCard
+                    label="Événements d’audit"
+                    value={logs.length}
+                    tone="ok"
+                    icon="document"
+                    tag="Normal"
+                    sub="Journal actif"
+                  />
+                  <StatCard
+                    label="Systèmes connectés"
+                    value={odooStatus?.connected ? 1 : 0}
+                    tone={odooStatus?.connected ? "ok" : "err"}
+                    icon="odoo"
+                    tag={odooStatus?.connected ? "En ligne" : "Hors ligne"}
+                    sub={odooStatus?.connected ? "Odoo accessible" : "Odoo inaccessible"}
+                  />
+                </div>
+              </section>
 
-            <section>
-              <h3 className="section-title">Actions rapides</h3>
-              <div className="actions-grid">
-                {actions.map((action) => (
-                  <Link
-                    key={action.title}
-                    href={action.href}
-                    className="action-card"
-                  >
-                    <span className="action-title">{action.title}</span>
-                    <span className="action-arrow">→</span>
-                  </Link>
-                ))}
-              </div>
-            </section>
+              <section className="dashboard-bottom">
+                <div className="panel recent-panel">
+                  <div className="panel-header">
+                    <div className="panel-title">Activité récente</div>
+                    <Link className="panel-link" href="/logs">
+                      Voir tout →
+                    </Link>
+                  </div>
+                  <div className="feed-list">
+                    {recentActivities.map((activity, index) => (
+                      <div className="feed-item" key={`${activity.label}-${index}`}>
+                        <span className={`feed-pip ${activity.tone}`} />
+                        <span className="feed-body">
+                          <span className="feed-msg">{activity.label}</span>
+                          <span className="feed-time">{activity.time}</span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </section>
+            </div>
           </div>
         </section>
       </div>
@@ -604,11 +943,190 @@ export default function Home() {
   );
 }
 
-function StatCard({ label, value }: { label: string; value: number }) {
+function StatCard({
+  label,
+  value,
+  tone,
+  icon,
+  tag,
+  sub,
+}: {
+  label: string;
+  value: number;
+  tone: "warn" | "ok" | "err";
+  icon: IconName;
+  tag: string;
+  sub: string;
+}) {
   return (
-    <div className="stat-card">
-      <p className="stat-label">{label}</p>
-      <p className="stat-value">{value}</p>
+    <div className={`stat-card ${tone}`}>
+      <div className="stat-header">
+        <p className="stat-label">{label}</p>
+        <span className={`stat-icon ${tone}`}>
+          <Icon name={icon} size={17} />
+        </span>
+      </div>
+      <p className="stat-value">{formatNumber(value)}</p>
+      <div className="stat-footer">
+        <span className={`stat-tag ${tone}`}>{tag}</span>
+        <span className="stat-sub">{sub}</span>
+      </div>
     </div>
   );
+}
+
+function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
+  const common = {
+    width: size,
+    height: size,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.9,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+
+  if (name === "dashboard") {
+    return (
+      <svg {...common}>
+        <rect x="3" y="3" width="7" height="7" rx="1.5" />
+        <rect x="14" y="3" width="7" height="7" rx="1.5" />
+        <rect x="3" y="14" width="7" height="7" rx="1.5" />
+        <rect x="14" y="14" width="7" height="7" rx="1.5" />
+      </svg>
+    );
+  }
+
+  if (name === "chat") {
+    return (
+      <svg {...common}>
+        <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+      </svg>
+    );
+  }
+
+  if (name === "odoo") {
+    return (
+      <svg {...common}>
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 2v3" />
+        <path d="M12 19v3" />
+        <path d="m4.93 4.93 2.12 2.12" />
+        <path d="m16.95 16.95 2.12 2.12" />
+        <path d="M2 12h3" />
+        <path d="M19 12h3" />
+        <path d="m4.93 19.07 2.12-2.12" />
+        <path d="m16.95 7.05 2.12-2.12" />
+      </svg>
+    );
+  }
+
+  if (name === "approval") {
+    return (
+      <svg {...common}>
+        <path d="M9 12l2 2 4-4" />
+        <circle cx="12" cy="12" r="9" />
+      </svg>
+    );
+  }
+
+  if (name === "document") {
+    return (
+      <svg {...common}>
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <path d="M14 2v6h6" />
+        <path d="M16 13H8" />
+        <path d="M16 17H8" />
+      </svg>
+    );
+  }
+
+  if (name === "logout") {
+    return (
+      <svg {...common}>
+        <path d="M10 17l5-5-5-5" />
+        <path d="M15 12H3" />
+        <path d="M21 3v18" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg {...common}>
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M14 2v6h6" />
+      <path d="M12 18v-6" />
+      <path d="m9 15 3 3 3-3" />
+    </svg>
+  );
+}
+
+function userInitial(user: AuthUser | null) {
+  const source = user?.email || user?.role_label || "U";
+  return source.trim().charAt(0).toUpperCase() || "U";
+}
+
+function countToday(items: ApprovalItem[]) {
+  const today = new Date().toISOString().slice(0, 10);
+  return items.filter((item) => {
+    const createdAt = typeof item.created_at === "string" ? item.created_at : "";
+    return createdAt.startsWith(today);
+  }).length;
+}
+
+function activityLabel(log: AuditLog) {
+  const title = stringValue(log.title);
+  const message = stringValue(log.message);
+  const eventType = stringValue(log.event_type);
+
+  if (title) return title;
+  if (message) return message;
+  if (eventType) return eventType.replaceAll("_", " ");
+  return "Événement d’audit enregistré";
+}
+
+function activityTone(log: AuditLog): "warn" | "ok" | "err" | "info" {
+  const value = `${stringValue(log.status)} ${stringValue(log.event_type)}`.toLowerCase();
+
+  if (value.includes("error") || value.includes("failed") || value.includes("denied") || value.includes("blocked")) {
+    return "err";
+  }
+
+  if (value.includes("pending") || value.includes("approval")) {
+    return "warn";
+  }
+
+  if (value.includes("completed") || value.includes("success") || value.includes("read")) {
+    return "ok";
+  }
+
+  return "info";
+}
+
+function relativeTime(value?: string) {
+  if (!value) return "récemment";
+
+  const timestamp = new Date(value).getTime();
+
+  if (Number.isNaN(timestamp)) return "récemment";
+
+  const diffMs = Date.now() - timestamp;
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+
+  if (diffMs < minute) return "à l’instant";
+  if (diffMs < hour) return `il y a ${Math.max(1, Math.floor(diffMs / minute))} min`;
+  if (diffMs < day) return `il y a ${Math.floor(diffMs / hour)} h`;
+  return `il y a ${Math.floor(diffMs / day)} j`;
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat("fr-FR").format(value);
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value : "";
 }

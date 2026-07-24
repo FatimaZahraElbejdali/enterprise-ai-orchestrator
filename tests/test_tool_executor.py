@@ -80,13 +80,38 @@ def test_execute_odoo_list_analytic_boolean_fields(monkeypatch):
     assert result["result"]["fields"][0]["name"] == "x_dotation"
 
 
+def test_execute_odoo_resolve_analytic_account(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.tool_executor.odoo.resolve_analytic_account",
+        lambda record_query: {
+            "success": True,
+            "model": "account.analytic.account",
+            "record_query": record_query,
+            "record_id": 5935,
+            "found": True,
+            "ambiguous": False,
+        },
+    )
+
+    result = execute_tool(
+        "odoo_resolve_analytic_account",
+        record_query="11SOCM0001",
+    )
+
+    assert result["success"] is True
+    assert result["tool_name"] == "odoo_resolve_analytic_account"
+    assert result["metadata"]["requires_approval"] is False
+    assert result["result"]["record_id"] == 5935
+
+
 def test_execute_odoo_update_analytic_boolean_field(monkeypatch):
-    def fake_update(record_query, field_name, new_value):
+    def fake_update(record_query, field_name, new_value, record_id=None):
         return {
             "success": True,
             "model": "account.analytic.account",
             "action": "toggle_boolean_field",
             "record_query": record_query,
+            "record_id": record_id,
             "field_name": field_name,
             "requested_value": new_value,
             "new_value": new_value,
@@ -102,6 +127,7 @@ def test_execute_odoo_update_analytic_boolean_field(monkeypatch):
     result = execute_tool(
         "odoo_update_analytic_boolean_field",
         record_query="ABDOU LIGHT & SOUNDS",
+        record_id=9,
         field_name="x_dotation",
         new_value=True,
     )
@@ -109,6 +135,7 @@ def test_execute_odoo_update_analytic_boolean_field(monkeypatch):
     assert result["success"] is True
     assert result["tool_name"] == "odoo_update_analytic_boolean_field"
     assert result["metadata"]["requires_approval"] is True
+    assert result["result"]["record_id"] == 9
     assert result["result"]["verified"] is True
 
 

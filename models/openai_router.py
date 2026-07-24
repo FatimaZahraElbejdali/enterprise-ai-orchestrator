@@ -68,6 +68,27 @@ WRITE_OPERATIONS = {
     "write",
 }
 
+BANK_ACCOUNTING_SIGNAL_TERMS = {
+    "accounting transaction",
+    "accounting transactions",
+    "bank statement",
+    "bank statements",
+    "bank transaction",
+    "bank transactions",
+    "ecriture bancaire",
+    "ecritures bancaires",
+    "écriture bancaire",
+    "écritures bancaires",
+    "journal bancaire",
+    "journaux bancaires",
+    "releve bancaire",
+    "releves bancaires",
+    "relevé bancaire",
+    "relevés bancaires",
+    "transaction bancaire",
+    "transactions bancaires",
+}
+
 INTENT_ALIASES = {
     "server_documentation_summary": "summarize_server_documentation",
 }
@@ -142,6 +163,10 @@ CAPABILITY_LEGACY_ACTIONS = {
     "odoo.product_search": "product_search",
     "odoo.inventory_summary": "inventory_summary",
     "odoo.partner_search": "odoo_search_records",
+    "odoo.accounting_bank_read": "bank_accounting_search",
+    "odoo.purchase_supplier_ranking": "supplier_ranking",
+    "odoo.sale_customer_ranking": "customer_ranking",
+    "odoo.connection_status": "odoo_status",
     "odoo.generic_read": "odoo_generic_read",
     "odoo.generic_read_search": "odoo_search_records",
     "odoo.generic_read_details": "odoo_get_record_details",
@@ -167,6 +192,10 @@ CAPABILITY_LEGACY_INTENTS = {
     "odoo.product_search": "product_search",
     "odoo.inventory_summary": "inventory_summary",
     "odoo.partner_search": "partner_search",
+    "odoo.accounting_bank_read": "odoo_bank_accounting_search",
+    "odoo.purchase_supplier_ranking": "odoo_purchase_supplier_ranking",
+    "odoo.sale_customer_ranking": "odoo_sale_customer_ranking",
+    "odoo.connection_status": "odoo_connection_status",
     "odoo.generic_read": "odoo_generic_read",
     "odoo.generic_read_search": "odoo_record_search",
     "odoo.generic_read_details": "odoo_record_details",
@@ -209,6 +238,8 @@ Choose capabilities from the registered backend surface:
 - support.troubleshooting: user IT/helpdesk troubleshooting and access problems.
 - server.local_health, server.cpu_usage, server.ram_usage, server.disk_usage, server.uptime: safe configured server diagnostics.
 - odoo.product_stock, odoo.product_search, odoo.inventory_summary, odoo.partner_search,
+  odoo.accounting_bank_read, odoo.purchase_supplier_ranking, odoo.sale_customer_ranking,
+  odoo.connection_status,
   odoo.generic_read, odoo.generic_read_search, odoo.generic_read_details, odoo.document_search,
   odoo.document_details, odoo.document_details_by_id, odoo.product_price_update,
   odoo.generic_write_prepare: registered safe Odoo capabilities.
@@ -219,6 +250,10 @@ Use semantic intent, not exact prompt wording:
 - Question such as "qu'est-ce qu'Odoo ?" -> general_knowledge, knowledge.general_answer.
 - Odoo login/application access issue -> troubleshooting, support.troubleshooting.
 - Odoo business data reads/writes -> enterprise_action with an Odoo capability.
+- Bank statements, bank journals, and bank/accounting transaction reads -> odoo.accounting_bank_read.
+- Supplier ranking/count questions over purchase orders -> odoo.purchase_supplier_ranking.
+- Customer ranking/count questions over sales orders/commandes client -> odoo.sale_customer_ranking.
+- Odoo connection/status/availability questions -> odoo.connection_status.
 - Broad read-only Odoo business data questions that are not one of the specialized capabilities -> odoo.generic_read.
   Put the business object, optional installed model hint, operation, query, and limit in parameters.
 - For time-bounded Odoo reads, put structured constraints in parameters.filters. Relative
@@ -456,6 +491,34 @@ def _semantic_text_signals(parsed: dict) -> set[str]:
     return {signal for signal in signals if signal}
 
 
+def _semantic_text_blob(parsed: dict) -> str:
+    values = _semantic_values(parsed)
+    fragments = []
+
+    for value in list(values.values()) + [parsed.get("topic"), parsed.get("capability")]:
+        if isinstance(value, str):
+            fragments.append(value)
+
+    return " ".join(fragments).lower().replace("_", " ")
+
+
+def _is_bank_accounting_semantic_route(parsed: dict) -> bool:
+    if parsed.get("request_type") != "enterprise_action" or parsed.get("domain") != "odoo":
+        return False
+
+    values = _semantic_values(parsed)
+    operation = str(values.get("operation") or "").strip().lower()
+    field = values.get("field")
+    new_value = values.get("new_value") or values.get("new_price")
+
+    if operation in WRITE_OPERATIONS or field or new_value not in {None, ""}:
+        return False
+
+    blob = _semantic_text_blob(parsed)
+
+    return any(term in blob for term in BANK_ACCOUNTING_SIGNAL_TERMS)
+
+
 def _registered_capability_for_server_signal(signals: set[str]) -> str | None:
     for signal in sorted(signals):
         capability = SERVER_DIAGNOSTIC_CAPABILITY_BY_SIGNAL.get(signal)
@@ -618,12 +681,13 @@ def _normalize_semantic_route(parsed: dict) -> dict | None:
         parsed["capability"] = capability
 
     direct_knowledge_capability = {
+        "conversational": "knowledge.general_answer",
         "creative_generation": "knowledge.creative_generation",
         "general_knowledge": "knowledge.general_answer",
         "writing_assistance": "knowledge.writing_assistance",
     }.get(request_type)
 
-    if not capability and direct_knowledge_capability and domain == "general":
+    if not capability and direct_knowledge_capability and domain in {"general", "knowledge"}:
         domain = "knowledge"
         capability = direct_knowledge_capability
         parsed = dict(parsed)
@@ -649,6 +713,11 @@ def _normalize_semantic_route(parsed: dict) -> dict | None:
         and _documentation_summary_intent(parsed)
     ):
         capability = "knowledge.general_answer"
+        parsed = dict(parsed)
+        parsed["capability"] = capability
+
+    if _is_bank_accounting_semantic_route(parsed):
+        capability = "odoo.accounting_bank_read"
         parsed = dict(parsed)
         parsed["capability"] = capability
 
@@ -759,6 +828,10 @@ def _normalize_semantic_route(parsed: dict) -> dict | None:
         missing_parameters = []
 
     if metadata_domain == "server":
+        clarification_needed = False
+        missing_parameters = []
+
+    if capability == "odoo.accounting_bank_read":
         clarification_needed = False
         missing_parameters = []
 

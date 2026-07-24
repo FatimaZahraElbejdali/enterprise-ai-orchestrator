@@ -889,6 +889,309 @@ def test_check_stock_still_does_not_require_approval(monkeypatch):
     assert result["needs_clarification"] is False
 
 
+def test_check_stock_connector_error_is_not_reported_as_not_found(monkeypatch):
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: parsed_stock_action(),
+    )
+    monkeypatch.setattr(
+        "agents.odoo_agent.execute_tool",
+        lambda *args, **kwargs: {
+            "success": True,
+            "result": {
+                "source": "real_odoo_error",
+                "product": kwargs["product_name"],
+                "found": False,
+                "message": "connection failed",
+            },
+        },
+    )
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent("Check stock for BACO CLEAN")
+
+    assert result["status"] == "failed"
+    assert result["approval_required"] is False
+    assert result["tool_used"] == "odoo_check_stock"
+    assert "indisponible" in result["message"]
+    assert "pas été trouvé" not in result["message"]
+
+
+def test_bank_accounting_search_returns_safe_summary(monkeypatch):
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: {
+            "intent": "odoo",
+            "action": "bank_accounting_search",
+            "business_action": "bank_accounting_search",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "account.bank.statement",
+            "model": "account.bank.statement",
+            "record_query": "TEST BANK",
+            "confidence": 0.8,
+            "parser_source": "test",
+            "parser_error": None,
+        },
+    )
+    monkeypatch.setattr(
+        "agents.odoo_agent.execute_tool",
+        lambda *args, **kwargs: {
+            "success": True,
+            "result": {
+                "success": True,
+                "source": "real_odoo",
+                "status": "completed",
+                "found": True,
+                "selected_model": "account.bank.statement.line",
+                "model": "account.bank.statement.line",
+                "fields_used": ["id", "name", "date", "journal_id", "amount"],
+                "domain_used": [["date", ">=", "2026-06-01"], ["date", "<", "2026-07-01"]],
+                "count_returned": 1,
+                "record_count": 1,
+                "records": [
+                    {
+                        "id": 42,
+                        "model": "account.bank.statement.line",
+                        "document": "TEST BANK Juin",
+                        "date": "2026-06-12",
+                        "journal": "TEST BANK",
+                        "amount": 99.0,
+                    }
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent(
+        "Donne-moi les informations sur un relevé bancaire de TEST BANK en juin 2026"
+    )
+
+    assert result["status"] == "completed"
+    assert result["tool_used"] == "odoo_search_bank_accounting"
+    assert result["capability"] == "odoo.accounting_bank_read"
+    assert result["selected_model_name"] == "account.bank.statement.line"
+    assert result["fields_used"] == ["id", "name", "date", "journal_id", "amount"]
+    assert result["count_returned"] == 1
+    assert "TEST BANK" in result["message"]
+    assert "api_key" not in result["message"]
+    assert result["approval_required"] is False
+
+
+def test_supplier_ranking_returns_ranked_supplier_summary(monkeypatch):
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: {
+            "intent": "odoo",
+            "action": "supplier_ranking",
+            "business_action": "supplier_ranking",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "purchase.order",
+            "model": "purchase.order",
+            "field_name": "partner_id",
+            "confidence": 0.8,
+            "parser_source": "test",
+            "parser_error": None,
+        },
+    )
+    monkeypatch.setattr(
+        "agents.odoo_agent.execute_tool",
+        lambda *args, **kwargs: {
+            "success": True,
+            "result": {
+                "success": True,
+                "status": "completed",
+                "found": True,
+                "selected_model": "purchase.order",
+                "aggregation_field": "partner_id",
+                "odoo_method": "read_group",
+                "domain_used": [],
+                "fields_used": ["partner_id"],
+                "count_returned": 2,
+                "record_count": 2,
+                "records": [
+                    {"supplier_id": 10, "supplier": "Supplier A", "count": 8},
+                    {"supplier_id": 20, "supplier": "Supplier B", "count": 5},
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent(
+        "Quels fournisseurs apparaissent le plus dans les bons de commande ?"
+    )
+
+    assert result["status"] == "completed"
+    assert result["tool_used"] == "odoo_rank_purchase_order_suppliers"
+    assert result["capability"] == "odoo.purchase_supplier_ranking"
+    assert result["selected_model_name"] == "purchase.order"
+    assert result["aggregation_field"] == "partner_id"
+    assert result["odoo_method"] == "read_group"
+    assert "Supplier A : 8" in result["message"]
+    assert "Introuvable" not in result["message"]
+
+
+def test_customer_ranking_returns_ranked_customer_summary(monkeypatch):
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: {
+            "intent": "odoo",
+            "action": "customer_ranking",
+            "business_action": "customer_ranking",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "sale.order",
+            "model": "sale.order",
+            "field_name": "partner_id",
+            "record_query": None,
+            "new_value": None,
+            "confidence": 0.9,
+            "parser_source": "test",
+            "parser_error": None,
+        },
+    )
+    monkeypatch.setattr(
+        "agents.odoo_agent.execute_tool",
+        lambda *args, **kwargs: {
+            "success": True,
+            "result": {
+                "success": True,
+                "status": "completed",
+                "found": True,
+                "selected_model": "sale.order",
+                "aggregation_field": "partner_id",
+                "odoo_method": "read_group",
+                "domain_used": [],
+                "fields_used": ["partner_id"],
+                "count_returned": 2,
+                "record_count": 2,
+                "records": [
+                    {"customer_id": 10, "customer": "Client A", "count": 8},
+                    {"customer_id": 20, "customer": "Client B", "count": 5},
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent(
+        "Quels clients apparaissent le plus dans les commandes client ?"
+    )
+
+    assert result["status"] == "completed"
+    assert result["tool_used"] == "odoo_rank_sale_order_customers"
+    assert result["capability"] == "odoo.sale_customer_ranking"
+    assert result["selected_model_name"] == "sale.order"
+    assert result["aggregation_field"] == "partner_id"
+    assert result["odoo_method"] == "read_group"
+    assert "Client A : 8" in result["message"]
+
+
+def test_odoo_connection_status_uses_registered_status_tool(monkeypatch):
+    captured = {}
+
+    def fake_execute_tool(tool_name, **kwargs):
+        captured["tool_name"] = tool_name
+        return {
+            "success": True,
+            "result": {
+                "connected": True,
+                "mode": "real_odoo",
+                "message": "Successfully connected to Odoo.",
+            },
+        }
+
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: {
+            "intent": "odoo",
+            "action": "odoo_status",
+            "business_action": "odoo_status",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": None,
+            "record_query": None,
+            "field_label": None,
+            "field_name": None,
+            "new_value": None,
+            "confidence": 0.9,
+            "parser_source": "test",
+            "parser_error": None,
+        },
+    )
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent("Est-ce que Odoo est connecté ?")
+
+    assert captured["tool_name"] == "odoo_test_connection"
+    assert result["status"] == "completed"
+    assert result["tool_used"] == "odoo_test_connection"
+    assert result["capability"] == "odoo.connection_status"
+    assert "connecté" in result["message"]
+
+
+def test_product_details_uses_stock_resolver_with_clean_product_query(monkeypatch):
+    captured = {}
+
+    def fake_execute_tool(tool_name, **kwargs):
+        captured["call"] = {
+            "tool_name": tool_name,
+            "kwargs": kwargs,
+        }
+        return {
+            "success": True,
+            "result": {
+                "success": True,
+                "source": "real_odoo",
+                "model": "product.product",
+                "product": kwargs["product_name"],
+                "found": True,
+                "internal_reference": "PDSBACCLN0001",
+                "stock_quantity": 12,
+                "forecast_quantity": 14,
+                "sale_price": 4.0,
+                "unit": "Unité(s)",
+            },
+        }
+
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: {
+            "intent": "odoo",
+            "action": "check_stock",
+            "business_action": "product_details",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "product.template",
+            "record_query": "BACO CLEAN",
+            "field_label": None,
+            "field_name": None,
+            "new_value": None,
+            "confidence": 0.9,
+            "parser_source": "test",
+            "parser_error": None,
+        },
+    )
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent("Donne-moi les détails du produit BACO CLEAN")
+
+    assert captured["call"]["tool_name"] == "odoo_check_stock"
+    assert captured["call"]["kwargs"]["product_name"] == "BACO CLEAN"
+    assert result["status"] == "completed"
+    assert result["tool_used"] == "odoo_check_stock"
+    assert result["data"]["product_name"] == "BACO CLEAN"
+    assert result["data"]["internal_reference"] == "PDSBACCLN0001"
+    assert result["data"]["available_stock"] == 12
+    assert result["data"]["forecast_stock"] == 14
+    assert result["data"]["sale_price"] == 4.0
+
+
 def test_inventory_product_search_calls_odoo_with_extracted_keyword(monkeypatch):
     captured = {}
 
@@ -1253,22 +1556,47 @@ def test_toggle_analytic_boolean_creates_approval_without_execution(monkeypatch,
     )
 
     def fake_execute_tool(tool_name, **kwargs):
-        assert tool_name == "odoo_list_analytic_boolean_fields"
-        return {
-            "success": True,
-            "result": {
+        if tool_name == "odoo_list_analytic_boolean_fields":
+            return {
                 "success": True,
-                "model": "account.analytic.account",
-                "fields": [
-                    {
-                        "name": "x_dotation",
-                        "label": "Dotation",
-                        "type": "boolean",
-                        "readonly": False,
-                    },
-                ],
-            },
-        }
+                "result": {
+                    "success": True,
+                    "model": "account.analytic.account",
+                    "fields": [
+                        {
+                            "name": "x_dotation",
+                            "label": "Dotation",
+                            "type": "boolean",
+                            "readonly": False,
+                        },
+                    ],
+                },
+            }
+
+        if tool_name == "odoo_resolve_analytic_account":
+            assert kwargs == {"record_query": "ABDOU LIGHT & SOUNDS"}
+            return {
+                "success": True,
+                "result": {
+                    "success": True,
+                    "model": "account.analytic.account",
+                    "record_query": "ABDOU LIGHT & SOUNDS",
+                    "record_id": 9,
+                    "record": "ABDOU LIGHT & SOUNDS",
+                    "record_name": "ABDOU LIGHT & SOUNDS",
+                    "found": True,
+                    "ambiguous": False,
+                    "candidates": [
+                        {
+                            "record_id": 9,
+                            "name": "ABDOU LIGHT & SOUNDS",
+                            "display_name": "ABDOU LIGHT & SOUNDS",
+                        },
+                    ],
+                },
+            }
+
+        raise AssertionError(f"Unexpected tool: {tool_name}")
 
     monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
     monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
@@ -1281,9 +1609,289 @@ def test_toggle_analytic_boolean_creates_approval_without_execution(monkeypatch,
     assert approval["metadata"]["tool_name"] == "odoo_update_analytic_boolean_field"
     assert approval["metadata"]["model"] == "account.analytic.account"
     assert approval["metadata"]["record_query"] == "ABDOU LIGHT & SOUNDS"
+    assert approval["metadata"]["record_id"] == 9
     assert approval["metadata"]["field_label"] == "Dotation"
     assert approval["metadata"]["field_name"] == "x_dotation"
     assert approval["metadata"]["new_value"] is True
+
+
+def test_pointage_prompt_creates_approval_not_status_response(monkeypatch, tmp_path):
+    approvals_file = tmp_path / "approvals.json"
+    monkeypatch.setattr("orchestrator.approval_store.APPROVALS_FILE", approvals_file)
+    monkeypatch.setattr(
+        "agents.odoo_agent.generate_structured_response",
+        lambda **kwargs: {
+            "success": False,
+            "parsed": None,
+            "error": "provider_unavailable",
+        },
+    )
+
+    def fake_execute_tool(tool_name, **kwargs):
+        if tool_name == "odoo_list_analytic_boolean_fields":
+            return {
+                "success": True,
+                "result": {
+                    "success": True,
+                    "model": "account.analytic.account",
+                    "fields": [
+                        {
+                            "name": "x_studio_pointage",
+                            "label": "Pointage",
+                            "type": "boolean",
+                            "readonly": False,
+                        },
+                    ],
+                },
+            }
+
+        if tool_name == "odoo_resolve_analytic_account":
+            assert kwargs == {"record_query": "11IFCX0003"}
+            return {
+                "success": True,
+                "result": {
+                    "success": True,
+                    "model": "account.analytic.account",
+                    "record_query": "11IFCX0003",
+                    "record_id": 5935,
+                    "record": "11IFCX0003",
+                    "record_name": "11IFCX0003",
+                    "record_code": "11IFCX0003",
+                    "found": True,
+                    "ambiguous": False,
+                    "candidates": [
+                        {
+                            "record_id": 5935,
+                            "name": "11IFCX0003",
+                            "display_name": "11IFCX0003",
+                            "code": "11IFCX0003",
+                        },
+                    ],
+                },
+            }
+
+        raise AssertionError(f"Unexpected tool: {tool_name}")
+
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent(
+        "coche pointage pour le compte analytique 11IFCX0003 sur odoo"
+    )
+    approval = get_approvals()[0]
+
+    assert result["status"] == "pending_approval"
+    assert result["parsed_action"] == "toggle_boolean_field"
+    assert result["data"]["action"] == "toggle_boolean_field"
+    assert result["tool_used"] != "odoo_test_connection"
+    assert "Odoo est connecté" not in result["message"]
+    assert approval["action"] == "toggle_boolean_field"
+    assert approval["metadata"]["model"] == "account.analytic.account"
+    assert approval["metadata"]["record_query"] == "11IFCX0003"
+    assert approval["metadata"]["record_id"] == 5935
+    assert approval["metadata"]["field_name"] == "x_studio_pointage"
+    assert approval["metadata"]["new_value"] is True
+
+
+def test_pointage_reference_resolves_analytic_account_before_approval(monkeypatch, tmp_path):
+    approvals_file = tmp_path / "approvals.json"
+    monkeypatch.setattr("orchestrator.approval_store.APPROVALS_FILE", approvals_file)
+    monkeypatch.setattr(
+        "agents.odoo_agent.generate_structured_response",
+        lambda **kwargs: {
+            "success": False,
+            "parsed": None,
+            "error": "provider_unavailable",
+        },
+    )
+    calls = []
+
+    def fake_execute_tool(tool_name, **kwargs):
+        calls.append((tool_name, kwargs))
+
+        if tool_name == "odoo_list_analytic_boolean_fields":
+            return {
+                "success": True,
+                "result": {
+                    "success": True,
+                    "model": "account.analytic.account",
+                    "fields": [
+                        {
+                            "name": "x_studio_pointage",
+                            "label": "Pointage",
+                            "type": "boolean",
+                            "readonly": False,
+                        },
+                    ],
+                },
+            }
+
+        if tool_name == "odoo_resolve_analytic_account":
+            assert kwargs == {"record_query": "11SOCM0001"}
+            return {
+                "success": True,
+                "result": {
+                    "success": True,
+                    "model": "account.analytic.account",
+                    "record_query": "11SOCM0001",
+                    "record_id": 5935,
+                    "record": "11SOCM0001 Services",
+                    "record_name": "11SOCM0001 Services",
+                    "record_code": "11SOCM0001",
+                    "found": True,
+                    "ambiguous": False,
+                    "candidates": [
+                        {
+                            "record_id": 5935,
+                            "name": "11SOCM0001 Services",
+                            "display_name": "11SOCM0001 Services",
+                            "code": "11SOCM0001",
+                        },
+                    ],
+                },
+            }
+
+        raise AssertionError(f"Unexpected tool: {tool_name}")
+
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent(
+        "coche pointage pour le compte analytique 11SOCM0001 sur odoo"
+    )
+    approval = get_approvals()[0]
+
+    assert result["status"] == "pending_approval"
+    assert result["data"]["record_id"] == 5935
+    assert "record_id" not in result["message"].lower()
+    assert approval["metadata"]["record_query"] == "11SOCM0001"
+    assert approval["metadata"]["record_id"] == 5935
+    assert approval["metadata"]["record_name"] == "11SOCM0001 Services"
+    assert approval["metadata"]["field_name"] == "x_studio_pointage"
+    assert ("odoo_resolve_analytic_account", {"record_query": "11SOCM0001"}) in calls
+
+
+def test_pointage_ambiguous_analytic_reference_asks_user_to_choose(monkeypatch, tmp_path):
+    approvals_file = tmp_path / "approvals.json"
+    monkeypatch.setattr("orchestrator.approval_store.APPROVALS_FILE", approvals_file)
+    monkeypatch.setattr(
+        "agents.odoo_agent.generate_structured_response",
+        lambda **kwargs: {
+            "success": False,
+            "parsed": None,
+            "error": "provider_unavailable",
+        },
+    )
+
+    def fake_execute_tool(tool_name, **kwargs):
+        if tool_name == "odoo_list_analytic_boolean_fields":
+            return {
+                "success": True,
+                "result": {
+                    "success": True,
+                    "model": "account.analytic.account",
+                    "fields": [
+                        {
+                            "name": "x_studio_pointage",
+                            "label": "Pointage",
+                            "type": "boolean",
+                            "readonly": False,
+                        },
+                    ],
+                },
+            }
+
+        if tool_name == "odoo_resolve_analytic_account":
+            return {
+                "success": True,
+                "result": {
+                    "success": False,
+                    "model": "account.analytic.account",
+                    "record_query": "11SOCM0001",
+                    "record_id": None,
+                    "found": True,
+                    "ambiguous": True,
+                    "candidates": [
+                        {"record_id": 5935, "name": "11SOCM0001 A"},
+                        {"record_id": 5936, "name": "11SOCM0001 B"},
+                    ],
+                },
+            }
+
+        raise AssertionError(f"Unexpected tool: {tool_name}")
+
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent(
+        "coche pointage pour le compte analytique 11SOCM0001 sur odoo"
+    )
+
+    assert result["status"] in {"ambiguous", "clarification_required"}
+    assert result["approval_required"] is False
+    assert result["requires_approval"] is False
+    assert len(result["data"]["candidates"]) == 2
+    assert get_approvals() == []
+
+
+def test_pointage_missing_analytic_reference_returns_not_found(monkeypatch, tmp_path):
+    approvals_file = tmp_path / "approvals.json"
+    monkeypatch.setattr("orchestrator.approval_store.APPROVALS_FILE", approvals_file)
+    monkeypatch.setattr(
+        "agents.odoo_agent.generate_structured_response",
+        lambda **kwargs: {
+            "success": False,
+            "parsed": None,
+            "error": "provider_unavailable",
+        },
+    )
+
+    def fake_execute_tool(tool_name, **kwargs):
+        if tool_name == "odoo_list_analytic_boolean_fields":
+            return {
+                "success": True,
+                "result": {
+                    "success": True,
+                    "model": "account.analytic.account",
+                    "fields": [
+                        {
+                            "name": "x_studio_pointage",
+                            "label": "Pointage",
+                            "type": "boolean",
+                            "readonly": False,
+                        },
+                    ],
+                },
+            }
+
+        if tool_name == "odoo_resolve_analytic_account":
+            return {
+                "success": True,
+                "result": {
+                    "success": False,
+                    "model": "account.analytic.account",
+                    "record_query": "11SOCM0001",
+                    "record_id": None,
+                    "found": False,
+                    "ambiguous": False,
+                    "candidates": [],
+                    "message": "No analytic account found in Odoo.",
+                },
+            }
+
+        raise AssertionError(f"Unexpected tool: {tool_name}")
+
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent(
+        "coche pointage pour le compte analytique 11SOCM0001 sur odoo"
+    )
+
+    assert result["status"] == "not_found"
+    assert result["approval_required"] is False
+    assert "Aucun compte analytique" in result["message"]
+    assert get_approvals() == []
 
 
 def test_approve_toggle_analytic_boolean_executes_tool(monkeypatch, tmp_path):
@@ -1355,3 +1963,73 @@ def test_approve_toggle_analytic_boolean_executes_tool(monkeypatch, tmp_path):
     assert data["executed"] is True
     assert data["execution_result"]["verified"] is True
     assert data["execution_result"]["new_value"] is True
+
+
+def test_approve_toggle_analytic_boolean_passes_resolved_record_id(monkeypatch, tmp_path):
+    approvals_file = tmp_path / "approvals.json"
+    monkeypatch.setattr("orchestrator.approval_store.APPROVALS_FILE", approvals_file)
+
+    approval = create_approval(
+        user_message="Cocher Pointage pour 11SOCM0001",
+        intent="odoo",
+        selected_agent="odoo_agent",
+        selected_model="policy_engine",
+        action="toggle_boolean_field",
+        risk="medium",
+        source_system="odoo",
+        entity_name="11SOCM0001 Services",
+        requested_change="true",
+        metadata={
+            "tool_name": "odoo_update_analytic_boolean_field",
+            "model": "account.analytic.account",
+            "record_query": "11SOCM0001",
+            "record_id": 5935,
+            "field_label": "Pointage",
+            "field_name": "x_studio_pointage",
+            "new_value": True,
+            "executed": False,
+        },
+    )
+
+    def fake_execute_tool(tool_name, **kwargs):
+        assert tool_name == "odoo_update_analytic_boolean_field"
+        assert kwargs == {
+            "record_query": "11SOCM0001",
+            "record_id": 5935,
+            "field_name": "x_studio_pointage",
+            "new_value": True,
+        }
+
+        return {
+            "success": True,
+            "tool_name": tool_name,
+            "result": {
+                "success": True,
+                "source": "real_odoo",
+                "model": "account.analytic.account",
+                "action": "toggle_boolean_field",
+                "record_query": "11SOCM0001",
+                "record_id": 5935,
+                "field_name": "x_studio_pointage",
+                "requested_value": True,
+                "new_value": True,
+                "executed": True,
+                "verified": True,
+                "found": True,
+            },
+        }
+
+    monkeypatch.setattr("app.execute_tool", fake_execute_tool)
+    monkeypatch.setattr("app.log_request", lambda data: None)
+
+    client = TestClient(app)
+    response = client.post(
+        f"/approvals/{approval['id']}/approve",
+        headers=auth_headers("odoo.manager@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "approved"
+    assert data["executed"] is True
+    assert data["execution_result"]["record_id"] == 5935

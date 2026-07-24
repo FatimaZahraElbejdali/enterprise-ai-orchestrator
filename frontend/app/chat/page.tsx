@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import {
   API_ERROR_MESSAGE,
   ApiRequestError,
@@ -23,6 +23,12 @@ type LooseRecord = Record<string, unknown>;
 
 const SHOW_TECHNICAL_DETAILS =
   process.env.NEXT_PUBLIC_CHAT_DEBUG === "true";
+
+const SUGGESTED_PROMPTS = [
+  "Quels fournisseurs apparaissent le plus dans les bons de commande ?",
+  "Vérifie l’état des serveurs",
+  "Raconte-moi l’histoire du groupe Jamain Baco",
+];
 
 type OdooStockResult = {
   product?: unknown;
@@ -89,6 +95,14 @@ type ChatTechnicalMetadata = {
   target_system?: string | null;
   odoo_model?: string | null;
   record_count?: number | null;
+  selected_model?: string | null;
+  candidate_models?: string[] | null;
+  fields_used?: string[] | null;
+  domain_used?: unknown[] | null;
+  count_returned?: number | null;
+  failure_reason?: string | null;
+  aggregation_field?: string | null;
+  odoo_method?: string | null;
   odoo_tool_steps?: Array<Record<string, unknown>>;
   final_odoo_model?: string | null;
   final_record_count?: number | null;
@@ -99,6 +113,17 @@ type ChatTechnicalMetadata = {
   approval_action?: string | null;
   approval_entity?: string | null;
   approval_requested_change?: string | null;
+  memory_context_used?: boolean | null;
+  resolved_from_previous_model?: string | null;
+  resolved_business_object?: string | null;
+  follow_up_limit?: number | null;
+  pending_context_used?: boolean | null;
+  pending_context_type?: string | null;
+  original_request?: string | null;
+  merged_request?: string | null;
+  merged_parameters?: Record<string, unknown> | null;
+  cleared_pending_context?: boolean | null;
+  pending_context_cleared?: boolean | null;
 };
 
 type ChatResponse = {
@@ -110,10 +135,19 @@ type ChatResponse = {
   technical: ChatTechnicalMetadata;
 };
 
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content?: string;
+  response?: ChatResponse;
+  loading?: boolean;
+  error?: string;
+};
+
 export default function ChatPage() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
-  const [response, setResponse] = useState<ChatResponse | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [error, setError] = useState("");
   const [approvalActionLoading, setApprovalActionLoading] = useState<
     "approve" | "reject" | null
@@ -121,7 +155,7 @@ export default function ChatPage() {
   const [approvalActionMessage, setApprovalActionMessage] = useState("");
   const [approvalActionError, setApprovalActionError] = useState("");
   const [currentUser] = useState<AuthUser | null>(() => getStoredUser());
-  const resultRef = useRef<HTMLElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!requireAuth()) return;
@@ -132,37 +166,87 @@ export default function ChatPage() {
     window.location.href = "/login";
   }
 
-  async function handleSubmit(event: FormEvent) {
-    event.preventDefault();
+  async function submitMessage(rawMessage: string) {
+    const cleanMessage = rawMessage.trim();
 
-    const cleanMessage = message.trim();
+    if (!cleanMessage || loading) return;
 
-    if (!cleanMessage) return;
+    const userMessageId = createMessageId("user");
+    const assistantMessageId = createMessageId("assistant");
 
     setLoading(true);
     setError("");
-    setResponse(null);
     setApprovalActionLoading(null);
     setApprovalActionMessage("");
     setApprovalActionError("");
+    setMessage("");
+    setMessages((current) => [
+      ...current,
+      {
+        id: userMessageId,
+        role: "user",
+        content: cleanMessage,
+      },
+      {
+        id: assistantMessageId,
+        role: "assistant",
+        loading: true,
+      },
+    ]);
 
     try {
       const data = await postChatMessage<ChatResponse>(cleanMessage);
-      setResponse(data);
+      setMessages((current) =>
+        current.map((item) =>
+          item.id === assistantMessageId
+            ? {
+                id: assistantMessageId,
+                role: "assistant",
+                response: data,
+              }
+            : item
+        )
+      );
     } catch (err) {
-      setError(
+      const errorMessage =
         err instanceof TypeError
           ? BACKEND_UNREACHABLE_MESSAGE
           : err instanceof Error
             ? err.message
-            : API_ERROR_MESSAGE
+            : API_ERROR_MESSAGE;
+      setError(errorMessage);
+      setMessages((current) =>
+        current.map((item) =>
+          item.id === assistantMessageId
+            ? {
+                id: assistantMessageId,
+                role: "assistant",
+                error: errorMessage,
+              }
+            : item
+        )
       );
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleInlineApproval(decision: "approve" | "reject") {
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    await submitMessage(message);
+  }
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey) return;
+
+    event.preventDefault();
+    void submitMessage(message);
+  }
+
+  async function handleInlineApproval(
+    decision: "approve" | "reject",
+    response: ChatResponse
+  ) {
     const approvalId = getApprovalId(response);
 
     if (!approvalId || !isPendingApprovalResponse(response)) return;
@@ -180,16 +264,21 @@ export default function ChatPage() {
         decision === "approve" ? "approved" : "rejected"
       );
 
-      setResponse((current) =>
-        current
-          ? {
-              ...current,
-              technical: {
-                ...current.technical,
-                approval_status: status,
-              },
-            }
-          : current
+      setMessages((current) =>
+        current.map((item) =>
+          item.response && getApprovalId(item.response) === approvalId
+            ? {
+                ...item,
+                response: {
+                  ...item.response,
+                  technical: {
+                    ...item.response.technical,
+                    approval_status: status,
+                  },
+                },
+              }
+            : item
+        )
       );
       setApprovalActionMessage(
         decision === "approve" ? "Demande approuvée." : "Demande refusée."
@@ -201,71 +290,20 @@ export default function ChatPage() {
     }
   }
 
-  const odooStockResult = normalizeOdooStockResult(response);
-  const odooDocumentResult = normalizeOdooDocumentResult(response);
-  const odooProductSearchResult = normalizeOdooProductSearchResult(response);
-  const odooGenericRecordResult = normalizeOdooGenericRecordResult(response);
-  const candidates = normalizeCandidates(response);
-  const sources = normalizeSources(response);
-  const approvalId = getApprovalId(response);
-  const isApprovalPending = isPendingApprovalResponse(response);
   const canApproveInline = hasAnyPermission(currentUser, [
     "all",
     "approve_odoo_actions",
   ]);
-  const isApprovalRequired =
-    response?.requires_approval === true || response?.status === "pending_approval";
-
-  const isOdooProductResult = Boolean(odooStockResult && !odooDocumentResult);
-  const isOdooDocumentResult = Boolean(odooDocumentResult);
-  const isOdooProductSearchResult = Boolean(odooProductSearchResult);
-  const isOdooGenericRecordResult = Boolean(odooGenericRecordResult);
-
-  const isSensitiveAction =
-    response?.status === "pending_approval" || isApprovalRequired;
-  const isUnsupported =
-    response?.status === "unsupported";
-  const isAccessDenied =
-    response?.status === "access_denied" ||
-    response?.status === "department_access_denied";
-  const isSecurityBlocked =
-    response?.status === "blocked" ||
-    response?.technical?.risk === "blocked" ||
-    response?.technical?.agent === "security_agent" ||
-    response?.technical?.action === "blocked_sensitive_path";
-  const needsClarification =
-    response?.status === "clarification_required";
-
-  const statusLabel = useMemo(() => {
-    if (!response) return "En attente";
-
-    return formatStatus(response.status);
-  }, [response]);
-
-  const mainAnswer = response
-    ? getMainAnswer(response, {
-        odooStockResult,
-        odooDocumentResult,
-        odooProductSearchResult,
-        odooGenericRecordResult,
-        statusLabel,
-      })
-    : null;
-  const showAnswerTitle = Boolean(
-    mainAnswer?.title &&
-      !["Réponse", "Résultat", "Terminé"].includes(mainAnswer.title)
-  );
+  const latestAssistantModel = getLatestAssistantModel(messages);
 
   useEffect(() => {
-    if (!response) return;
-
     window.requestAnimationFrame(() => {
-      resultRef.current?.scrollIntoView({
+      messagesEndRef.current?.scrollIntoView({
         behavior: "smooth",
-        block: "start",
+        block: "end",
       });
     });
-  }, [response]);
+  }, [messages, loading]);
 
   return (
     <main className="pageShell">
@@ -277,8 +315,9 @@ export default function ChatPage() {
                 className="brandLogo"
                 src="/jamain-baco-logo.png"
                 alt="Jamain Baco"
-                width={48}
-                height={48}
+                width={50}
+                height={50}
+                priority
               />
             </div>
             <div>
@@ -287,17 +326,31 @@ export default function ChatPage() {
             </div>
           </div>
 
+          <p className="navLabel">Navigation</p>
           <nav className="nav">
-            <Link href="/">Tableau de bord</Link>
+            <Link href="/">
+              <span className="navIcon">□</span>
+              Tableau de bord
+            </Link>
             <Link href="/chat" className="active">
+              <span className="navIcon">▱</span>
               Console de chat
             </Link>
-            <Link href="/odoo">Odoo</Link>
+            <Link href="/odoo">
+              <span className="navIcon">○</span>
+              Odoo
+            </Link>
             {hasAnyPermission(currentUser, ["all", "view_approvals", "approve_odoo_actions"]) && (
-              <Link href="/approvals">Validations</Link>
+              <Link href="/approvals">
+                <span className="navIcon">✓</span>
+                Validations
+              </Link>
             )}
             {hasAnyPermission(currentUser, ["all", "view_audit_logs"]) && (
-              <Link href="/logs">Journaux d’audit</Link>
+              <Link href="/logs">
+                <span className="navIcon">≡</span>
+                Journaux d’audit
+              </Link>
             )}
           </nav>
         </div>
@@ -313,222 +366,115 @@ export default function ChatPage() {
       </aside>
 
       <section className="content">
-        <header className="header">
-          <div>
+        <header className="topbar">
+          <div className="topbarTitle">
             <p className="eyebrow">Console Orchestrateur</p>
             <h2>Chat</h2>
           </div>
 
-          <div className="headerBadge">
-            <span className="badgeDot" />
-            Contrôle actif
+          <div className="topbarActions">
+            <div className="modelBadge">{latestAssistantModel}</div>
+            <div className="headerBadge">
+              <span className="badgeDot" />
+              Contrôle actif
+            </div>
           </div>
         </header>
 
-        <section className="promptPanel">
-          <form onSubmit={handleSubmit}>
+        <section className="chatViewport" aria-live="polite">
+          {messages.length === 0 ? (
+            <div className="emptyState">
+              <div className="emptyIcon">▱</div>
+              <h3>Comment puis-je vous aider ?</h3>
+              <p>
+                Posez une question à l’orchestrateur ou choisissez une suggestion
+                pour commencer.
+              </p>
+              <div className="suggestions">
+                {SUGGESTED_PROMPTS.map((prompt) => (
+                  <button
+                    className="suggestionChip"
+                    disabled={loading}
+                    key={prompt}
+                    onClick={() => void submitMessage(prompt)}
+                    type="button"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="messageList">
+              {messages.map((item) => (
+                <div className={`messageTurn ${item.role}`} key={item.id}>
+                  <div className="messageAvatar">
+                    {item.role === "user" ? userInitial(currentUser) : "IA"}
+                  </div>
+                  <div className="messageBody">
+                    <div className="messageMeta">
+                      <span>{item.role === "user" ? "Vous" : "Orchestrateur"}</span>
+                    </div>
+
+                    {item.role === "user" && (
+                      <div className="userBubble">
+                        <p>{item.content}</p>
+                      </div>
+                    )}
+
+                    {item.role === "assistant" && item.loading && (
+                      <div className="assistantLoading">
+                        <span />
+                        <span />
+                        <span />
+                      </div>
+                    )}
+
+                    {item.role === "assistant" && item.error && (
+                      <div className="errorBox">{item.error}</div>
+                    )}
+
+                    {item.role === "assistant" && item.response && (
+                      <AssistantResponseCard
+                        response={item.response}
+                        approvalActionLoading={approvalActionLoading}
+                        approvalActionMessage={approvalActionMessage}
+                        approvalActionError={approvalActionError}
+                        canApproveInline={canApproveInline}
+                        onApproval={handleInlineApproval}
+                      />
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </section>
+
+        <section className="inputArea">
+          {error && <div className="errorBox composerError">{error}</div>}
+          <form className="composer" onSubmit={handleSubmit}>
             <textarea
               id="message"
               value={message}
+              disabled={loading}
               onChange={(event) => setMessage(event.target.value)}
+              onKeyDown={handleComposerKeyDown}
               placeholder="De quoi avez-vous besoin ?"
-              rows={4}
+              rows={1}
             />
 
-            <div className="buttonRow">
-              <button type="submit" disabled={loading}>
-                {loading ? "Traitement..." : "Envoyer"}
-              </button>
-            </div>
+            <button
+              aria-label="Envoyer le message"
+              className="sendButton"
+              disabled={loading || !message.trim()}
+              type="submit"
+            >
+              {loading ? "..." : "➤"}
+            </button>
           </form>
         </section>
-
-        {error && <div className="errorBox">{error}</div>}
-
-        {response && (
-          <>
-            <section
-              ref={resultRef}
-              className={isSensitiveAction ? "approvalPanel resultAnchor" : "resultPanel resultAnchor"}
-            >
-              {showAnswerTitle && (
-                <div className="panelHeader">
-                  <div>
-                    <h3>{mainAnswer?.title}</h3>
-                  </div>
-                </div>
-              )}
-
-              {isAccessDenied && (
-                <p className="genericMessage">{mainAnswer?.message}</p>
-              )}
-
-              {isSecurityBlocked && !isAccessDenied && !isUnsupported && (
-                <p className="genericMessage">{mainAnswer?.message}</p>
-              )}
-
-              {isUnsupported && !isAccessDenied && !isSecurityBlocked && (
-                <p className="genericMessage">{mainAnswer?.message}</p>
-              )}
-
-              {needsClarification && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
-                <p className="genericMessage">
-                  {mainAnswer?.message}
-                </p>
-              )}
-
-              {isOdooProductResult && !isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
-                <p className="genericMessage">{mainAnswer?.message}</p>
-              )}
-
-              {isOdooProductSearchResult && !isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
-                <p className="genericMessage">{mainAnswer?.message}</p>
-              )}
-
-              {isOdooGenericRecordResult && !isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
-                <p className="genericMessage">{mainAnswer?.message}</p>
-              )}
-
-              {isOdooDocumentResult && !isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
-                <p className="genericMessage">{mainAnswer?.message}</p>
-              )}
-
-              {isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
-                <>
-                  <div className="detailsTable">
-                    <Detail
-                      label="Action"
-                      value={getApprovalActionLabel(response)}
-                    />
-                    <Detail
-                      label="Élément concerné"
-                      value={getApprovalTarget(response)}
-                    />
-                    <Detail
-                      label="Valeur demandée"
-                      value={getApprovalRequestedValue(response)}
-                    />
-                    <Detail label="Statut" value={getApprovalStatusLabel(response)} />
-                    {getApprovalCreatedDate(response) && (
-                      <Detail label="Date" value={getApprovalCreatedDate(response)} />
-                    )}
-                  </div>
-
-                  {approvalActionMessage && (
-                    <p className="approvalNotice success">{approvalActionMessage}</p>
-                  )}
-
-                  {approvalActionError && (
-                    <p className="approvalNotice danger">{approvalActionError}</p>
-                  )}
-
-                  {approvalId && isApprovalPending && canApproveInline && (
-                    <div className="approvalActions">
-                      <button
-                        type="button"
-                        disabled={approvalActionLoading !== null}
-                        onClick={() => void handleInlineApproval("approve")}
-                      >
-                        {approvalActionLoading === "approve" ? "Validation..." : "Approuver"}
-                      </button>
-                      <button
-                        className="reject"
-                        type="button"
-                        disabled={approvalActionLoading !== null}
-                        onClick={() => void handleInlineApproval("reject")}
-                      >
-                        {approvalActionLoading === "reject" ? "Refus..." : "Refuser"}
-                      </button>
-                    </div>
-                  )}
-
-                  {approvalId && isApprovalPending && !canApproveInline && (
-                    <p className="approvalNotice">
-                      Vous n’avez pas la permission de valider cette demande.
-                    </p>
-                  )}
-                </>
-              )}
-
-              {!isOdooProductResult &&
-                !isOdooProductSearchResult &&
-                !isOdooGenericRecordResult &&
-                !isOdooDocumentResult &&
-                !isSensitiveAction &&
-                !isUnsupported &&
-                !isAccessDenied &&
-                !isSecurityBlocked &&
-                !needsClarification && (
-                <p className="genericMessage">
-                  {mainAnswer?.message}
-                </p>
-              )}
-
-              {candidates.length > 0 && !isOdooProductSearchResult && (
-                <div className="candidateBlock">
-                  <p className="eyebrow">Candidats</p>
-                  <div className="candidateList">
-                    {candidates.map((candidate, index) => (
-                      <div
-                        className="candidateItem"
-                        key={`${formatValue(candidate.id || candidate.record_id || candidate.line_id)}-${index}`}
-                      >
-                        <Detail
-                          label="ID"
-                          value={formatValue(candidate.id || candidate.record_id || candidate.line_id)}
-                        />
-                        <Detail
-                          label="Nom"
-                          value={formatValue(candidate.name || candidate.product || candidate.product_name || candidate.partner)}
-                        />
-                        <Detail
-                          label="Référence"
-                          value={formatValue(candidate.default_code || candidate.ref)}
-                        />
-                        <Detail
-                          label="Prix"
-                          value={formatValue(candidate.list_price || candidate.price_unit)}
-                        />
-                        <Detail
-                          label="Stock"
-                          value={formatValue(candidate.qty_available || candidate.quantity)}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {sources.length > 0 && (
-                <div className="sourceBlock">
-                  <p className="eyebrow">Sources</p>
-                  <div className="sourceList">
-                    {sources.map((source, index) => (
-                      <div
-                        className="sourceItem"
-                        key={`${source.url || source.title || "source"}-${index}`}
-                      >
-                        <span>{formatSourceLabel(source)}</span>
-                        {source.url && (
-                          <a href={source.url} target="_blank" rel="noreferrer">
-                            Voir la source
-                          </a>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </section>
-
-            {SHOW_TECHNICAL_DETAILS && (
-              <details className="rawPanel">
-                <summary>Détails techniques</summary>
-                <TechnicalDetails response={response} />
-              </details>
-            )}
-          </>
-        )}
       </section>
 
       <style jsx global>{`
@@ -708,6 +654,49 @@ export default function ChatPage() {
           height: 8px;
           border-radius: 50%;
           background: #13754a;
+        }
+
+        .messageList {
+          display: grid;
+          gap: 14px;
+          margin-bottom: 18px;
+        }
+
+        .messageTurn {
+          min-width: 0;
+        }
+
+        .messageTurn.user {
+          display: flex;
+          justify-content: flex-end;
+        }
+
+        .userBubble {
+          max-width: min(760px, 86%);
+          background: #172033;
+          color: #ffffff;
+          border-radius: 8px;
+          padding: 13px 15px;
+        }
+
+        .userBubble p {
+          margin: 0;
+          white-space: pre-wrap;
+          line-height: 1.55;
+          font-size: 14px;
+          font-weight: 700;
+        }
+
+        .assistantLoading {
+          width: fit-content;
+          max-width: min(760px, 86%);
+          background: #ffffff;
+          border: 1px solid #d9dee7;
+          border-radius: 8px;
+          padding: 13px 15px;
+          color: #647084;
+          font-size: 14px;
+          font-weight: 800;
         }
 
         .promptPanel,
@@ -1171,8 +1160,968 @@ export default function ChatPage() {
             grid-template-columns: 1fr;
           }
         }
+
+        body {
+          background: #0f1628;
+          color: #eef4ff;
+        }
+
+        .pageShell {
+          min-height: 100vh;
+          height: 100vh;
+          display: grid;
+          grid-template-columns: 270px minmax(0, 1fr);
+          overflow: hidden;
+          background: #0f1628;
+        }
+
+        .sidebar {
+          min-height: 100vh;
+          padding: 0;
+          background: #162035;
+          border-right: 1px solid #2a3a5c;
+          color: #eef4ff;
+          position: relative;
+        }
+
+        .brand {
+          margin: 0;
+          padding: 20px 18px;
+          border-bottom: 1px solid #2a3a5c;
+        }
+
+        .brandMark {
+          width: 42px;
+          height: 42px;
+          flex: 0 0 42px;
+          border-radius: 12px;
+          background: #4b7fe8;
+          color: #ffffff;
+          font-weight: 900;
+          font-size: 16px;
+        }
+
+        .brandMark span {
+          display: block;
+        }
+
+        .brand p {
+          color: #eef4ff;
+          font-size: 14px;
+          text-transform: none;
+          letter-spacing: 0;
+          font-weight: 900;
+        }
+
+        .brand h1 {
+          color: #8a9bbf;
+          font-size: 13px;
+          font-weight: 700;
+        }
+
+        .navLabel {
+          margin: 0;
+          padding: 22px 16px 8px;
+          color: #5f7195;
+          font-size: 11px;
+          font-weight: 900;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+        }
+
+        .nav {
+          padding: 0 10px;
+          gap: 7px;
+        }
+
+        .nav a {
+          border: 1px solid transparent;
+          color: #8a9bbf;
+          font-size: 14px;
+          font-weight: 800;
+          border-radius: 10px;
+          padding: 11px 13px;
+        }
+
+        .nav a:hover {
+          background: #1e2d4a;
+          color: #eef4ff;
+        }
+
+        .nav a.active {
+          background: rgba(75, 127, 232, 0.15);
+          border-color: rgba(75, 127, 232, 0.45);
+          color: #76a0ff;
+        }
+
+        .sidebarFooter {
+          border-top: 1px solid #2a3a5c;
+          padding: 16px;
+        }
+
+        .sidebarFooter p {
+          color: #eef4ff;
+        }
+
+        .sidebarFooter span {
+          display: block;
+          color: #8a9bbf;
+        }
+
+        .logoutButton {
+          min-height: 34px;
+          border-radius: 8px;
+          border-color: #2a3a5c;
+          color: #8a9bbf;
+        }
+
+        .logoutButton:hover {
+          border-color: rgba(224, 82, 82, 0.6);
+          color: #ff8b8b;
+        }
+
+        .content {
+          min-height: 0;
+          padding: 0;
+          display: flex;
+          flex-direction: column;
+          background: #0f1628;
+          overflow: hidden;
+        }
+
+        .topbar {
+          min-height: 78px;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 18px;
+          padding: 18px 30px;
+          background: #0f1628;
+          border-bottom: 1px solid #2a3a5c;
+          flex: 0 0 auto;
+        }
+
+        .topbarTitle {
+          min-width: 0;
+        }
+
+        .topbarTitle h2 {
+          margin: 4px 0 0;
+          color: #eef4ff;
+          font-size: 28px;
+          font-weight: 900;
+          letter-spacing: -0.03em;
+        }
+
+        .topbarActions {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
+
+        .modelBadge {
+          min-height: 36px;
+          display: inline-flex;
+          align-items: center;
+          border: 1px solid #2a3a5c;
+          background: #162035;
+          color: #8a9bbf;
+          border-radius: 10px;
+          padding: 0 14px;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+            "Liberation Mono", monospace;
+          font-size: 12px;
+          font-weight: 900;
+          white-space: nowrap;
+        }
+
+        .headerBadge {
+          min-height: 36px;
+          border-color: rgba(52, 199, 133, 0.35);
+          background: rgba(52, 199, 133, 0.08);
+          color: #34c785;
+        }
+
+        .badgeDot {
+          background: #34c785;
+          box-shadow: 0 0 0 4px rgba(52, 199, 133, 0.12);
+        }
+
+        .chatViewport {
+          flex: 1 1 auto;
+          min-height: 0;
+          overflow-y: auto;
+          padding: 28px 30px;
+          scroll-behavior: smooth;
+        }
+
+        .chatViewport::-webkit-scrollbar {
+          width: 6px;
+        }
+
+        .chatViewport::-webkit-scrollbar-thumb {
+          background: #2a3a5c;
+          border-radius: 999px;
+        }
+
+        .emptyState {
+          min-height: 100%;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 14px;
+          color: #5f7195;
+          text-align: center;
+          padding: 40px 16px;
+        }
+
+        .emptyIcon {
+          width: 58px;
+          height: 58px;
+          display: grid;
+          place-items: center;
+          border-radius: 18px;
+          border: 1px solid #2a3a5c;
+          background: #1e2d4a;
+          color: #76a0ff;
+          font-size: 28px;
+          font-weight: 900;
+        }
+
+        .emptyState h3 {
+          margin: 6px 0 0;
+          color: #8a9bbf;
+          font-size: 21px;
+          font-weight: 900;
+          letter-spacing: -0.02em;
+        }
+
+        .emptyState p {
+          margin: 0;
+          max-width: 460px;
+          color: #5f7195;
+          font-size: 15px;
+          line-height: 1.55;
+          font-weight: 700;
+        }
+
+        .suggestions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+          justify-content: center;
+          max-width: 780px;
+          margin-top: 12px;
+        }
+
+        .suggestionChip {
+          height: auto;
+          min-height: 38px;
+          border-radius: 999px;
+          border: 1px solid #2a3a5c;
+          background: #162035;
+          color: #8a9bbf;
+          padding: 8px 14px;
+          font-size: 13px;
+          line-height: 1.25;
+        }
+
+        .suggestionChip:hover:not(:disabled) {
+          color: #76a0ff;
+          border-color: rgba(75, 127, 232, 0.65);
+          background: rgba(75, 127, 232, 0.12);
+        }
+
+        .messageList {
+          display: flex;
+          flex-direction: column;
+          gap: 20px;
+          margin: 0 auto;
+          width: min(920px, 100%);
+        }
+
+        .messageTurn {
+          display: flex;
+          gap: 12px;
+          max-width: 820px;
+          align-items: flex-start;
+        }
+
+        .messageTurn.user {
+          align-self: flex-end;
+          flex-direction: row-reverse;
+        }
+
+        .messageTurn.assistant {
+          align-self: flex-start;
+        }
+
+        .messageAvatar {
+          width: 34px;
+          height: 34px;
+          display: grid;
+          place-items: center;
+          flex: 0 0 34px;
+          border-radius: 11px;
+          background: #2a3a5c;
+          color: #8a9bbf;
+          font-size: 12px;
+          font-weight: 900;
+          margin-top: 2px;
+        }
+
+        .messageTurn.assistant .messageAvatar {
+          background: #4b7fe8;
+          color: #ffffff;
+        }
+
+        .messageBody {
+          min-width: 0;
+          display: grid;
+          gap: 5px;
+        }
+
+        .messageTurn.user .messageBody {
+          justify-items: end;
+        }
+
+        .messageMeta {
+          color: #5f7195;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+            "Liberation Mono", monospace;
+          font-size: 11px;
+          font-weight: 800;
+        }
+
+        .userBubble {
+          max-width: min(620px, 100%);
+          border-radius: 16px 5px 16px 16px;
+          background: #4b7fe8;
+          color: #ffffff;
+          padding: 13px 16px;
+        }
+
+        .userBubble p {
+          font-weight: 700;
+        }
+
+        .assistantLoading {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          width: auto;
+          min-height: 46px;
+          border-radius: 5px 16px 16px 16px;
+          border: 1px solid #2a3a5c;
+          background: #162035;
+          padding: 0 16px;
+        }
+
+        .assistantLoading span {
+          width: 7px;
+          height: 7px;
+          border-radius: 999px;
+          background: #8a9bbf;
+          animation: chatPulse 1.35s infinite;
+        }
+
+        .assistantLoading span:nth-child(2) {
+          animation-delay: 0.18s;
+        }
+
+        .assistantLoading span:nth-child(3) {
+          animation-delay: 0.36s;
+        }
+
+        @keyframes chatPulse {
+          0%,
+          80%,
+          100% {
+            opacity: 0.25;
+          }
+          40% {
+            opacity: 1;
+          }
+        }
+
+        .resultPanel,
+        .approvalPanel,
+        .rawPanel {
+          width: min(720px, 100%);
+          margin: 0;
+          border-radius: 16px;
+          border: 1px solid #2a3a5c;
+          background: #162035;
+          color: #eef4ff;
+          padding: 18px;
+        }
+
+        .approvalPanel {
+          border-color: rgba(183, 121, 31, 0.55);
+          background: #1d2740;
+        }
+
+        .rawPanel {
+          margin-top: 8px;
+          background: #101827;
+        }
+
+        .rawPanel summary {
+          color: #8a9bbf;
+        }
+
+        .genericMessage,
+        .stepItem p,
+        .lineRow {
+          color: #eef4ff;
+        }
+
+        .detailsTable,
+        .sourceBlock {
+          border-color: #2a3a5c;
+        }
+
+        .sourceItem,
+        .candidateItem,
+        .metric,
+        .lineTable {
+          border-color: #2a3a5c;
+          background: #101827;
+          color: #eef4ff;
+        }
+
+        .lineHeader {
+          background: #1e2d4a;
+          color: #8a9bbf;
+        }
+
+        .inputArea {
+          flex: 0 0 auto;
+          border-top: 1px solid #2a3a5c;
+          background: #0f1628;
+          padding: 18px 30px 20px;
+        }
+
+        .composer {
+          width: min(980px, 100%);
+          margin: 0 auto;
+          display: flex;
+          align-items: flex-end;
+          gap: 12px;
+          border: 1px solid #2a3a5c;
+          background: #162035;
+          border-radius: 18px;
+          padding: 10px 12px 10px 18px;
+        }
+
+        .composer:focus-within {
+          border-color: #4b7fe8;
+          box-shadow: 0 0 0 3px rgba(75, 127, 232, 0.16);
+        }
+
+        .composer textarea {
+          min-height: 38px;
+          max-height: 140px;
+          resize: none;
+          border: 0;
+          background: transparent;
+          color: #eef4ff;
+          padding: 9px 0;
+          font-size: 15px;
+          line-height: 1.45;
+          box-shadow: none;
+        }
+
+        .composer textarea::placeholder {
+          color: #5f7195;
+        }
+
+        .composer textarea:focus {
+          border: 0;
+          box-shadow: none;
+        }
+
+        .sendButton {
+          width: 42px;
+          height: 42px;
+          flex: 0 0 42px;
+          border-radius: 13px;
+          border: 0;
+          background: #4b7fe8;
+          color: #ffffff;
+          padding: 0;
+          font-size: 18px;
+        }
+
+        .sendButton:hover:not(:disabled) {
+          background: #6494f0;
+        }
+
+        .inputHint {
+          width: min(980px, 100%);
+          margin: 8px auto 0;
+          color: #5f7195;
+          font-size: 12px;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+            "Liberation Mono", monospace;
+        }
+
+        kbd {
+          display: inline-block;
+          border: 1px solid #2a3a5c;
+          border-radius: 5px;
+          background: #1e2d4a;
+          color: #8a9bbf;
+          padding: 1px 6px;
+          font-size: 11px;
+          font-family: inherit;
+        }
+
+        .composerError {
+          width: min(980px, 100%);
+          margin: 0 auto 10px;
+        }
+
+        @media (max-width: 1180px) {
+          .pageShell {
+            height: auto;
+            min-height: 100vh;
+            overflow: visible;
+            grid-template-columns: 1fr;
+          }
+
+          .sidebar {
+            min-height: auto;
+          }
+
+          .content {
+            min-height: calc(100vh - 170px);
+          }
+
+          .nav {
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+          }
+        }
+
+        @media (max-width: 720px) {
+          .topbar,
+          .inputArea,
+          .chatViewport {
+            padding-left: 18px;
+            padding-right: 18px;
+          }
+
+          .topbar {
+            align-items: flex-start;
+            flex-direction: column;
+          }
+
+          .messageTurn,
+          .messageTurn.user {
+            max-width: 100%;
+          }
+
+          .messageAvatar {
+            display: none;
+          }
+
+          .resultPanel,
+          .approvalPanel,
+          .rawPanel {
+            width: 100%;
+          }
+
+          .nav {
+            grid-template-columns: 1fr;
+          }
+        }
+
+        .nav a {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+
+        .navIcon {
+          width: 18px;
+          display: inline-grid;
+          place-items: center;
+          flex: 0 0 18px;
+          color: #5f7195;
+          font-size: 15px;
+          font-weight: 900;
+        }
+
+        .nav a.active .navIcon,
+        .nav a:hover .navIcon {
+          color: currentColor;
+        }
+
+        .chatViewport {
+          padding: 26px 28px 18px;
+        }
+
+        .messageList {
+          width: min(940px, 100%);
+          gap: 18px;
+          padding-bottom: 4px;
+        }
+
+        .messageTurn {
+          width: 100%;
+          max-width: none;
+        }
+
+        .messageTurn.user {
+          justify-content: flex-start;
+        }
+
+        .messageTurn.assistant {
+          justify-content: flex-start;
+        }
+
+        .messageTurn.user .messageBody {
+          max-width: min(680px, 78%);
+        }
+
+        .messageTurn.assistant .messageBody {
+          max-width: min(780px, 86%);
+        }
+
+        .messageTurn.assistant {
+          gap: 10px;
+        }
+
+        .messageTurn.user .messageAvatar {
+          margin-left: 0;
+        }
+
+        .messageTurn.assistant .messageAvatar {
+          margin-right: 0;
+        }
+
+        .messageMeta {
+          padding: 0 2px;
+        }
+
+        .userBubble {
+          width: fit-content;
+          max-width: 100%;
+          padding: 12px 15px;
+          box-shadow: 0 10px 24px rgba(0, 0, 0, 0.12);
+        }
+
+        .resultPanel,
+        .approvalPanel,
+        .rawPanel {
+          width: 100%;
+          max-width: 100%;
+          border-radius: 15px;
+          padding: 17px;
+          box-shadow: 0 10px 26px rgba(0, 0, 0, 0.12);
+        }
+
+        .assistantLoading {
+          min-height: 44px;
+          padding: 0 15px;
+        }
+
+        .inputArea {
+          position: sticky;
+          bottom: 0;
+          z-index: 5;
+          padding: 10px 28px 12px;
+        }
+
+        .composer {
+          width: min(940px, 100%);
+          border-radius: 16px;
+          padding: 6px 8px 6px 14px;
+        }
+
+        .composer textarea {
+          min-height: 32px;
+          padding: 6px 0;
+        }
+
+        .sendButton {
+          width: 36px;
+          height: 36px;
+          flex-basis: 36px;
+          border-radius: 12px;
+        }
+
+        .resultPanel .panelHeader h3,
+        .approvalPanel .panelHeader h3 {
+          color: #eef4ff;
+        }
+
+        .inputHint {
+          width: min(940px, 100%);
+          margin-top: 6px;
+          font-size: 11px;
+        }
+
+        .emptyState {
+          width: min(940px, 100%);
+          margin: 0 auto;
+        }
+
+        .suggestions {
+          max-width: 820px;
+        }
+
+        @media (max-width: 720px) {
+          .chatViewport {
+            padding-bottom: 14px;
+          }
+
+          .messageTurn.user .messageBody,
+          .messageTurn.assistant .messageBody {
+            max-width: 100%;
+          }
+
+          .inputArea {
+            padding-top: 10px;
+            padding-bottom: 12px;
+          }
+        }
       `}</style>
     </main>
+  );
+}
+
+function AssistantResponseCard({
+  response,
+  approvalActionLoading,
+  approvalActionMessage,
+  approvalActionError,
+  canApproveInline,
+  onApproval,
+}: {
+  response: ChatResponse;
+  approvalActionLoading: "approve" | "reject" | null;
+  approvalActionMessage: string;
+  approvalActionError: string;
+  canApproveInline: boolean;
+  onApproval: (decision: "approve" | "reject", response: ChatResponse) => void;
+}) {
+  const odooStockResult = normalizeOdooStockResult(response);
+  const odooDocumentResult = normalizeOdooDocumentResult(response);
+  const odooProductSearchResult = normalizeOdooProductSearchResult(response);
+  const odooGenericRecordResult = normalizeOdooGenericRecordResult(response);
+  const candidates = normalizeCandidates(response);
+  const sources = normalizeSources(response);
+  const approvalId = getApprovalId(response);
+  const isApprovalPending = isPendingApprovalResponse(response);
+  const isApprovalRequired =
+    response.requires_approval === true || response.status === "pending_approval";
+
+  const isOdooProductResult = Boolean(odooStockResult && !odooDocumentResult);
+  const isOdooDocumentResult = Boolean(odooDocumentResult);
+  const isOdooProductSearchResult = Boolean(odooProductSearchResult);
+  const isOdooGenericRecordResult = Boolean(odooGenericRecordResult);
+
+  const isSensitiveAction =
+    response.status === "pending_approval" || isApprovalRequired;
+  const isUnsupported = response.status === "unsupported";
+  const isAccessDenied =
+    response.status === "access_denied" ||
+    response.status === "department_access_denied";
+  const isSecurityBlocked =
+    response.status === "blocked" ||
+    response.technical?.risk === "blocked" ||
+    response.technical?.agent === "security_agent" ||
+    response.technical?.action === "blocked_sensitive_path";
+  const needsClarification = response.status === "clarification_required";
+  const statusLabel = formatStatus(response.status);
+  const mainAnswer = getMainAnswer(response, {
+    odooStockResult,
+    odooDocumentResult,
+    odooProductSearchResult,
+    odooGenericRecordResult,
+    statusLabel,
+  });
+  const showAnswerTitle = Boolean(
+    mainAnswer.title &&
+      !["Réponse", "Résultat", "Terminé"].includes(mainAnswer.title)
+  );
+
+  return (
+    <>
+      <section
+        className={
+          isSensitiveAction ? "approvalPanel resultAnchor" : "resultPanel resultAnchor"
+        }
+      >
+        {showAnswerTitle && (
+          <div className="panelHeader">
+            <div>
+              <h3>{mainAnswer.title}</h3>
+            </div>
+          </div>
+        )}
+
+        {isAccessDenied && <p className="genericMessage">{mainAnswer.message}</p>}
+
+        {isSecurityBlocked && !isAccessDenied && !isUnsupported && (
+          <p className="genericMessage">{mainAnswer.message}</p>
+        )}
+
+        {isUnsupported && !isAccessDenied && !isSecurityBlocked && (
+          <p className="genericMessage">{mainAnswer.message}</p>
+        )}
+
+        {needsClarification && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
+          <p className="genericMessage">{mainAnswer.message}</p>
+        )}
+
+        {isOdooProductResult && !isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
+          <p className="genericMessage">{mainAnswer.message}</p>
+        )}
+
+        {isOdooProductSearchResult && !isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
+          <p className="genericMessage">{mainAnswer.message}</p>
+        )}
+
+        {isOdooGenericRecordResult && !isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
+          <p className="genericMessage">{mainAnswer.message}</p>
+        )}
+
+        {isOdooDocumentResult && !isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
+          <p className="genericMessage">{mainAnswer.message}</p>
+        )}
+
+        {isSensitiveAction && !isUnsupported && !isAccessDenied && !isSecurityBlocked && (
+          <>
+            <div className="detailsTable">
+              <Detail label="Action" value={getApprovalActionLabel(response)} />
+              <Detail label="Élément concerné" value={getApprovalTarget(response)} />
+              <Detail
+                label="Valeur demandée"
+                value={getApprovalRequestedValue(response)}
+              />
+              <Detail label="Statut" value={getApprovalStatusLabel(response)} />
+              {getApprovalCreatedDate(response) && (
+                <Detail label="Date" value={getApprovalCreatedDate(response)} />
+              )}
+            </div>
+
+            {approvalActionMessage && (
+              <p className="approvalNotice success">{approvalActionMessage}</p>
+            )}
+
+            {approvalActionError && (
+              <p className="approvalNotice danger">{approvalActionError}</p>
+            )}
+
+            {approvalId && isApprovalPending && canApproveInline && (
+              <div className="approvalActions">
+                <button
+                  type="button"
+                  disabled={approvalActionLoading !== null}
+                  onClick={() => void onApproval("approve", response)}
+                >
+                  {approvalActionLoading === "approve" ? "Validation..." : "Approuver"}
+                </button>
+                <button
+                  className="reject"
+                  type="button"
+                  disabled={approvalActionLoading !== null}
+                  onClick={() => void onApproval("reject", response)}
+                >
+                  {approvalActionLoading === "reject" ? "Refus..." : "Refuser"}
+                </button>
+              </div>
+            )}
+
+            {approvalId && isApprovalPending && !canApproveInline && (
+              <p className="approvalNotice">
+                Vous n’avez pas la permission de valider cette demande.
+              </p>
+            )}
+          </>
+        )}
+
+        {!isOdooProductResult &&
+          !isOdooProductSearchResult &&
+          !isOdooGenericRecordResult &&
+          !isOdooDocumentResult &&
+          !isSensitiveAction &&
+          !isUnsupported &&
+          !isAccessDenied &&
+          !isSecurityBlocked &&
+          !needsClarification && (
+            <p className="genericMessage">{mainAnswer.message}</p>
+          )}
+
+        {candidates.length > 0 && !isOdooProductSearchResult && (
+          <div className="candidateBlock">
+            <p className="eyebrow">Candidats</p>
+            <div className="candidateList">
+              {candidates.map((candidate, index) => (
+                <div
+                  className="candidateItem"
+                  key={`${formatValue(candidate.id || candidate.record_id || candidate.line_id)}-${index}`}
+                >
+                  <Detail
+                    label="ID"
+                    value={formatValue(candidate.id || candidate.record_id || candidate.line_id)}
+                  />
+                  <Detail
+                    label="Nom"
+                    value={formatValue(candidate.name || candidate.product || candidate.product_name || candidate.partner)}
+                  />
+                  <Detail
+                    label="Référence"
+                    value={formatValue(candidate.default_code || candidate.ref)}
+                  />
+                  <Detail
+                    label="Prix"
+                    value={formatValue(candidate.list_price || candidate.price_unit)}
+                  />
+                  <Detail
+                    label="Stock"
+                    value={formatValue(candidate.qty_available || candidate.quantity)}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {sources.length > 0 && (
+          <div className="sourceBlock">
+            <p className="eyebrow">Sources</p>
+            <div className="sourceList">
+              {sources.map((source, index) => (
+                <div
+                  className="sourceItem"
+                  key={`${source.url || source.title || "source"}-${index}`}
+                >
+                  <span>{formatSourceLabel(source)}</span>
+                  {source.url && (
+                    <a href={source.url} target="_blank" rel="noreferrer">
+                      Voir la source
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      {SHOW_TECHNICAL_DETAILS && (
+        <details className="rawPanel">
+          <summary>Détails techniques</summary>
+          <TechnicalDetails response={response} />
+        </details>
+      )}
+    </>
   );
 }
 
@@ -1251,6 +2200,40 @@ function TechnicalDetails({ response }: { response: ChatResponse }) {
 
 function isLooseRecord(value: unknown): value is LooseRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function createMessageId(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function userInitial(user: AuthUser | null) {
+  const source = user?.email || user?.role_label || "U";
+  return source.trim().charAt(0).toUpperCase() || "U";
+}
+
+function getLatestAssistantModel(messages: ChatMessage[]) {
+  const latest = [...messages]
+    .reverse()
+    .find((item) => item.role === "assistant" && item.response?.technical?.model);
+
+  const model = latest?.response?.technical?.model;
+
+  return isUserFacingModelLabel(model) ? model : "gpt-4.1-mini";
+}
+
+function isUserFacingModelLabel(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+
+  const label = value.trim();
+  const normalized = label.toLowerCase();
+
+  if (!label) return false;
+
+  return !(
+    normalized.includes("policy") ||
+    normalized.endsWith("_agent") ||
+    normalized === "unknown"
+  );
 }
 
 function getStringValue(value: unknown) {

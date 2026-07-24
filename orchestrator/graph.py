@@ -265,8 +265,6 @@ def process_request(message: str, classification: dict | None = None):
         }
 
     classification = classification or classify_message(message)
-    classification = apply_backend_safety_overrides(message, classification) or classification
-
     intent = classification.get("intent", "general")
     selected_agent = classification.get("selected_agent", "general_agent")
     confidence = classification.get("confidence", 0.0)
@@ -278,6 +276,27 @@ def process_request(message: str, classification: dict | None = None):
         or classifier_source in {"gemini_failed", "openai_failed"}
     )
 
+    security_override = apply_backend_safety_overrides(message)
+
+    if (
+        not classification_failed
+        and isinstance(security_override, dict)
+        and security_override.get("risk_level") == "blocked"
+    ):
+        classification = security_override
+    elif not classification_failed and (
+        classification.get("capability")
+        or classification.get("action")
+        or classification.get("domain")
+        or classification.get("request_type")
+    ):
+        classification = apply_backend_safety_overrides(message, classification) or classification
+
+    intent = classification.get("intent", "general")
+    selected_agent = classification.get("selected_agent", "general_agent")
+    confidence = classification.get("confidence", 0.0)
+    classifier_source = classification.get("classifier_source")
+    classifier_error = classification.get("classifier_error")
     risk_level = classification.get("risk_level") or classify_risk(message)
 
     if risk_level == "blocked" or selected_agent == "security_agent" and classification.get("action") == "block_request":

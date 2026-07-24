@@ -188,6 +188,14 @@ class ChatTechnicalMetadata(BaseModel):
     target_system: str | None = None
     odoo_model: str | None = None
     record_count: int | None = None
+    selected_model: str | None = None
+    candidate_models: list[str] | None = None
+    fields_used: list[str] | None = None
+    domain_used: list | None = None
+    count_returned: int | None = None
+    failure_reason: str | None = None
+    aggregation_field: str | None = None
+    odoo_method: str | None = None
     odoo_tool_steps: list[dict] | None = None
     final_odoo_model: str | None = None
     final_record_count: int | None = None
@@ -198,6 +206,17 @@ class ChatTechnicalMetadata(BaseModel):
     approval_action: str | None = None
     approval_entity: str | None = None
     approval_requested_change: str | None = None
+    memory_context_used: bool | None = None
+    resolved_from_previous_model: str | None = None
+    resolved_business_object: str | None = None
+    follow_up_limit: int | None = None
+    pending_context_used: bool | None = None
+    pending_context_type: str | None = None
+    original_request: str | None = None
+    merged_request: str | None = None
+    merged_parameters: dict | None = None
+    cleared_pending_context: bool | None = None
+    pending_context_cleared: bool | None = None
 
 
 class PublicChatResponse(BaseModel):
@@ -371,6 +390,686 @@ def remember_chat_result(session_id: str, result):
             "updated_memory_context": conversation_memory.get_safe_context(session_id),
         },
     )
+
+
+def user_permission_context(current_user: dict):
+    return {
+        "email": current_user.get("email"),
+        "role": current_user.get("role"),
+        "department": current_user.get("department"),
+        "permissions": current_user.get("permissions", []),
+        "department_profile": get_department_profile(
+            current_user.get("department"),
+        ).to_public_dict(),
+    }
+
+
+def result_needs_clarification(result: dict) -> bool:
+    if not isinstance(result, dict):
+        return False
+
+    return (
+        result.get("status") == "needs_clarification"
+        or result.get("clarification_needed") is True
+        or result.get("needs_clarification") is True
+    )
+
+
+def build_pending_clarification_state(
+    session_id: str,
+    original_request: str,
+    resolved_request: str,
+    classification: dict | None,
+    result: dict | None,
+):
+    classification = classification or {}
+    result = result or {}
+    missing = (
+        result.get("missing_parameters")
+        or classification.get("missing_parameters")
+        or []
+    )
+
+    if not isinstance(missing, list):
+        missing = []
+
+    return {
+        "session_id": session_id,
+        "original_request": original_request,
+        "resolved_request": resolved_request,
+        "classification": classification,
+        "result": result,
+        "missing_parameters": missing,
+    }
+
+
+def store_pending_clarification(
+    session_id: str,
+    original_request: str,
+    resolved_request: str,
+    classification: dict | None,
+    result: dict | None,
+):
+    if not result_needs_clarification(result or {}):
+        return
+
+    conversation_memory.set_pending_clarification(
+        session_id,
+        build_pending_clarification_state(
+            session_id,
+            original_request,
+            resolved_request,
+            classification,
+            result,
+        ),
+    )
+
+
+def result_suggests_pending_task(result: dict) -> bool:
+    if not isinstance(result, dict):
+        return False
+
+    status = str(result.get("status") or "").lower()
+    agent = result.get("agent") or result.get("selected_agent")
+    target_system = result.get("target_system")
+    domain = result.get("domain")
+
+    if status not in {"not_found", "no_results"}:
+        return False
+
+    if result.get("requires_approval") or result.get("approval_required"):
+        return False
+
+    return agent == "odoo_agent" or target_system == "odoo" or domain == "odoo"
+
+
+def build_pending_task_state(
+    session_id: str,
+    original_request: str,
+    resolved_request: str,
+    classification: dict | None,
+    result: dict | None,
+):
+    classification = classification or {}
+    result = result or {}
+
+    return {
+        "session_id": session_id,
+        "context_type": "retry_suggestion",
+        "original_request": original_request,
+        "resolved_request": resolved_request,
+        "classification": classification,
+        "result": result,
+        "reason": result.get("status") or "no_result",
+        "suggested_next_action": "retry_with_broader_or_adjusted_read_criteria",
+    }
+
+
+def store_pending_task(
+    session_id: str,
+    original_request: str,
+    resolved_request: str,
+    classification: dict | None,
+    result: dict | None,
+):
+    if not result_suggests_pending_task(result or {}):
+        return
+
+    conversation_memory.set_pending_task(
+        session_id,
+        build_pending_task_state(
+            session_id,
+            original_request,
+            resolved_request,
+            classification,
+            result,
+        ),
+    )
+
+
+def _classification_is_security_sensitive(classification: dict) -> bool:
+    if not isinstance(classification, dict):
+        return False
+
+    return (
+        classification.get("selected_agent") == "security_agent"
+        or classification.get("agent") == "security_agent"
+        or classification.get("risk") == "blocked"
+        or classification.get("risk_level") == "blocked"
+        or classification.get("status") == "blocked"
+        or classification.get("action") in {"blocked_sensitive_path", "security_blocked"}
+    )
+
+
+def _classification_domain(classification: dict) -> str:
+    return str(classification.get("domain") or classification.get("target_system") or "").lower()
+
+
+def _pending_domain(pending: dict) -> str:
+    return str(pending.get("domain") or pending.get("target_system") or "").lower()
+
+
+def _looks_like_standalone_question(message: str) -> bool:
+    normalized = normalize_followup_text(message)
+    tokens = normalized.split()
+
+    if "?" in message and len(tokens) > 3:
+        return True
+
+    question_leads = {
+        "what",
+        "why",
+        "how",
+        "when",
+        "where",
+        "who",
+        "which",
+        "quoi",
+        "pourquoi",
+        "comment",
+        "quand",
+        "ou",
+        "qui",
+        "quel",
+        "quelle",
+        "quels",
+        "quelles",
+        "explique",
+        "expliquer",
+        "raconte",
+        "resume",
+        "résume",
+    }
+
+    return bool(tokens and tokens[0] in question_leads and len(tokens) > 3)
+
+
+def _looks_like_backend_action(classification: dict) -> bool:
+    if not isinstance(classification, dict):
+        return False
+
+    request_type = str(classification.get("request_type") or "").lower()
+    capability = str(classification.get("capability") or "").lower()
+    action = str(classification.get("action") or "").lower()
+
+    return (
+        request_type == "enterprise_action"
+        or bool(capability and capability not in {"knowledge.general_answer"})
+        or action in ODOO_WRITE_OPERATION_VALUES
+    )
+
+
+def _token_set(value: str) -> set[str]:
+    stopwords = {
+        "a",
+        "an",
+        "and",
+        "avec",
+        "ce",
+        "ces",
+        "de",
+        "des",
+        "du",
+        "en",
+        "for",
+        "from",
+        "i",
+        "j",
+        "je",
+        "la",
+        "le",
+        "les",
+        "me",
+        "moi",
+        "of",
+        "on",
+        "sur",
+        "the",
+        "to",
+        "un",
+        "une",
+    }
+
+    return {
+        token
+        for token in normalize_followup_text(value).replace("-", " ").split()
+        if len(token) > 2 and token not in stopwords
+    }
+
+
+def _pending_context_text(pending: dict) -> str:
+    fragments = [
+        pending.get("original_request"),
+        pending.get("resolved_request"),
+        pending.get("capability"),
+        pending.get("action"),
+        pending.get("intent"),
+        pending.get("target_system"),
+        pending.get("suggested_next_action"),
+    ]
+
+    for key in ("entities", "parameters"):
+        value = pending.get(key)
+
+        if isinstance(value, dict):
+            fragments.extend(str(item) for item in value.values() if item not in {None, ""})
+
+    return " ".join(str(fragment) for fragment in fragments if fragment)
+
+
+def _looks_like_confirmation_or_reference(message: str, pending: dict) -> bool:
+    normalized = normalize_followup_text(message)
+    tokens = _token_set(message)
+
+    if not tokens:
+        return False
+
+    confirmation_markers = {
+        "yes",
+        "yeah",
+        "yep",
+        "ok",
+        "okay",
+        "daccord",
+        "oui",
+        "continue",
+        "proceed",
+        "go",
+        "fais",
+        "faire",
+        "cherche",
+        "recherche",
+        "autrement",
+        "different",
+        "different",
+        "autre",
+        "criteres",
+        "critere",
+        "broader",
+        "elargis",
+        "elargir",
+    }
+    reference_markers = {
+        "asked",
+        "requested",
+        "previous",
+        "avant",
+        "demande",
+        "demandee",
+        "demandes",
+        "mentionne",
+        "precedent",
+        "precedente",
+        "celui",
+        "celle",
+        "ceux",
+    }
+    pending_tokens = _token_set(_pending_context_text(pending))
+
+    if tokens & confirmation_markers:
+        return len(tokens) <= 10 or bool(tokens & pending_tokens)
+
+    if tokens & reference_markers:
+        return True
+
+    return bool(len(tokens) <= 8 and tokens & pending_tokens)
+
+
+def _looks_like_clarification_answer(
+    message: str,
+    pending: dict,
+    classification: dict,
+) -> bool:
+    if _classification_is_security_sensitive(classification):
+        return False
+
+    pending_domain = _pending_domain(pending)
+    response_domain = _classification_domain(classification)
+    request_type = str(classification.get("request_type") or "").lower()
+    response_domain_is_general = (
+        response_domain in {"knowledge", "general"}
+        and request_type != "enterprise_action"
+    )
+
+    if response_domain and pending_domain and response_domain == pending_domain:
+        return True
+
+    if (
+        response_domain
+        and pending_domain
+        and response_domain != pending_domain
+        and not response_domain_is_general
+    ):
+        return False
+
+    if _looks_like_standalone_question(message):
+        return False
+
+    normalized = normalize_followup_text(message)
+    tokens = normalized.split()
+
+    if len(tokens) <= 12 and not _looks_like_backend_action(classification):
+        return True
+
+    missing = pending.get("missing_parameters")
+    missing_text = " ".join(str(item).lower() for item in missing or [])
+    has_value_shape = bool(
+        re.search(r"\b\d{1,4}([/-]\d{1,2})?([/-]\d{1,4})?\b", normalized)
+        or re.search(r"\b[A-Z0-9][A-Z0-9._-]{2,}\b", message)
+    )
+
+    return bool(missing_text and has_value_shape)
+
+
+def _looks_like_pending_task_followup(
+    message: str,
+    pending: dict,
+    classification: dict,
+) -> bool:
+    if _classification_is_security_sensitive(classification):
+        return False
+
+    pending_domain = _pending_domain(pending)
+    response_domain = _classification_domain(classification)
+    request_type = str(classification.get("request_type") or "").lower()
+    response_domain_is_general = (
+        response_domain in {"knowledge", "general"}
+        and request_type != "enterprise_action"
+    )
+
+    if response_domain and pending_domain and response_domain == pending_domain:
+        return True
+
+    if (
+        response_domain
+        and pending_domain
+        and response_domain != pending_domain
+        and not response_domain_is_general
+    ):
+        return False
+
+    if _looks_like_standalone_question(message):
+        return False
+
+    return _looks_like_confirmation_or_reference(message, pending)
+
+
+def resolve_pending_clarification_context(
+    session_id: str,
+    message: str,
+    memory_context: dict,
+    current_user: dict,
+):
+    pending = conversation_memory.get_pending_clarification(session_id)
+
+    if not pending:
+        return {
+            "pending_context_used": False,
+            "cleared_pending_context": False,
+        }
+
+    response_classification = classify_message(
+        message,
+        context_memory=memory_context,
+        user_permissions=user_permission_context(current_user),
+    )
+
+    if _classification_is_security_sensitive(response_classification):
+        return {
+            "pending_context_used": False,
+            "cleared_pending_context": False,
+            "pending_sensitive_bypass_blocked": True,
+        }
+
+    if not _looks_like_clarification_answer(message, pending, response_classification):
+        conversation_memory.clear_pending_clarification(session_id)
+        return {
+            "pending_context_used": False,
+            "cleared_pending_context": True,
+            "original_request": pending.get("original_request"),
+        }
+
+    missing_parameters = pending.get("missing_parameters") or []
+    merged_request = (
+        f"{pending.get('resolved_request') or pending.get('original_request')}\n\n"
+        "Clarification utilisateur"
+        f"{' pour ' + ', '.join(str(item) for item in missing_parameters) if missing_parameters else ''}: "
+        f"{message}"
+    )
+
+    return {
+        "pending_context_used": True,
+        "cleared_pending_context": False,
+        "original_request": pending.get("original_request"),
+        "merged_request": merged_request,
+        "merged_parameters": {
+            "clarification": message,
+            "missing_parameters": missing_parameters,
+        },
+    }
+
+
+def resolve_pending_task_context(
+    session_id: str,
+    message: str,
+    memory_context: dict,
+    current_user: dict,
+):
+    pending = conversation_memory.get_pending_task(session_id)
+
+    if not pending:
+        return {
+            "pending_context_used": False,
+            "cleared_pending_context": False,
+            "pending_context_cleared": False,
+        }
+
+    response_classification = classify_message(
+        message,
+        context_memory=memory_context,
+        user_permissions=user_permission_context(current_user),
+    )
+
+    if _classification_is_security_sensitive(response_classification):
+        return {
+            "pending_context_used": False,
+            "cleared_pending_context": False,
+            "pending_context_cleared": False,
+            "pending_sensitive_bypass_blocked": True,
+        }
+
+    if not _looks_like_pending_task_followup(message, pending, response_classification):
+        conversation_memory.clear_pending_task(session_id)
+        return {
+            "pending_context_used": False,
+            "pending_context_type": pending.get("context_type"),
+            "cleared_pending_context": True,
+            "pending_context_cleared": True,
+            "original_request": pending.get("original_request"),
+        }
+
+    merged_request = (
+        f"{pending.get('resolved_request') or pending.get('original_request')}\n\n"
+        f"Contexte de suivi: l'utilisateur répond à la suggestion précédente "
+        f"({pending.get('suggested_next_action') or 'continuer la tâche'}).\n"
+        f"Suivi utilisateur: {message}\n"
+        "Continue la même demande avec les mêmes garde-fous; si le résultat exact "
+        "était vide, réessaie en lecture seule avec des critères plus larges ou ajustés, "
+        "sans inventer de données."
+    )
+
+    return {
+        "pending_context_used": True,
+        "pending_context_type": pending.get("context_type") or "task_follow_up",
+        "cleared_pending_context": False,
+        "pending_context_cleared": False,
+        "original_request": pending.get("original_request"),
+        "merged_request": merged_request,
+        "merged_parameters": {
+            "follow_up": message,
+            "suggested_next_action": pending.get("suggested_next_action"),
+            "reason": pending.get("reason"),
+            "entities": pending.get("entities") or {},
+            "parameters": pending.get("parameters") or {},
+        },
+    }
+
+
+def resolve_pending_context(
+    session_id: str,
+    message: str,
+    memory_context: dict,
+    current_user: dict,
+):
+    clarification_context = resolve_pending_clarification_context(
+        session_id,
+        message,
+        memory_context,
+        current_user,
+    )
+
+    if (
+        clarification_context.get("pending_context_used")
+        or clarification_context.get("pending_sensitive_bypass_blocked")
+        or clarification_context.get("cleared_pending_context")
+    ):
+        clarification_context.setdefault("pending_context_type", "clarification")
+        clarification_context.setdefault(
+            "pending_context_cleared",
+            clarification_context.get("cleared_pending_context") is True,
+        )
+        return clarification_context
+
+    return resolve_pending_task_context(
+        session_id,
+        message,
+        memory_context,
+        current_user,
+    )
+
+
+def build_odoo_memory_followup_classification(context: dict):
+    limit = context.get("limit") or 3
+    model = context.get("model")
+    business_object = context.get("business_object")
+
+    return {
+        "intent": "odoo_generic_read",
+        "request_type": "enterprise_action",
+        "domain": "odoo",
+        "capability": "odoo.generic_read",
+        "execution_mode": "tool",
+        "agent": "odoo_agent",
+        "selected_agent": "odoo_agent",
+        "action": "odoo_generic_read",
+        "target_system": "odoo",
+        "risk_level": "low",
+        "risk": "low",
+        "requires_approval": False,
+        "approval_required": False,
+        "clarification_needed": False,
+        "missing_parameters": [],
+        "confidence": "high",
+        "reason": "Resolved short follow-up against the previous successful Odoo read context.",
+        "classifier_source": "conversation_memory",
+        "semantic_source": "conversation_memory",
+        "parameters": {
+            "operation": "list",
+            "business_object": business_object,
+            "model": model,
+            "model_hint": model,
+            "requested_fields": context.get("safe_fields") or [],
+            "limit": limit,
+            "memory_followup": True,
+        },
+        "entities": {
+            "business_object": business_object,
+            "model": model,
+            "limit": limit,
+        },
+    }
+
+
+def resolve_odoo_result_memory_context(
+    session_id: str,
+    message: str,
+    current_user: dict,
+):
+    response_classification = classify_message(
+        message,
+        context_memory={},
+        user_permissions=user_permission_context(current_user),
+    )
+
+    if _classification_is_security_sensitive(response_classification):
+        return {
+            "memory_context_used": False,
+            "memory_sensitive_bypass_blocked": True,
+        }
+
+    context = conversation_memory.resolve_odoo_result_reference(message, session_id)
+
+    if not context:
+        return {
+            "memory_context_used": False,
+        }
+
+    limit = context.get("limit") or 3
+    business_object = context.get("business_object") or context.get("model")
+    merged_request = f"Liste {limit} {business_object} dans Odoo"
+
+    return {
+        "memory_context_used": True,
+        "resolved_from_previous_model": context.get("model"),
+        "resolved_business_object": business_object,
+        "follow_up_limit": limit,
+        "original_request": context.get("original_request"),
+        "merged_request": merged_request,
+        "classification": build_odoo_memory_followup_classification(context),
+    }
+
+
+def attach_context_metadata(
+    result: dict,
+    pending_context: dict | None,
+    memory_followup_context: dict | None = None,
+):
+    if not isinstance(result, dict):
+        return result
+
+    pending_context = pending_context or {}
+    memory_followup_context = memory_followup_context or {}
+
+    result["pending_context_used"] = pending_context.get("pending_context_used") is True
+    result["cleared_pending_context"] = pending_context.get("cleared_pending_context") is True
+    result["pending_context_cleared"] = (
+        pending_context.get("pending_context_cleared") is True
+        or pending_context.get("cleared_pending_context") is True
+    )
+    result["memory_context_used"] = memory_followup_context.get("memory_context_used") is True
+
+    for key in (
+        "pending_context_type",
+        "original_request",
+        "merged_request",
+        "merged_parameters",
+    ):
+        value = pending_context.get(key)
+
+        if value not in (None, "", [], {}):
+            result[key] = value
+
+    for key in (
+        "resolved_from_previous_model",
+        "resolved_business_object",
+        "follow_up_limit",
+    ):
+        value = memory_followup_context.get(key)
+
+        if value not in (None, "", [], {}):
+            result[key] = value
+
+    return result
 
 
 def attach_auth_metadata(result: dict, current_user: dict, permission_decision: str):
@@ -651,6 +1350,9 @@ def normalize_safe_odoo_read_fallback(classification: dict | None):
     if not isinstance(classification, dict):
         return classification
 
+    if classification.get("action_type") == "unsupported":
+        return classification
+
     if not _is_explicit_odoo_route(classification):
         return classification
 
@@ -676,6 +1378,10 @@ def normalize_safe_odoo_read_fallback(classification: dict | None):
         "odoo.generic_read",
         "odoo.partner_search",
         "odoo.document_search",
+        "odoo.accounting_bank_read",
+        "odoo.connection_status",
+        "odoo.purchase_supplier_ranking",
+        "odoo.sale_customer_ranking",
         "odoo.product_search",
         "odoo.product_stock",
         "odoo.inventory_summary",
@@ -822,6 +1528,28 @@ def _build_public_technical(result: dict):
         elif agent == "odoo_agent":
             capability = result.get("tool_used") or action
 
+    fields_used = (
+        result.get("fields_used")
+        if "fields_used" in result
+        else agent_result.get("fields_used")
+        if "fields_used" in agent_result
+        else nested_result.get("fields_used")
+    )
+    domain_used = (
+        result.get("domain_used")
+        if "domain_used" in result
+        else agent_result.get("domain_used")
+        if "domain_used" in agent_result
+        else nested_result.get("domain_used")
+    )
+    count_returned = (
+        result.get("count_returned")
+        if "count_returned" in result
+        else agent_result.get("count_returned")
+        if "count_returned" in agent_result
+        else nested_result.get("count_returned")
+    )
+
     technical = {
         "intent": result.get("intent"),
         "request_type": result.get("request_type"),
@@ -848,6 +1576,14 @@ def _build_public_technical(result: dict):
         "target_system": result.get("target_system"),
         "odoo_model": final_odoo_model,
         "record_count": final_record_count,
+        "selected_model": result.get("selected_model_name") or agent_result.get("selected_model_name") or result.get("selected_odoo_model") or final_odoo_model,
+        "candidate_models": result.get("candidate_models") or agent_result.get("candidate_models") or nested_result.get("candidate_models"),
+        "fields_used": fields_used,
+        "domain_used": domain_used,
+        "count_returned": count_returned,
+        "failure_reason": result.get("failure_reason") or agent_result.get("failure_reason") or nested_result.get("failure_reason"),
+        "aggregation_field": result.get("aggregation_field") or agent_result.get("aggregation_field") or nested_result.get("aggregation_field"),
+        "odoo_method": result.get("odoo_method") or agent_result.get("odoo_method") or nested_result.get("odoo_method"),
         "odoo_tool_steps": odoo_tool_steps,
         "final_odoo_model": final_odoo_model,
         "final_record_count": final_record_count,
@@ -858,12 +1594,23 @@ def _build_public_technical(result: dict):
         "approval_action": approval_summary.get("action"),
         "approval_entity": approval_summary.get("entity_name"),
         "approval_requested_change": approval_summary.get("requested_change"),
+        "memory_context_used": result.get("memory_context_used"),
+        "resolved_from_previous_model": result.get("resolved_from_previous_model"),
+        "resolved_business_object": result.get("resolved_business_object"),
+        "follow_up_limit": result.get("follow_up_limit"),
+        "pending_context_used": result.get("pending_context_used"),
+        "pending_context_type": result.get("pending_context_type"),
+        "original_request": result.get("original_request"),
+        "merged_request": result.get("merged_request"),
+        "merged_parameters": result.get("merged_parameters"),
+        "cleared_pending_context": result.get("cleared_pending_context"),
+        "pending_context_cleared": result.get("pending_context_cleared"),
     }
 
     return {
         key: value
         for key, value in technical.items()
-        if value not in (None, "", [], {})
+        if value not in (None, "", [], {}) or key == "domain_used" and value == []
     }
 
 
@@ -1010,6 +1757,7 @@ def build_odoo_approval_tool_call(approval: dict):
         requested_value = metadata.get("new_value")
         tool_kwargs = {
             "record_query": record_query,
+            "record_id": metadata.get("record_id"),
             "field_name": field_name,
             "new_value": requested_value,
         }
@@ -1735,8 +2483,81 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
         )
 
     memory_context = conversation_memory.get_safe_context(session_id)
+    permissions_context = user_permission_context(current_user)
+    memory_followup_context = resolve_odoo_result_memory_context(
+        session_id,
+        message,
+        current_user,
+    )
+    pending_context = {
+        "pending_context_used": False,
+        "cleared_pending_context": False,
+        "pending_context_cleared": False,
+    }
+
+    if not memory_followup_context.get("memory_context_used"):
+        pending_context = resolve_pending_context(
+            session_id,
+            message,
+            memory_context,
+            current_user,
+        )
+
+    if pending_context.get("pending_context_used"):
+        message = pending_context.get("merged_request") or message
+    elif memory_followup_context.get("memory_context_used"):
+        message = memory_followup_context.get("merged_request") or message
+
     contextual_resolution = resolve_contextual_message(message, memory_context)
     enriched_message = contextual_resolution.get("resolved_message") or message
+
+    def finish_chat_result(
+        result: dict,
+        classification: dict | None = None,
+        permission_decision: str | None = None,
+    ):
+        if isinstance(result, dict):
+            attach_context_metadata(result, pending_context, memory_followup_context)
+
+        if pending_context.get("pending_context_used") and isinstance(result, dict):
+            if result_needs_clarification(result):
+                store_pending_clarification(
+                    session_id,
+                    original_message,
+                    enriched_message,
+                    classification,
+                    result,
+                )
+            else:
+                conversation_memory.clear_pending_clarification(session_id)
+                conversation_memory.clear_pending_task(session_id)
+                result["cleared_pending_context"] = True
+                result["pending_context_cleared"] = True
+        elif pending_context.get("cleared_pending_context") and isinstance(result, dict):
+            result["cleared_pending_context"] = True
+            result["pending_context_cleared"] = True
+        elif isinstance(result, dict) and result_needs_clarification(result):
+            store_pending_clarification(
+                session_id,
+                original_message,
+                enriched_message,
+                classification,
+                result,
+            )
+        elif isinstance(result, dict) and result_suggests_pending_task(result):
+            store_pending_task(
+                session_id,
+                original_message,
+                enriched_message,
+                classification,
+                result,
+            )
+
+        if permission_decision:
+            result = attach_auth_metadata(result, current_user, permission_decision)
+
+        remember_chat_result(session_id, result)
+        return result
 
     if (
         contextual_resolution.get("confidence") == "low"
@@ -1806,18 +2627,14 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
                 },
             )
 
-    primary_classification = classify_message(
-        enriched_message,
-        context_memory=memory_context,
-        user_permissions={
-            "email": current_user.get("email"),
-            "role": current_user.get("role"),
-            "department": current_user.get("department"),
-            "permissions": current_user.get("permissions", []),
-            "department_profile": get_department_profile(
-                current_user.get("department"),
-            ).to_public_dict(),
-        },
+    primary_classification = (
+        memory_followup_context.get("classification")
+        if memory_followup_context.get("memory_context_used")
+        else classify_message(
+            enriched_message,
+            context_memory=memory_context,
+            user_permissions=permissions_context,
+        )
     )
     primary_classification = normalize_safe_odoo_read_fallback(primary_classification)
     primary_agent = primary_classification.get("selected_agent")
@@ -1848,8 +2665,7 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
             "action": primary_classification.get("action"),
             "message": primary_classification.get("capability_validation_error"),
         })
-        remember_chat_result(session_id, unsupported_result)
-        return unsupported_result
+        return finish_chat_result(unsupported_result, primary_classification)
 
     if primary_classification.get("clarification_needed"):
         clarification_result = build_clarification_response(
@@ -1875,17 +2691,14 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
             "missing_parameters": primary_classification.get("missing_parameters"),
             "message": "La capacité est comprise mais des paramètres sont manquants.",
         })
-        remember_chat_result(session_id, clarification_result)
-        return clarification_result
+        return finish_chat_result(clarification_result, primary_classification)
 
     if route_permission.blocked:
         blocked_result = process_request(
             enriched_message,
             classification=primary_classification,
         )
-        blocked_result = attach_auth_metadata(blocked_result, current_user, "denied")
-        remember_chat_result(session_id, blocked_result)
-        return blocked_result
+        return finish_chat_result(blocked_result, primary_classification, "denied")
 
     if route_permission.unsupported:
         unsupported_result = unsupported_action_payload(primary_classification, current_user)
@@ -1907,8 +2720,7 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
             "action": primary_classification.get("action"),
             "message": "Action non prise en charge. Aucun outil n’a été exécuté.",
         })
-        remember_chat_result(session_id, unsupported_result)
-        return unsupported_result
+        return finish_chat_result(unsupported_result, primary_classification)
 
     department_allowed, capability = is_route_allowed_for_department(
         current_user.get("department"),
@@ -1942,8 +2754,7 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
             "department": current_user.get("department"),
             "message": DEPARTMENT_ACCESS_DENIED_MESSAGE,
         })
-        remember_chat_result(session_id, denied_result)
-        return denied_result
+        return finish_chat_result(denied_result, primary_classification)
 
     if not check_chat_permission(current_user, enriched_message, primary_classification):
         denied_result = access_denied_payload(primary_classification, current_user)
@@ -1965,23 +2776,18 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
             "action": primary_classification.get("action"),
             "message": ACCESS_DENIED_MESSAGE,
         })
-        remember_chat_result(session_id, denied_result)
-        return denied_result
+        return finish_chat_result(denied_result, primary_classification)
 
     if primary_agent == "support_agent":
         result = build_direct_support_response(
             enriched_message,
             classification=primary_classification,
         )
-        result = attach_auth_metadata(result, current_user, "allowed")
-        remember_chat_result(session_id, result)
-        return result
+        return finish_chat_result(result, primary_classification, "allowed")
 
     if primary_agent == "server_agent":
         result = build_direct_server_response(enriched_message)
-        result = attach_auth_metadata(result, current_user, "allowed")
-        remember_chat_result(session_id, result)
-        return result
+        return finish_chat_result(result, primary_classification, "allowed")
 
     if primary_agent == "knowledge_agent":
         entities = primary_classification.get("entities")
@@ -2000,9 +2806,7 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
             knowledge_query=knowledge_query,
             classification=primary_classification,
         )
-        result = attach_auth_metadata(result, current_user, "allowed")
-        remember_chat_result(session_id, result)
-        return result
+        return finish_chat_result(result, primary_classification, "allowed")
 
     if primary_agent == "odoo_agent":
         try:
@@ -2032,26 +2836,22 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
             odoo_result.setdefault("execution_mode", primary_classification.get("execution_mode"))
             odoo_result.setdefault("target_system", primary_classification.get("target_system"))
 
-        odoo_result = attach_auth_metadata(
+        return finish_chat_result(
             odoo_result,
-            current_user,
+            primary_classification,
             "requires_approval"
             if isinstance(odoo_result, dict) and odoo_result.get("approval_required")
             else "allowed",
         )
-        remember_chat_result(session_id, odoo_result)
-        return odoo_result
 
     result = process_request(enriched_message, classification=primary_classification)
-    result = attach_auth_metadata(
+    return finish_chat_result(
         result,
-        current_user,
+        primary_classification,
         "requires_approval"
         if isinstance(result, dict) and result.get("approval_required")
         else "allowed",
     )
-    remember_chat_result(session_id, result)
-    return result
 
 
 @app.get("/debug/conversation/{session_id}")
