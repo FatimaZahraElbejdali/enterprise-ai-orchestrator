@@ -46,7 +46,10 @@ def test_business_capability_registry_exposes_required_contract_fields():
         "odoo.sale_order_read",
         "odoo.purchase_supplier_ranking",
         "odoo.purchase_document_search",
-        "odoo.analytic_account_read",
+        "odoo.customer_invoice_list",
+        "odoo.catalog_read",
+        "odoo.analytic_account_search",
+        "odoo.analytic_account_details",
         "odoo.analytic_pointage_update",
         "server.ram_usage",
         "server.local_health",
@@ -193,17 +196,84 @@ def test_purchase_order_document_search_by_reference_capability_pattern():
     assert route["action"] == "search_document"
 
 
-def test_analytic_account_read_by_reference_capability_pattern():
+def test_customer_invoice_listing_by_period_capability_pattern():
     route = assert_route(
-        "Donne les détails du compte analytique 11SOCM0001 sur Odoo",
+        "donne moi les factures clients validées de mois 5 2026",
+        domain="odoo",
+        capability="odoo.customer_invoice_list",
+        business_object="customer_invoice",
+        action_type="read",
+        approval_required=False,
+    )
+
+    assert route["action"] == "list_customer_invoices"
+    assert route["parameters"]["model"] == "account.move"
+    assert {"field": "move_type", "operator": "=", "value": "out_invoice"} in route["parameters"]["filters"]
+    assert {"field": "state", "operator": "=", "value": "posted"} in route["parameters"]["filters"]
+    assert {"field": "invoice_date", "operator": ">=", "value": "2026-05-01"} in route["parameters"]["filters"]
+    assert {"field": "invoice_date", "operator": "<=", "value": "2026-05-31"} in route["parameters"]["filters"]
+
+
+def test_customer_invoice_listing_equivalent_french_phrasings():
+    prompts = [
+        "factures clients validées de mai 2026",
+        "factures client validées du mois 5 2026",
+        "factures clients postées en mai 2026",
+        "liste les factures de vente validées en mai 2026",
+        "donne moi les factures clients du mois de mai 2026",
+    ]
+
+    for prompt in prompts:
+        route = assert_route(
+            prompt,
+            domain="odoo",
+            capability="odoo.customer_invoice_list",
+            business_object="customer_invoice",
+            action_type="read",
+            approval_required=False,
+        )
+        assert route["parameters"]["model"] == "account.move"
+
+
+def test_employee_count_routes_to_odoo_catalog_read():
+    route = assert_route(
+        "Combien d’employés actifs dans Odoo ?",
         domain="odoo",
         capability="odoo.generic_read",
+        business_object="catalog_record",
+        action_type="read",
+        approval_required=False,
+    )
+
+    assert route["selected_agent"] == "odoo_agent"
+    assert route["action"] == "odoo_count_records"
+    assert route["parameters"]["business_object"] == "employees"
+    assert route["parameters"]["model"] == "hr.employee"
+    assert {"field": "active", "operator": "=", "value": True} in route["parameters"]["filters"]
+
+
+def test_analytic_account_read_by_reference_capability_pattern():
+    search_route = assert_route(
+        "Cherche le compte analytique 11SOCM0001",
+        domain="odoo",
+        capability="odoo.analytic_account_search",
+        business_object="analytic_account",
+        action_type="read",
+        approval_required=False,
+    )
+    details_route = assert_route(
+        "Donne les détails du compte analytique 11SOCM0001 sur Odoo",
+        domain="odoo",
+        capability="odoo.analytic_account_details",
         business_object="analytic_account",
         action_type="read",
         approval_required=False,
     )
 
-    assert route["parameters"]["model"] == "account.analytic.account"
+    assert search_route["parameters"]["model"] == "account.analytic.account"
+    assert search_route["action"] == "odoo_search_analytic_account"
+    assert details_route["parameters"]["model"] == "account.analytic.account"
+    assert details_route["action"] == "odoo_get_analytic_account_details"
 
 
 def test_analytic_account_pointage_write_by_reference_requires_approval():

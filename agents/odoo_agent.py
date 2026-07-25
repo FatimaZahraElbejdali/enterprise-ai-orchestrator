@@ -41,6 +41,9 @@ SUPPORTED_ODOO_ACTIONS = {
     "supplier_ranking",
     "customer_ranking",
     "odoo_status",
+    "list_customer_invoices",
+    "odoo_search_analytic_account",
+    "odoo_get_analytic_account_details",
     "odoo_search_records",
     "odoo_generic_read",
     "odoo_get_record_details",
@@ -69,6 +72,9 @@ BUSINESS_TO_INTERNAL_ACTION = {
     "supplier_ranking": "supplier_ranking",
     "customer_ranking": "customer_ranking",
     "odoo_status": "odoo_status",
+    "list_customer_invoices": "list_customer_invoices",
+    "odoo_search_analytic_account": "odoo_search_analytic_account",
+    "odoo_get_analytic_account_details": "odoo_get_analytic_account_details",
     "odoo_search_records": "odoo_search_records",
     "odoo_generic_read": "odoo_generic_read",
     "odoo_get_record_details": "odoo_get_record_details",
@@ -103,6 +109,9 @@ INTERNAL_TO_BUSINESS_ACTION = {
     "supplier_ranking": "supplier_ranking",
     "customer_ranking": "customer_ranking",
     "odoo_status": "odoo_status",
+    "list_customer_invoices": "list_customer_invoices",
+    "odoo_search_analytic_account": "odoo_search_analytic_account",
+    "odoo_get_analytic_account_details": "odoo_get_analytic_account_details",
     "odoo_search_records": "odoo_search_records",
     "odoo_generic_read": "odoo_generic_read",
     "odoo_get_record_details": "odoo_get_record_details",
@@ -602,9 +611,11 @@ def is_vague_product_keyword(value: str) -> bool:
 
 
 ALLOWED_GENERIC_READ_MODELS = {
+    "account.analytic.account",
     "account.bank.statement",
     "account.bank.statement.line",
     "account.journal",
+    "hr.employee",
     "product.product",
     "product.template",
     "res.partner",
@@ -3286,6 +3297,7 @@ def build_odoo_read_plan(message: str, classification: dict | None = None):
         "operation": str(operation or "list").lower(),
         "business_object": str(business_object or "").strip(),
         "model_hint": semantic_model_hint,
+        "model_candidates": values.get("model_candidates") or [],
         "filters": values.get("filters") or [],
         "requested_fields": values.get("requested_fields") or [],
         "sort": values.get("sort") or [],
@@ -3294,6 +3306,12 @@ def build_odoo_read_plan(message: str, classification: dict | None = None):
         "record_id": values.get("record_id"),
         "query": query,
         "memory_followup": values.get("memory_followup") is True,
+        "catalog_read": values.get("catalog_read") is True,
+        "catalog_entry": values.get("catalog_entry"),
+        "period": values.get("period") if isinstance(values.get("period"), dict) else None,
+        "date_field_candidates": values.get("date_field_candidates") or [],
+        "needs_clarification": values.get("needs_clarification") is True,
+        "clarification_reason": values.get("clarification_reason"),
     }
 
 
@@ -3513,6 +3531,78 @@ def _synthesize_read_message(
 
 def build_dynamic_read_response(message: str, parsed_action: dict, raw_result: dict):
     status = raw_result.get("status")
+    read_plan = raw_result.get("read_plan") if isinstance(raw_result.get("read_plan"), dict) else {}
+    business_object = (
+        parsed_action.get("business_object")
+        or (parsed_action.get("entities") or {}).get("business_object")
+        or read_plan.get("business_object")
+    )
+
+    if business_object == "employees":
+        operation = read_plan.get("operation") or parsed_action.get("operation")
+        count = raw_result.get("record_count") or 0
+        model_name = raw_result.get("model")
+
+        if operation == "count" and raw_result.get("success") and model_name == "hr.employee":
+            return with_parser_debug({
+                "intent": "odoo",
+                "agent": "odoo_agent",
+                "risk": "low",
+                "risk_level": "low",
+                "requires_approval": False,
+                "approval_required": False,
+                "status": "completed",
+                "message": f"Il y a {count} employés actifs enregistrés dans Odoo.",
+                "tool_used": "odoo_generic_read",
+                "target_system": "odoo",
+                "odoo_model": "hr.employee",
+                "record_count": count,
+                "data": raw_result,
+                "result": raw_result,
+            }, parsed_action, "odoo_count_records")
+
+        if operation == "count" and raw_result.get("success") and model_name == "res.partner":
+            return with_parser_debug({
+                "intent": "odoo",
+                "agent": "odoo_agent",
+                "risk": "low",
+                "risk_level": "low",
+                "requires_approval": False,
+                "approval_required": False,
+                "status": "completed",
+                "message": (
+                    "Je n’ai pas accès au module Employés dans Odoo. "
+                    f"Le comptage disponible porte sur les contacts Odoo: {count} contacts. "
+                    "Ce n’est pas forcément l’effectif réel."
+                ),
+                "tool_used": "odoo_generic_read",
+                "target_system": "odoo",
+                "odoo_model": "res.partner",
+                "record_count": count,
+                "data": raw_result,
+                "result": raw_result,
+            }, parsed_action, "odoo_count_records")
+
+        if status in {"not_found", "rejected", "failed"} and not raw_result.get("model"):
+            return with_parser_debug({
+                "intent": "odoo",
+                "agent": "odoo_agent",
+                "risk": "low",
+                "risk_level": "low",
+                "requires_approval": False,
+                "approval_required": False,
+                "status": "needs_clarification",
+                "message": (
+                    "Je n’ai pas accès au module Employés dans Odoo. "
+                    "Je peux vérifier les utilisateurs ou les contacts, mais ce ne sera pas forcément l’effectif réel."
+                ),
+                "tool_used": "odoo_generic_read",
+                "target_system": "odoo",
+                "odoo_model": None,
+                "record_count": 0,
+                "data": raw_result,
+                "result": raw_result,
+            }, parsed_action, "odoo_count_records")
 
     if status == "ambiguous":
         return build_ambiguous_response(
@@ -3568,6 +3658,205 @@ def build_dynamic_read_response(message: str, parsed_action: dict, raw_result: d
         "data": raw_result,
         "result": raw_result,
     }, parsed_action, "odoo_generic_read")
+
+
+def execute_analytic_account_read(message: str, parsed_action: dict):
+    action = parsed_action.get("action")
+    record_query = (
+        parsed_action.get("record_query")
+        or parsed_action.get("query")
+        or extract_generic_keyword(message, parsed_action)
+    )
+
+    if not record_query:
+        return build_needs_clarification_response(
+            message,
+            parsed_action,
+            ["référence ou nom du compte analytique"],
+        )
+
+    tool_name = (
+        "odoo_get_analytic_account_details"
+        if action == "odoo_get_analytic_account_details"
+        else "odoo_search_analytic_account"
+    )
+    operation = "read" if tool_name == "odoo_get_analytic_account_details" else "search"
+    raw_result = unwrap_tool_response(
+        execute_tool(
+            tool_name,
+            record_query=record_query,
+            record_id=parsed_action.get("record_id"),
+            limit=6,
+        )
+    )
+    found = bool(isinstance(raw_result, dict) and raw_result.get("found"))
+    ambiguous = bool(isinstance(raw_result, dict) and raw_result.get("ambiguous"))
+    message_text, normalized_read, synthesis = _synthesize_read_message(
+        message,
+        parsed_action,
+        raw_result if isinstance(raw_result, dict) else {},
+        operation=operation,
+        query_context={
+            "operation": operation,
+            "model": "account.analytic.account",
+            "query": record_query,
+            "business_object": "compte analytique",
+        },
+    )
+
+    log_request({
+        "event_type": "odoo_read",
+        "title": "Lecture compte analytique Odoo",
+        "system": "odoo",
+        "agent": "odoo_agent",
+        "status": "completed" if found and not ambiguous else "not_found",
+        "risk": "low",
+        "approval_status": "not_required",
+        "user_message": message,
+        "action": action,
+        "target_model": "account.analytic.account",
+        "message": "Compte analytique consulté sans modification.",
+        "data": raw_result,
+    })
+
+    return with_parser_debug({
+        "intent": parsed_action.get("intent") or "odoo_analytic_account_search",
+        "agent": "odoo_agent",
+        "risk": "low",
+        "risk_level": "low",
+        "requires_approval": False,
+        "approval_required": False,
+        "status": "needs_clarification" if ambiguous else ("completed" if found else "not_found"),
+        "message": (
+            "Plusieurs comptes analytiques correspondent à votre demande. Veuillez préciser lequel choisir."
+            if ambiguous
+            else message_text
+        ),
+        "tool_used": tool_name,
+        "capability": (
+            "odoo.analytic_account_details"
+            if tool_name == "odoo_get_analytic_account_details"
+            else "odoo.analytic_account_search"
+        ),
+        "target_system": "odoo",
+        "odoo_model": "account.analytic.account",
+        "record_query": record_query,
+        "normalized_read_result": normalized_read,
+        "response_synthesis": synthesis,
+        "data": raw_result,
+        "result": raw_result,
+        "candidates": raw_result.get("candidates", []) if isinstance(raw_result, dict) else [],
+    }, parsed_action, action)
+
+
+def _customer_invoice_period_text(filters: list) -> str:
+    start_date = None
+    end_date = None
+
+    for item in filters or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("field") != "invoice_date":
+            continue
+        if item.get("operator") == ">=":
+            start_date = item.get("value")
+        if item.get("operator") == "<=":
+            end_date = item.get("value")
+
+    if start_date and end_date:
+        return f"du {start_date} au {end_date}"
+
+    return "sur la période demandée"
+
+
+def _format_customer_invoice_summary(raw_result: dict, filters: list) -> str:
+    records = raw_result.get("records") if isinstance(raw_result.get("records"), list) else []
+    posted_requested = any(
+        isinstance(item, dict)
+        and item.get("field") == "state"
+        and item.get("value") == "posted"
+        for item in filters or []
+    )
+    status_text = " validée" if posted_requested else ""
+    period_text = _customer_invoice_period_text(filters)
+
+    if not records:
+        return f"Aucune facture client{status_text} correspondant à {period_text} n’a été trouvée."
+
+    title = "Factures clients validées" if posted_requested else "Factures clients"
+    lines = [f"{title} trouvées {period_text}:"]
+
+    for record in records[:10]:
+        reference = record.get("reference") or record.get("document") or record.get("name") or f"ID {record.get('id')}"
+        partner = record.get("partner") or "client non renseigné"
+        date = record.get("date") or "date non renseignée"
+        amount = record.get("amount_total")
+        currency = record.get("currency") or ""
+        status = record.get("status") or "statut non renseigné"
+        payment_state = record.get("payment_state") or ""
+        amount_text = (
+            f"{amount} {currency}".strip()
+            if amount not in (None, "")
+            else "montant non renseigné"
+        )
+        payment_text = f", paiement: {payment_state}" if payment_state else ""
+        lines.append(f"- {reference} — {partner} — {date} — {amount_text} — statut: {status}{payment_text}")
+
+    return "\n".join(lines)
+
+
+def execute_customer_invoice_list(message: str, parsed_action: dict):
+    filters = parsed_action.get("filters") if isinstance(parsed_action.get("filters"), list) else []
+    raw_result = unwrap_tool_response(
+        execute_tool(
+            "odoo_list_customer_invoices",
+            filters=filters,
+            limit=parsed_action.get("limit") or 10,
+        )
+    )
+    found = bool(isinstance(raw_result, dict) and raw_result.get("found"))
+    message_text = _format_customer_invoice_summary(
+        raw_result if isinstance(raw_result, dict) else {},
+        filters,
+    )
+
+    log_request({
+        "event_type": "odoo_read",
+        "title": "Lecture factures clients Odoo",
+        "system": "odoo",
+        "agent": "odoo_agent",
+        "status": "completed" if found else "not_found",
+        "risk": "low",
+        "approval_status": "not_required",
+        "user_message": message,
+        "action": "list_customer_invoices",
+        "target_model": "account.move",
+        "message": "Factures clients consultées sans modification.",
+        "data": raw_result,
+    })
+
+    return with_parser_debug({
+        "intent": "odoo_customer_invoice_list",
+        "agent": "odoo_agent",
+        "risk": "low",
+        "risk_level": "low",
+        "requires_approval": False,
+        "approval_required": False,
+        "status": "completed" if found else "not_found",
+        "message": message_text,
+        "tool_used": "odoo_list_customer_invoices",
+        "capability": "odoo.customer_invoice_list",
+        "target_system": "odoo",
+        "odoo_model": "account.move",
+        "selected_model": "account.move",
+        "filters": filters,
+        "domain_used": raw_result.get("domain_used") if isinstance(raw_result, dict) else [],
+        "fields_used": raw_result.get("fields_used") if isinstance(raw_result, dict) else [],
+        "count_returned": raw_result.get("record_count") if isinstance(raw_result, dict) else 0,
+        "failure_reason": raw_result.get("failure_reason") if isinstance(raw_result, dict) else "invalid_result",
+        "data": raw_result,
+        "result": raw_result,
+    }, parsed_action, "list_customer_invoices")
 
 
 def format_bank_accounting_summary(raw_result: dict, keyword: str) -> str:
@@ -4079,13 +4368,108 @@ def run(message: str, classification: dict | None = None):
 
     if (
         isinstance(classification, dict)
+        and classification.get("capability") == "odoo.customer_invoice_list"
+    ):
+        values = _semantic_read_values(classification)
+        parsed_action = {
+            "intent": "odoo_customer_invoice_list",
+            "action": "list_customer_invoices",
+            "business_action": "list_customer_invoices",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "account.move",
+            "model": "account.move",
+            "filters": values.get("filters") if isinstance(values.get("filters"), list) else [],
+            "requested_fields": values.get("requested_fields") if isinstance(values.get("requested_fields"), list) else [],
+            "limit": values.get("limit") or 10,
+            "confidence": 0.9,
+            "parser_source": classification.get("semantic_source") or classification.get("classifier_source") or "semantic_route",
+            "parser_error": classification.get("classifier_error"),
+            "entities": values,
+        }
+        return execute_customer_invoice_list(message, parsed_action)
+
+    if (
+        isinstance(classification, dict)
+        and classification.get("capability") in {
+            "odoo.analytic_account_search",
+            "odoo.analytic_account_details",
+        }
+    ):
+        values = _semantic_read_values(classification)
+        is_details = classification.get("capability") == "odoo.analytic_account_details"
+        parsed_action = {
+            "intent": (
+                "odoo_analytic_account_details"
+                if is_details
+                else "odoo_analytic_account_search"
+            ),
+            "action": (
+                "odoo_get_analytic_account_details"
+                if is_details
+                else "odoo_search_analytic_account"
+            ),
+            "business_action": (
+                "odoo_get_analytic_account_details"
+                if is_details
+                else "odoo_search_analytic_account"
+            ),
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "account.analytic.account",
+            "model": "account.analytic.account",
+            "record_query": (
+                values.get("record_query")
+                or values.get("query")
+                or extract_generic_keyword(message)
+            ),
+            "confidence": 0.9,
+            "parser_source": classification.get("semantic_source") or classification.get("classifier_source") or "semantic_route",
+            "parser_error": classification.get("classifier_error"),
+            "entities": values,
+        }
+        return execute_analytic_account_read(message, parsed_action)
+
+    if (
+        isinstance(classification, dict)
+        and classification.get("capability") == "odoo.analytic_boolean_update"
+    ):
+        values = _semantic_read_values(classification)
+        parsed_action = {
+            "intent": "odoo_write_request",
+            "action": "toggle_boolean_field",
+            "business_action": "toggle_boolean_field",
+            "risk": "medium",
+            "requires_approval": True,
+            "target_model": "account.analytic.account",
+            "model": "account.analytic.account",
+            "record_query": (
+                values.get("record_query")
+                or values.get("query")
+                or extract_generic_keyword(message)
+            ),
+            "field_label": values.get("field_label") or "Pointage",
+            "field_name": values.get("field_name"),
+            "new_value": values.get("new_value") if "new_value" in values else True,
+            "confidence": 0.9,
+            "parser_source": classification.get("semantic_source") or classification.get("classifier_source") or "semantic_route",
+            "parser_error": classification.get("classifier_error"),
+            "entities": values,
+        }
+        return build_sensitive_approval_response(message, "toggle_boolean_field", parsed_action)
+
+    if (
+        isinstance(classification, dict)
         and classification.get("capability") == "odoo.generic_read"
     ):
+        values = _semantic_read_values(classification)
         read_plan = build_odoo_read_plan(message, classification)
         parsed_action = {
             "intent": "odoo",
-            "action": "odoo_generic_read",
-            "business_action": "odoo_generic_read",
+            "action": values.get("action") or classification.get("action") or "odoo_generic_read",
+            "business_action": values.get("action") or classification.get("action") or "odoo_generic_read",
+            "operation": read_plan.get("operation"),
+            "business_object": read_plan.get("business_object"),
             "risk": "low",
             "requires_approval": False,
             "target_model": read_plan.get("model_hint"),
@@ -4096,12 +4480,31 @@ def run(message: str, classification: dict | None = None):
             "entities": _semantic_read_values(classification),
         }
 
-        if read_plan.get("memory_followup"):
+        if read_plan.get("needs_clarification") and read_plan.get("clarification_reason") == "official_or_odoo_headcount":
+            return with_parser_debug({
+                "intent": "odoo",
+                "agent": "odoo_agent",
+                "risk": "low",
+                "risk_level": "low",
+                "requires_approval": False,
+                "approval_required": False,
+                "status": "needs_clarification",
+                "message": "Voulez-vous l’effectif officiel de l’entreprise ou le nombre d’employés enregistrés dans Odoo ?",
+                "tool_used": None,
+                "target_system": "odoo",
+                "odoo_model": read_plan.get("model_hint"),
+                "record_count": 0,
+                "data": {"executed": False, "read_plan": read_plan},
+                "result": {"executed": False, "read_plan": read_plan},
+            }, parsed_action, "odoo_count_records")
+
+        if read_plan.get("memory_followup") or read_plan.get("catalog_read"):
             raw_result = unwrap_tool_response(
                 execute_tool("odoo_generic_read", read_plan=read_plan)
             )
             result = build_dynamic_read_response(message, parsed_action, raw_result)
-            result["memory_context_used"] = True
+            result["memory_context_used"] = bool(read_plan.get("memory_followup"))
+            result["catalog_read_used"] = bool(read_plan.get("catalog_read"))
             result["resolved_from_previous_model"] = read_plan.get("model_hint")
             result["resolved_business_object"] = read_plan.get("business_object")
             result["follow_up_limit"] = read_plan.get("limit")

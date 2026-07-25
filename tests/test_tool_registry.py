@@ -107,6 +107,16 @@ def test_tool_metadata_includes_structured_capability_fields():
     assert tool["executor"] == "odoo_search_records"
     assert tool["allowed_models"] == sorted(SAFE_ODOO_READ_MODELS)
 
+    count_tool = get_tool_metadata("odoo_count_records")
+    group_tool = get_tool_metadata("odoo_group_by")
+
+    assert count_tool["capability"] == "odoo.generic_read_count"
+    assert count_tool["permission_category"] == "odoo_read"
+    assert count_tool["io_mode"] == "read"
+    assert group_tool["capability"] == "odoo.generic_read_group_by"
+    assert group_tool["permission_category"] == "odoo_read"
+    assert group_tool["io_mode"] == "read"
+
 
 def test_agent_capabilities_are_registered_without_fake_tools():
     capabilities = {item["capability"]: item for item in list_capabilities()}

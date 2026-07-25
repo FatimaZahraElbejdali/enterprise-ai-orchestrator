@@ -312,13 +312,13 @@ export default function ChatPage() {
           <div className="brand">
             <div className="brandMark">
               <Image
-                className="brandLogo"
-                src="/jamain-baco-logo.png"
-                alt="Jamain Baco"
-                width={50}
-                height={50}
-                priority
-              />
+	                className="brandLogo"
+	                src="/jamain-baco-logo.png"
+	                alt="Jamain Baco"
+	                width={56}
+	                height={40}
+	                priority
+	              />
             </div>
             <div>
               <p>Jamain Baco</p>
@@ -516,21 +516,23 @@ export default function ChatPage() {
           margin-bottom: 34px;
         }
 
-        .brandMark {
-          width: 56px;
-          height: 56px;
-          background: #ffffff;
-          display: grid;
-          place-items: center;
-          flex: 0 0 56px;
-        }
+	        .brandMark {
+	          width: 56px;
+	          height: 40px;
+	          background: #ffffff;
+	          display: grid;
+	          place-items: center;
+	          border-radius: 10px;
+	          overflow: hidden;
+	          flex: 0 0 56px;
+	        }
 
-        .brandLogo {
-          width: 48px;
-          height: 48px;
-          object-fit: contain;
-          display: block;
-        }
+	        .brandLogo {
+	          width: 56px;
+	          height: 40px;
+	          object-fit: contain;
+	          display: block;
+	        }
 
         .brand p {
           margin: 0 0 4px;

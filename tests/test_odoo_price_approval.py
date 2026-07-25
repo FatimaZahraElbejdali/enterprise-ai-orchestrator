@@ -1381,6 +1381,241 @@ def test_generic_partner_search_uses_safe_record_search(monkeypatch):
     assert result["result"]["records"][0]["phone"] == "0612345678"
 
 
+def test_analytic_account_search_uses_registered_read_capability(monkeypatch):
+    captured = {}
+
+    def fake_execute_tool(tool_name, **kwargs):
+        captured["tool_name"] = tool_name
+        captured["kwargs"] = kwargs
+        return {
+            "success": True,
+            "result": {
+                "success": True,
+                "source": "real_odoo",
+                "model": "account.analytic.account",
+                "record_query": kwargs["record_query"],
+                "found": True,
+                "records": [
+                    {
+                        "id": 5935,
+                        "model": "account.analytic.account",
+                        "name": "11SOCM0001 Services",
+                        "reference": "11SOCM0001",
+                        "client": "Client Atlas",
+                        "company": "Jamain Baco",
+                        "amount": 1250.0,
+                        "currency": "MAD",
+                        "pointage": True,
+                    }
+                ],
+                "record_count": 1,
+            },
+        }
+
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+    monkeypatch.setattr(
+        "agents.odoo_response_synthesizer.generate_response",
+        lambda *args, **kwargs: {"response": ""},
+    )
+
+    result = run_odoo_agent(
+        "Cherche le compte analytique 11SOCM0001",
+        classification={
+            "domain": "odoo",
+            "target_system": "odoo",
+            "selected_agent": "odoo_agent",
+            "capability": "odoo.analytic_account_search",
+            "parameters": {"record_query": "11SOCM0001"},
+            "risk_level": "low",
+            "requires_approval": False,
+        },
+    )
+
+    assert captured["tool_name"] == "odoo_search_analytic_account"
+    assert captured["kwargs"]["record_query"] == "11SOCM0001"
+    assert result["status"] == "completed"
+    assert result["tool_used"] == "odoo_search_analytic_account"
+    assert result["capability"] == "odoo.analytic_account_search"
+    assert "11SOCM0001" in result["message"]
+    assert "Client Atlas" in result["message"]
+    assert result["approval_required"] is False
+
+
+def test_customer_invoice_listing_uses_safe_read_tool(monkeypatch):
+    captured = {}
+    filters = [
+        {"field": "move_type", "operator": "=", "value": "out_invoice"},
+        {"field": "state", "operator": "=", "value": "posted"},
+        {"field": "invoice_date", "operator": ">=", "value": "2026-05-01"},
+        {"field": "invoice_date", "operator": "<=", "value": "2026-05-31"},
+    ]
+
+    def fake_execute_tool(tool_name, **kwargs):
+        captured["tool_name"] = tool_name
+        captured["kwargs"] = kwargs
+        return {
+            "success": True,
+            "result": {
+                "success": True,
+                "source": "real_odoo",
+                "model": "account.move",
+                "found": True,
+                "status": "completed",
+                "records": [
+                    {
+                        "id": 101,
+                        "reference": "INV/2026/005",
+                        "partner": "Client Atlas",
+                        "date": "2026-05-12",
+                        "amount_total": 2500.0,
+                        "currency": "MAD",
+                        "status": "posted",
+                        "payment_state": "paid",
+                    }
+                ],
+                "record_count": 1,
+                "domain_used": filters,
+                "fields_used": ["name", "partner_id", "invoice_date", "amount_total", "state", "payment_state"],
+            },
+        }
+
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent(
+        "donne moi les factures clients validées de mois 5 2026",
+        classification={
+            "domain": "odoo",
+            "target_system": "odoo",
+            "selected_agent": "odoo_agent",
+            "capability": "odoo.customer_invoice_list",
+            "parameters": {
+                "filters": filters,
+                "limit": 10,
+            },
+            "risk_level": "low",
+            "requires_approval": False,
+        },
+    )
+
+    assert captured["tool_name"] == "odoo_list_customer_invoices"
+    assert captured["kwargs"]["filters"] == filters
+    assert result["status"] == "completed"
+    assert result["tool_used"] == "odoo_list_customer_invoices"
+    assert result["capability"] == "odoo.customer_invoice_list"
+    assert "INV/2026/005" in result["message"]
+    assert "Client Atlas" in result["message"]
+    assert "2026-05-12" in result["message"]
+    assert "2500.0 MAD" in result["message"]
+    assert result["approval_required"] is False
+
+
+def test_customer_invoice_listing_no_records_message_is_specific(monkeypatch):
+    filters = [
+        {"field": "move_type", "operator": "=", "value": "out_invoice"},
+        {"field": "state", "operator": "=", "value": "posted"},
+        {"field": "invoice_date", "operator": ">=", "value": "2026-05-01"},
+        {"field": "invoice_date", "operator": "<=", "value": "2026-05-31"},
+    ]
+
+    monkeypatch.setattr(
+        "agents.odoo_agent.execute_tool",
+        lambda *args, **kwargs: {
+            "success": True,
+            "result": {
+                "success": True,
+                "source": "real_odoo",
+                "model": "account.move",
+                "found": False,
+                "status": "not_found",
+                "records": [],
+                "record_count": 0,
+                "failure_reason": "no_records",
+            },
+        },
+    )
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+
+    result = run_odoo_agent(
+        "liste les factures de vente validées en mai 2026",
+        classification={
+            "domain": "odoo",
+            "target_system": "odoo",
+            "selected_agent": "odoo_agent",
+            "capability": "odoo.customer_invoice_list",
+            "parameters": {"filters": filters},
+            "risk_level": "low",
+            "requires_approval": False,
+        },
+    )
+
+    assert result["status"] == "not_found"
+    assert "Aucune facture client validée" in result["message"]
+    assert "2026-05-01" in result["message"]
+    assert "2026-05-31" in result["message"]
+
+
+def test_analytic_account_details_returns_safe_business_fields(monkeypatch):
+    captured = {}
+
+    def fake_execute_tool(tool_name, **kwargs):
+        captured["tool_name"] = tool_name
+        captured["kwargs"] = kwargs
+        return {
+            "success": True,
+            "result": {
+                "success": True,
+                "source": "real_odoo",
+                "model": "account.analytic.account",
+                "record_query": kwargs["record_query"],
+                "found": True,
+                "record": {
+                    "id": 5935,
+                    "model": "account.analytic.account",
+                    "name": "11SOCM0001 Services",
+                    "reference": "11SOCM0001",
+                    "client": "Client Atlas",
+                    "company": "Jamain Baco",
+                    "amount": 1250.0,
+                    "currency": "MAD",
+                    "pointage": False,
+                },
+                "record_count": 1,
+            },
+        }
+
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+    monkeypatch.setattr(
+        "agents.odoo_response_synthesizer.generate_response",
+        lambda *args, **kwargs: {"response": ""},
+    )
+
+    result = run_odoo_agent(
+        "Donne-moi les détails du compte analytique 11SOCM0001",
+        classification={
+            "domain": "odoo",
+            "target_system": "odoo",
+            "selected_agent": "odoo_agent",
+            "capability": "odoo.analytic_account_details",
+            "parameters": {"record_query": "11SOCM0001"},
+            "risk_level": "low",
+            "requires_approval": False,
+        },
+    )
+
+    assert captured["tool_name"] == "odoo_get_analytic_account_details"
+    assert captured["kwargs"]["record_query"] == "11SOCM0001"
+    assert result["status"] == "completed"
+    assert result["tool_used"] == "odoo_get_analytic_account_details"
+    assert result["capability"] == "odoo.analytic_account_details"
+    assert "11SOCM0001" in result["message"]
+    assert "Client Atlas" in result["message"]
+    assert "Jamain Baco" in result["message"]
+    assert "MAD" in result["message"]
+
+
 def test_generic_record_search_ambiguous_asks_clarification(monkeypatch):
     monkeypatch.setattr(
         "agents.odoo_agent.parse_odoo_action_with_openai",

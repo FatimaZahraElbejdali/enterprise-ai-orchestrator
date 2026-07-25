@@ -14,9 +14,11 @@ load_dotenv()
 PRODUCT_SEARCH_MODELS = {"product.product", "product.template"}
 
 ALLOWED_GENERIC_READ_MODELS = {
+    "account.analytic.account",
     "account.bank.statement",
     "account.bank.statement.line",
     "account.journal",
+    "hr.employee",
     "product.product",
     "product.template",
     "res.partner",
@@ -71,6 +73,8 @@ SAFE_ACCOUNTING_BANK_FIELDS = {
         "partner_id",
         "amount_total",
         "state",
+        "payment_state",
+        "currency_id",
         "move_type",
         "ref",
         "payment_ref",
@@ -219,6 +223,7 @@ class OdooReadPlan:
     operation: str
     business_object: str
     model_hint: str | None = None
+    model_candidates: list[str] = field(default_factory=list)
     filters: list = field(default_factory=list)
     requested_fields: list[str] = field(default_factory=list)
     sort: list = field(default_factory=list)
@@ -263,6 +268,7 @@ class OdooReadPlan:
             operation=operation,
             business_object=str(values.get("business_object") or "").strip(),
             model_hint=str(values.get("model_hint") or values.get("model") or "").strip() or None,
+            model_candidates=list_value("model_candidates"),
             filters=list_value("filters"),
             requested_fields=list_value("requested_fields"),
             sort=list_value("sort"),
@@ -277,6 +283,7 @@ class OdooReadPlan:
             "operation": self.operation,
             "business_object": self.business_object,
             "model_hint": self.model_hint,
+            "model_candidates": self.model_candidates,
             "filters": self.filters,
             "requested_fields": self.requested_fields,
             "sort": self.sort,
@@ -3046,6 +3053,23 @@ class OdooConnector:
             model_hint=plan.model_hint,
         )
 
+        if discovery.get("status") != "found" and plan.model_candidates:
+            tried_models = {plan.model_hint} if plan.model_hint else set()
+
+            for candidate_model in plan.model_candidates:
+                if not candidate_model or candidate_model in tried_models:
+                    continue
+
+                tried_models.add(candidate_model)
+                candidate_discovery = self.discover_dynamic_read_model(
+                    business_object=plan.business_object,
+                    model_hint=candidate_model,
+                )
+
+                if candidate_discovery.get("status") == "found":
+                    discovery = candidate_discovery
+                    break
+
         if (
             discovery.get("status") == "rejected"
             and plan.model_hint
@@ -3202,18 +3226,24 @@ class OdooConnector:
 
     def _generic_search_fields(self, model_name: str):
         self._validate_generic_read_model(model_name)
-        fields = self._existing_fields(
-            model_name,
-            ["name", "display_name", "default_code", "ref", "barcode", "partner_id"],
-        )
+        candidate_fields = ["name", "display_name", "default_code", "ref", "barcode", "partner_id"]
+        if model_name == "account.analytic.account":
+            candidate_fields = ["name", "display_name", "code", "partner_id", "company_id"]
+
+        fields = self._existing_fields(model_name, candidate_fields)
         conditions = [
             [field, "ilike", "{keyword}"]
-            for field in ["name", "display_name", "default_code", "ref", "barcode"]
+            for field in ["name", "display_name", "default_code", "ref", "barcode", "code"]
             if field in fields
         ]
 
         if model_name in DOCUMENT_MODELS and "partner_id" in fields:
             conditions.append(["partner_id.name", "ilike", "{keyword}"])
+
+        if model_name == "account.analytic.account":
+            for relation_field in ["partner_id", "company_id"]:
+                if relation_field in fields:
+                    conditions.append([f"{relation_field}.name", "ilike", "{keyword}"])
 
         return conditions
 
@@ -3259,7 +3289,18 @@ class OdooConnector:
             "account.move": SAFE_ACCOUNTING_BANK_FIELDS["account.move"],
             "account.move.line": SAFE_ACCOUNTING_BANK_FIELDS["account.move.line"],
             "stock.picking": ["id", "name", "display_name", "partner_id", "state", "scheduled_date", "origin"],
-            "account.analytic.account": ["id", "name", "display_name", "x_studio_pointage"],
+            "account.analytic.account": [
+                "id",
+                "name",
+                "display_name",
+                "code",
+                "partner_id",
+                "company_id",
+                "amount",
+                "balance",
+                "currency_id",
+                "x_studio_pointage",
+            ],
         }
 
         return self._existing_fields(model_name, base_fields.get(model_name, ["id", "name"]))
@@ -3307,7 +3348,7 @@ class OdooConnector:
                 or record.get("invoice_date")
                 or record.get("scheduled_date")
             )
-            return {
+            formatted = {
                 "id": record_id,
                 "model": model_name,
                 "document": record.get("display_name") or record.get("name") or "",
@@ -3316,6 +3357,16 @@ class OdooConnector:
                 "status": record.get("state") or "",
                 "date": date_value or "",
             }
+
+            if model_name == "account.move":
+                formatted.update({
+                    "amount_total": record.get("amount_total"),
+                    "payment_state": record.get("payment_state") or "",
+                    "currency": self._m2o_name(record.get("currency_id")),
+                    "move_type": record.get("move_type") or "",
+                })
+
+            return formatted
 
         if model_name in ACCOUNTING_BANK_READ_MODELS:
             amount = (
@@ -3353,6 +3404,14 @@ class OdooConnector:
                 "id": record_id,
                 "model": model_name,
                 "name": record.get("display_name") or record.get("name") or "",
+                "reference": record.get("code") or "",
+                "code": record.get("code") or "",
+                "client": self._m2o_name(record.get("partner_id")),
+                "partner": self._m2o_name(record.get("partner_id")),
+                "company": self._m2o_name(record.get("company_id")),
+                "amount": record.get("amount"),
+                "balance": record.get("balance"),
+                "currency": self._m2o_name(record.get("currency_id")),
                 "pointage": record.get("x_studio_pointage"),
             }
 
@@ -3630,6 +3689,123 @@ class OdooConnector:
             "failure_reason": failure_reason,
             "message": message_text,
         }
+
+    def list_customer_invoices(self, filters: list | None = None, limit: int = 10):
+        model_name = "account.move"
+
+        if self.mock_mode:
+            return {
+                "success": False,
+                "source": "mock_odoo",
+                "model": model_name,
+                "found": False,
+                "records": [],
+                "record_count": 0,
+                "message": "Odoo credentials are missing.",
+            }
+
+        try:
+            self._validate_generic_read_model(model_name)
+            safe_fields = self.safe_dynamic_fields(model_name)
+            required_fields = ["move_type", "invoice_date"]
+            missing_fields = [field for field in required_fields if field not in safe_fields]
+
+            if missing_fields:
+                return {
+                    "success": False,
+                    "source": "real_odoo",
+                    "model": model_name,
+                    "found": False,
+                    "status": "failed",
+                    "records": [],
+                    "record_count": 0,
+                    "fields_used": [],
+                    "domain_used": [],
+                    "failure_reason": "missing_field",
+                    "missing_fields": missing_fields,
+                    "message": "Les champs nécessaires pour filtrer les factures clients ne sont pas disponibles.",
+                }
+
+            requested_fields = [
+                "id",
+                "name",
+                "display_name",
+                "partner_id",
+                "invoice_date",
+                "amount_total",
+                "state",
+                "payment_state",
+                "currency_id",
+                "move_type",
+            ]
+            fields = self._existing_fields(model_name, requested_fields)
+            base_filters = [
+                {"field": "move_type", "operator": "=", "value": "out_invoice"},
+            ]
+            user_filters = [
+                item
+                for item in (filters or [])
+                if not (
+                    isinstance(item, dict)
+                    and item.get("field") == "move_type"
+                )
+            ]
+            domain, validated_filters = self._validated_dynamic_filter_domain(
+                model_name,
+                base_filters + user_filters,
+            )
+            bounded_limit = max(1, min(int(limit or 10), 20))
+            raw_records = self._models().execute_kw(
+                self.database,
+                self.uid,
+                self.auth_secret,
+                model_name,
+                "search_read",
+                [domain],
+                {
+                    "fields": fields,
+                    "limit": bounded_limit,
+                    "context": {"active_test": False},
+                },
+            )
+            records = [
+                self._format_generic_record(model_name, record)
+                for record in raw_records
+            ]
+
+            return {
+                "success": True,
+                "source": "real_odoo",
+                "model": model_name,
+                "found": bool(records),
+                "status": "completed" if records else "not_found",
+                "records": records,
+                "record_count": len(records),
+                "fields_used": fields,
+                "domain_used": domain,
+                "search_domain": domain,
+                "validated_filters": validated_filters,
+                "failure_reason": None if records else "no_records",
+                "message": (
+                    "Factures clients trouvées dans Odoo."
+                    if records
+                    else "Aucune facture client ne correspond aux critères demandés."
+                ),
+            }
+        except Exception as error:
+            return {
+                "success": False,
+                "source": "real_odoo_error",
+                "model": model_name,
+                "found": False,
+                "status": "failed",
+                "records": [],
+                "record_count": 0,
+                "fields_used": [],
+                "domain_used": [],
+                "failure_reason": "odoo_error",
+                "message": str(error),
+            }
 
     def generic_search_records(self, model_name: str, keyword: str, limit: int = 6):
         if self.mock_mode:
@@ -5512,6 +5688,20 @@ class OdooConnector:
                 "candidates": [],
                 "message": str(error),
             }
+
+    def search_analytic_accounts(self, record_query: str, limit: int = 6):
+        return self.generic_search_records(
+            model_name="account.analytic.account",
+            keyword=record_query,
+            limit=limit,
+        )
+
+    def get_analytic_account_details(self, record_query: str = "", record_id=None):
+        return self.generic_get_record_details(
+            model_name="account.analytic.account",
+            record_id=record_id,
+            keyword=record_query,
+        )
 
     def _search_analytic_account(self, record_query: str):
         models = self._models()

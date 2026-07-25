@@ -104,6 +104,103 @@ def test_execute_odoo_resolve_analytic_account(monkeypatch):
     assert result["result"]["record_id"] == 5935
 
 
+def test_execute_odoo_list_customer_invoices(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.tool_executor.odoo.list_customer_invoices",
+        lambda filters=None, limit=10: {
+            "success": True,
+            "model": "account.move",
+            "found": True,
+            "records": [{"reference": "INV/2026/005"}],
+            "domain_used": filters or [],
+        },
+    )
+
+    result = execute_tool(
+        "odoo_list_customer_invoices",
+        filters=[{"field": "move_type", "operator": "=", "value": "out_invoice"}],
+    )
+
+    assert result["success"] is True
+    assert result["tool_name"] == "odoo_list_customer_invoices"
+    assert result["metadata"]["capability"] == "odoo.customer_invoice_list"
+    assert result["metadata"]["requires_approval"] is False
+    assert result["result"]["records"][0]["reference"] == "INV/2026/005"
+
+
+def test_execute_odoo_count_records_uses_dynamic_read(monkeypatch):
+    captured = {}
+
+    def fake_dynamic_read(read_plan):
+        captured["read_plan"] = read_plan
+        return {"success": True, "model": "account.move", "record_count": 4}
+
+    monkeypatch.setattr("orchestrator.tool_executor.odoo.dynamic_read", fake_dynamic_read)
+
+    result = execute_tool(
+        "odoo_count_records",
+        read_plan={
+            "operation": "list",
+            "business_object": "customer_invoices",
+            "model_hint": "account.move",
+        },
+    )
+
+    assert result["success"] is True
+    assert result["tool_name"] == "odoo_count_records"
+    assert result["metadata"]["capability"] == "odoo.generic_read_count"
+    assert captured["read_plan"]["operation"] == "count"
+    assert captured["read_plan"]["model_hint"] == "account.move"
+
+
+def test_execute_odoo_search_analytic_account(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.tool_executor.odoo.search_analytic_accounts",
+        lambda record_query, limit=6: {
+            "success": True,
+            "model": "account.analytic.account",
+            "record_query": record_query,
+            "found": True,
+            "records": [{"id": 5935, "reference": "11SOCM0001"}],
+        },
+    )
+
+    result = execute_tool(
+        "odoo_search_analytic_account",
+        record_query="11SOCM0001",
+    )
+
+    assert result["success"] is True
+    assert result["tool_name"] == "odoo_search_analytic_account"
+    assert result["metadata"]["capability"] == "odoo.analytic_account_search"
+    assert result["metadata"]["requires_approval"] is False
+    assert result["result"]["records"][0]["reference"] == "11SOCM0001"
+
+
+def test_execute_odoo_get_analytic_account_details(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.tool_executor.odoo.get_analytic_account_details",
+        lambda record_query="", record_id=None: {
+            "success": True,
+            "model": "account.analytic.account",
+            "record_query": record_query,
+            "found": True,
+            "record": {"id": record_id or 5935, "reference": "11SOCM0001"},
+        },
+    )
+
+    result = execute_tool(
+        "odoo_get_analytic_account_details",
+        record_query="11SOCM0001",
+    )
+
+    assert result["success"] is True
+    assert result["tool_name"] == "odoo_get_analytic_account_details"
+    assert result["metadata"]["capability"] == "odoo.analytic_account_details"
+    assert result["metadata"]["requires_approval"] is False
+    assert result["result"]["record"]["reference"] == "11SOCM0001"
+
+
 def test_execute_odoo_update_analytic_boolean_field(monkeypatch):
     def fake_update(record_query, field_name, new_value, record_id=None):
         return {

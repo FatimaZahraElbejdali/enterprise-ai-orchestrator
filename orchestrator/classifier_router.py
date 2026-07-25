@@ -960,12 +960,22 @@ def _odoo_read_route(message: str, error=None):
     action = "read_product_stock"
     capability = "odoo.product_stock"
     parameters = {}
+    capability_route = (
+        None
+        if _is_odoo_connection_status_message(message)
+        else route_from_business_capability(
+            message,
+            {"classifier_error": error} if error else {},
+        )
+    )
 
     if _is_odoo_connection_status_message(message):
         intent = "odoo_connection_status"
         action = "odoo_status"
         capability = "odoo.connection_status"
         parameters = {}
+    elif capability_route:
+        return capability_route
     elif _is_purchase_supplier_ranking_message(message):
         intent = "odoo_purchase_supplier_ranking"
         action = "supplier_ranking"
@@ -1758,6 +1768,14 @@ def _deterministic_fallback(message: str, error=None):
             reason="Odoo access/login wording is an IT support issue.",
             error=error,
         )
+
+    capability_route = route_from_business_capability(
+        message,
+        {"classifier_error": error} if error else {},
+    )
+
+    if capability_route:
+        return capability_route
 
     if _is_odoo_write_request(message):
         return _route(

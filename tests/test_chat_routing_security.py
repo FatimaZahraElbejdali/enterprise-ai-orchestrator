@@ -556,6 +556,81 @@ def test_invoice_details_request_still_routes_to_odoo_agent(monkeypatch):
     assert data["technical"]["action"] == "document_details"
 
 
+def test_customer_invoice_listing_chat_uses_odoo_read_capability(monkeypatch):
+    captured = {}
+    filters = [
+        {"field": "move_type", "operator": "=", "value": "out_invoice"},
+        {"field": "state", "operator": "=", "value": "posted"},
+        {"field": "invoice_date", "operator": ">=", "value": "2026-05-01"},
+        {"field": "invoice_date", "operator": "<=", "value": "2026-05-31"},
+    ]
+
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda *args, **kwargs: {
+            "intent": "odoo_customer_invoice_list",
+            "request_type": "enterprise_action",
+            "domain": "odoo",
+            "target_system": "odoo",
+            "selected_agent": "odoo_agent",
+            "agent": "odoo_agent",
+            "capability": "odoo.customer_invoice_list",
+            "execution_mode": "tool",
+            "action": "list_customer_invoices",
+            "risk_level": "low",
+            "risk": "low",
+            "requires_approval": False,
+            "approval_required": False,
+            "parameters": {
+                "operation": "list",
+                "business_object": "factures clients",
+                "model": "account.move",
+                "model_hint": "account.move",
+                "filters": filters,
+                "limit": 10,
+            },
+        },
+    )
+
+    def fake_run_odoo_agent(message, classification=None):
+        captured["message"] = message
+        captured["classification"] = classification
+        return {
+            "intent": "odoo_customer_invoice_list",
+            "agent": "odoo_agent",
+            "status": "completed",
+            "message": "Factures clients validées trouvées.",
+            "tool_used": "odoo_list_customer_invoices",
+            "capability": "odoo.customer_invoice_list",
+            "target_system": "odoo",
+            "requires_approval": False,
+            "approval_required": False,
+            "domain_used": filters,
+            "fields_used": ["name", "partner_id", "invoice_date", "amount_total", "state", "payment_state"],
+            "count_returned": 1,
+        }
+
+    monkeypatch.setattr(app_module, "run_odoo_agent", fake_run_odoo_agent)
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+
+    response = client.post(
+        "/chat",
+        json={"message": "donne moi les factures clients validées de mois 5 2026"},
+        headers=auth_headers("odoo.manager@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["response"] == "Factures clients validées trouvées."
+    assert captured["classification"]["capability"] == "odoo.customer_invoice_list"
+    assert captured["classification"]["action"] == "list_customer_invoices"
+    assert data["technical"]["tool_used"] == "odoo_list_customer_invoices"
+    assert data["technical"]["capability"] == "odoo.customer_invoice_list"
+    assert data["requires_approval"] is False
+
+
 def test_wifi_problem_routes_to_support_agent(monkeypatch):
     monkeypatch.setattr(app_module, "run_support_agent", fake_support_agent)
     monkeypatch.setattr(app_module, "log_request", lambda data: None)

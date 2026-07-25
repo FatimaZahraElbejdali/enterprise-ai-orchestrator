@@ -190,14 +190,14 @@ def _summarize_record(record: dict):
     parts = [_record_label(record)]
 
     for key, value in record.items():
-        if key in {"display_name", "name", "id"}:
+        if key in {"display_name", "name", "id", "model"}:
             continue
         if value in (None, "", [], {}):
             continue
 
         parts.append(f"{key}: {_display_value(value)}")
 
-        if len(parts) >= 4:
+        if len(parts) >= 8:
             break
 
     return " - ".join(str(part) for part in parts if part not in (None, ""))

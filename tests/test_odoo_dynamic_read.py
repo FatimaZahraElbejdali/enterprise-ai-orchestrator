@@ -89,6 +89,23 @@ def subscription_records():
     }
 
 
+def employee_fields():
+    return {
+        "hr.employee": {
+            "name": {"string": "Name", "type": "char"},
+            "work_email": {"string": "Work Email", "type": "char"},
+            "department_id": {"string": "Department", "type": "many2one"},
+            "job_title": {"string": "Job Title", "type": "char"},
+            "active": {"string": "Active", "type": "boolean"},
+        },
+        "res.partner": {
+            "name": {"string": "Name", "type": "char"},
+            "email": {"string": "Email", "type": "char"},
+            "active": {"string": "Active", "type": "boolean"},
+        },
+    }
+
+
 def test_model_discovery_chooses_semantic_subscription_candidate():
     connector = dynamic_connector(
         FakeDynamicModels(
@@ -102,6 +119,94 @@ def test_model_discovery_chooses_semantic_subscription_candidate():
 
     assert result["status"] == "found"
     assert result["model"] == "sale.subscription"
+
+
+def test_dynamic_read_employee_count_uses_hr_employee_with_active_domain():
+    fake_models = FakeDynamicModels(
+        catalog=[{"model": "hr.employee", "name": "Employee"}],
+        fields=employee_fields(),
+        records={
+            "hr.employee": [
+                {"id": 1, "name": "Employee A", "active": True},
+                {"id": 2, "name": "Employee B", "active": True},
+            ]
+        },
+    )
+    connector = dynamic_connector(fake_models)
+
+    result = connector.dynamic_read({
+        "operation": "count",
+        "business_object": "employees",
+        "model_hint": "hr.employee",
+        "model_candidates": ["hr.employee", "res.users", "res.partner"],
+        "filters": [{"field": "active", "operator": "=", "value": True}],
+        "requested_fields": ["name", "work_email", "department_id", "job_title", "active"],
+    })
+
+    count_call = next(call for call in fake_models.calls if call[1] == "search_count")
+
+    assert result["success"] is True
+    assert result["model"] == "hr.employee"
+    assert result["record_count"] == 2
+    assert ["active", "=", True] in count_call[2][0]
+
+
+def test_dynamic_read_employee_count_falls_back_to_contacts_with_clear_label():
+    fake_models = FakeDynamicModels(
+        catalog=[{"model": "res.partner", "name": "Contact"}],
+        fields=employee_fields(),
+        records={
+            "res.partner": [
+                {"id": 1, "name": "Contact A", "active": True},
+                {"id": 2, "name": "Contact B", "active": True},
+                {"id": 3, "name": "Contact C", "active": True},
+            ]
+        },
+    )
+    connector = dynamic_connector(fake_models)
+
+    raw_result = connector.dynamic_read({
+        "operation": "count",
+        "business_object": "employees",
+        "model_hint": "hr.employee",
+        "model_candidates": ["hr.employee", "res.users", "res.partner"],
+        "filters": [{"field": "active", "operator": "=", "value": True}],
+        "requested_fields": ["name", "work_email", "department_id", "job_title", "active"],
+    })
+    response = odoo_agent_module.build_dynamic_read_response(
+        "combien d’employés dans Odoo ?",
+        {"business_object": "employees", "operation": "count"},
+        raw_result,
+    )
+
+    assert raw_result["model"] == "res.partner"
+    assert raw_result["record_count"] == 3
+    assert "contacts Odoo" in response["message"]
+    assert "effectif réel" in response["message"]
+    assert "3 contacts" in response["message"]
+
+
+def test_dynamic_read_employee_count_missing_hr_employee_is_clear_limitation():
+    fake_models = FakeDynamicModels(catalog=[], fields={}, records={})
+    connector = dynamic_connector(fake_models)
+
+    raw_result = connector.dynamic_read({
+        "operation": "count",
+        "business_object": "employees",
+        "model_hint": "hr.employee",
+        "model_candidates": ["hr.employee", "res.users", "res.partner"],
+        "filters": [{"field": "active", "operator": "=", "value": True}],
+    })
+    response = odoo_agent_module.build_dynamic_read_response(
+        "combien d’employés dans Odoo ?",
+        {"business_object": "employees", "operation": "count"},
+        raw_result,
+    )
+
+    assert raw_result.get("model") is None
+    assert response["status"] == "needs_clarification"
+    assert "Je n’ai pas accès au module Employés dans Odoo" in response["message"]
+    assert "Action non disponible" not in response["message"]
 
 
 def test_model_discovery_uses_safe_business_fields_to_resolve_model():

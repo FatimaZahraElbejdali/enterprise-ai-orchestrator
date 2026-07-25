@@ -1,15 +1,18 @@
+import calendar
 import re
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable
 
+from orchestrator.odoo_business_catalog import build_odoo_catalog_read_plan
 from orchestrator.tool_registry import get_capability_metadata
 
 
 def normalize_text(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value or "")
+    prepared = (value or "").replace("’", " ").replace("'", " ")
+    normalized = unicodedata.normalize("NFKD", prepared)
     ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
-    return " ".join(ascii_value.lower().replace("’", "'").split())
+    return " ".join(ascii_value.lower().split())
 
 
 def contains_any(text: str, terms: set[str]) -> bool:
@@ -123,6 +126,34 @@ PURCHASE_ORDER_TERMS = {
     "purchase orders",
 }
 SUPPLIER_TERMS = {"fournisseur", "fournisseurs", "supplier", "suppliers", "vendor", "vendors"}
+CUSTOMER_TERMS = {"client", "clients", "customer", "customers"}
+INVOICE_TERMS = {"facture", "factures", "invoice", "invoices"}
+SALES_INVOICE_TERMS = {
+    "facture client",
+    "factures client",
+    "factures clients",
+    "facture de vente",
+    "factures de vente",
+    "customer invoice",
+    "customer invoices",
+    "sales invoice",
+    "sales invoices",
+}
+POSTED_STATUS_TERMS = {
+    "confirmee",
+    "confirmees",
+    "confirme",
+    "confirmes",
+    "posted",
+    "postee",
+    "postees",
+    "poste",
+    "postes",
+    "validee",
+    "validees",
+    "valide",
+    "valides",
+}
 RANKING_TERMS = {
     "apparait",
     "apparaissent",
@@ -208,11 +239,14 @@ class BusinessCapability:
             else None
         )
 
+        route_action_name = str(parameters.get("action") or self.action).strip() or self.action
+        route_intent_name = str(parameters.get("intent") or self.intent).strip() or self.intent
+
         resolved_route = {
-            "intent": self.intent,
+            "intent": route_intent_name,
             "agent": f"{self.domain}_agent" if self.domain != "odoo" else "odoo_agent",
             "selected_agent": f"{self.domain}_agent" if self.domain != "odoo" else "odoo_agent",
-            "action": self.action,
+            "action": route_action_name,
             "target_system": self.domain,
             "domain": self.domain,
             "risk_level": risk_level,
@@ -325,6 +359,32 @@ def _purchase_document_search(text: str, route: dict | None) -> bool:
     )
 
 
+def _customer_invoice_list(text: str, route: dict | None) -> bool:
+    plan = build_odoo_catalog_read_plan(text)
+    return bool(plan and plan.get("business_object") == "customer_invoices")
+
+
+def _catalog_odoo_read(text: str, route: dict | None) -> bool:
+    if not (_odoo_context(text, route) or build_odoo_catalog_read_plan(text)):
+        return False
+
+    plan = build_odoo_catalog_read_plan(text)
+    if not plan:
+        return False
+
+    if plan.get("business_object") == "products":
+        return False
+
+    if plan.get("business_object") == "contacts" and contains_any(text, RANKING_TERMS):
+        return False
+
+    status_as_read_terms = {"valide", "valides"}
+    if contains_any(text, WRITE_TERMS - status_as_read_terms):
+        return False
+
+    return True
+
+
 def message_upper(text: str) -> str:
     return (text or "").upper()
 
@@ -333,6 +393,17 @@ def _analytic_account_read(text: str, route: dict | None) -> bool:
     return contains_any(text, ANALYTIC_TERMS) and contains_any(text, READ_TERMS) and not (
         contains_any(text, WRITE_TERMS) or contains_any(text, POINTAGE_TERMS)
     )
+
+
+def _analytic_account_details(text: str, route: dict | None) -> bool:
+    return _analytic_account_read(text, route) and contains_any(
+        text,
+        {"detail", "details", "information", "informations", "fiche"},
+    )
+
+
+def _analytic_account_search(text: str, route: dict | None) -> bool:
+    return _analytic_account_read(text, route) and not _analytic_account_details(text, route)
 
 
 def _analytic_pointage_write(text: str, route: dict | None) -> bool:
@@ -405,13 +476,123 @@ def _supplier_ranking_parameters(message: str, route: dict | None) -> dict:
     }
 
 
+def _month_year_range(message: str) -> tuple[str, str] | None:
+    text = normalize_text(message)
+    year_match = re.search(r"\b(19\d{2}|20\d{2})\b", text)
+
+    if not year_match:
+        return None
+
+    month_names = {
+        "janvier": 1,
+        "january": 1,
+        "fevrier": 2,
+        "february": 2,
+        "mars": 3,
+        "march": 3,
+        "avril": 4,
+        "april": 4,
+        "mai": 5,
+        "may": 5,
+        "juin": 6,
+        "june": 6,
+        "juillet": 7,
+        "july": 7,
+        "aout": 8,
+        "august": 8,
+        "septembre": 9,
+        "september": 9,
+        "octobre": 10,
+        "october": 10,
+        "novembre": 11,
+        "november": 11,
+        "decembre": 12,
+        "december": 12,
+    }
+    year = int(year_match.group(1))
+    month = None
+
+    for label, number in month_names.items():
+        if re.search(rf"\b{label}\b", text):
+            month = number
+            break
+
+    if month is None:
+        month_match = re.search(r"\b(?:mois|month)\s+(\d{1,2})\b", text)
+        if month_match:
+            month = int(month_match.group(1))
+
+    if not month or month < 1 or month > 12:
+        return None
+
+    last_day = calendar.monthrange(year, month)[1]
+    return f"{year:04d}-{month:02d}-01", f"{year:04d}-{month:02d}-{last_day:02d}"
+
+
+def _customer_invoice_parameters(message: str, route: dict | None) -> dict:
+    plan = build_odoo_catalog_read_plan(message) or {}
+    plan.pop("action", None)
+    period = plan.get("period") if isinstance(plan.get("period"), dict) else {}
+    filters = plan.get("filters") if isinstance(plan.get("filters"), list) else []
+    return {
+        **plan,
+        "operation": "list",
+        "business_object": "customer_invoices",
+        "start_date": period.get("start"),
+        "end_date": period.get("end"),
+        "posted_only": any(
+            isinstance(item, dict)
+            and item.get("field") == "state"
+            and item.get("value") == "posted"
+            for item in filters
+        ),
+    }
+
+
+def _catalog_read_parameters(message: str, route: dict | None) -> dict:
+    return build_odoo_catalog_read_plan(message) or {}
+
+
+def _analytic_record_query(message: str) -> str:
+    query = re.sub(r"\bsur\s+odoo\b|\bin\s+odoo\b", " ", message or "", flags=re.IGNORECASE)
+    query = re.sub(
+        r"\b(?:cherche|recherche|trouve|affiche|montre|donne(?:-moi)?|details?|détails?|informations?)\b",
+        " ",
+        query,
+        flags=re.IGNORECASE,
+    )
+    query = re.sub(
+        r"\b(?:compte\s+analytique|analytic\s+account|account\.analytic\.account|account\s+analytic\s+account)\b",
+        " ",
+        query,
+        flags=re.IGNORECASE,
+    )
+    query = re.sub(r"\b(?:le|la|les|du|de|des|d['’]|un|une)\b", " ", query, flags=re.IGNORECASE)
+    query = re.sub(r"\s+", " ", query).strip(" .,:;!?\"'’")
+    return query
+
+
 def _analytic_read_parameters(message: str, route: dict | None) -> dict:
     return {
-        "operation": "details" if contains_any(normalize_text(message), {"detail", "details"}) else "search",
         "business_object": "compte analytique",
         "model": "account.analytic.account",
         "model_hint": "account.analytic.account",
+        "record_query": _analytic_record_query(message),
         "limit": 10,
+    }
+
+
+def _analytic_pointage_parameters(message: str, route: dict | None) -> dict:
+    query = _analytic_record_query(
+        re.sub(r"\b(?:coche|cocher|activer|mettre|met|mets|valide|valider|pointage)\b", " ", message or "", flags=re.IGNORECASE)
+    )
+    return {
+        "business_object": "compte analytique",
+        "model": "account.analytic.account",
+        "model_hint": "account.analytic.account",
+        "record_query": query,
+        "field_name": "x_studio_pointage",
+        "new_value": True,
     }
 
 
@@ -532,19 +713,49 @@ ACTION_CAPABILITIES: tuple[BusinessCapability, ...] = (
         matcher=_purchase_document_search,
     ),
     BusinessCapability(
-        name="odoo.analytic_account_read",
-        capability="odoo.generic_read",
+        name="odoo.customer_invoice_list",
+        capability="odoo.customer_invoice_list",
+        domain="odoo",
+        action_type="read",
+        business_object="customer_invoice",
+        required_permissions=("odoo_read",),
+        required_parameters=("model", "filters"),
+        resolver_rules=("account.move safe fields only", "move_type out_invoice", "invoice_date period filters"),
+        execution_handler="odoo_list_customer_invoices",
+        intent="odoo_customer_invoice_list",
+        action="list_customer_invoices",
+        parameters_factory=_customer_invoice_parameters,
+        matcher=_customer_invoice_list,
+    ),
+    BusinessCapability(
+        name="odoo.analytic_account_details",
+        capability="odoo.analytic_account_details",
         domain="odoo",
         action_type="read",
         business_object="analytic_account",
         required_permissions=("odoo_read",),
-        required_parameters=("model",),
-        resolver_rules=("account.analytic.account safe fields only",),
-        execution_handler="odoo_generic_read",
-        intent="odoo_generic_read",
-        action="odoo_generic_read",
+        required_parameters=("record_query",),
+        resolver_rules=("resolve account.analytic.account by safe reference or name",),
+        execution_handler="odoo_get_analytic_account_details",
+        intent="odoo_analytic_account_details",
+        action="odoo_get_analytic_account_details",
         parameters_factory=_analytic_read_parameters,
-        matcher=_analytic_account_read,
+        matcher=_analytic_account_details,
+    ),
+    BusinessCapability(
+        name="odoo.analytic_account_search",
+        capability="odoo.analytic_account_search",
+        domain="odoo",
+        action_type="read",
+        business_object="analytic_account",
+        required_permissions=("odoo_read",),
+        required_parameters=("record_query",),
+        resolver_rules=("search account.analytic.account by safe reference or name",),
+        execution_handler="odoo_search_analytic_account",
+        intent="odoo_analytic_account_search",
+        action="odoo_search_analytic_account",
+        parameters_factory=_analytic_read_parameters,
+        matcher=_analytic_account_search,
     ),
     BusinessCapability(
         name="odoo.analytic_pointage_update",
@@ -558,7 +769,27 @@ ACTION_CAPABILITIES: tuple[BusinessCapability, ...] = (
         execution_handler="odoo_update_analytic_boolean_field",
         intent="odoo_write_request",
         action="toggle_boolean_field",
+        parameters_factory=_analytic_pointage_parameters,
         matcher=_analytic_pointage_write,
+    ),
+    BusinessCapability(
+        name="odoo.catalog_read",
+        capability="odoo.generic_read",
+        domain="odoo",
+        action_type="read",
+        business_object="catalog_record",
+        required_permissions=("odoo_read",),
+        required_parameters=("model",),
+        resolver_rules=(
+            "business model catalog",
+            "safe fields only",
+            "validated filters through fields_get",
+        ),
+        execution_handler="odoo_generic_read",
+        intent="odoo_generic_read",
+        action="odoo_generic_read",
+        parameters_factory=_catalog_read_parameters,
+        matcher=_catalog_odoo_read,
     ),
     BusinessCapability(
         name="server.ram_usage",
@@ -679,17 +910,17 @@ def unsupported_odoo_write_route(message: str, route: dict | None = None) -> dic
 
 
 def route_from_business_capability(message: str, route: dict | None = None) -> dict | None:
+    capability = match_business_capability(message, route)
+
+    if capability:
+        return capability.route(message, route)
+
     unsupported = unsupported_odoo_write_route(message, route)
 
     if unsupported:
         return unsupported
 
-    capability = match_business_capability(message, route)
-
-    if not capability:
-        return None
-
-    return capability.route(message, route)
+    return None
 
 
 def capability_contract_for_route(message: str, route: dict | None) -> BusinessCapability | None:

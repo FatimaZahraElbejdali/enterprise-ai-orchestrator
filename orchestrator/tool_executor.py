@@ -48,11 +48,50 @@ def execute_tool(tool_name: str, **kwargs):
             read_plan=kwargs.get("read_plan") or {},
         )
 
+    elif tool_name == "odoo_count_records":
+        read_plan = dict(kwargs.get("read_plan") or {})
+        if read_plan:
+            read_plan["operation"] = "count"
+            result = odoo.dynamic_read(read_plan=read_plan)
+        else:
+            result = odoo.agent_count_records(
+                model_name=kwargs.get("model_name", ""),
+                domain=kwargs.get("domain") or [],
+            )
+
+    elif tool_name == "odoo_group_by":
+        result = odoo.agent_aggregate_records(
+            model_name=kwargs.get("model_name", ""),
+            domain=kwargs.get("domain") or [],
+            group_by=kwargs.get("group_by") or [],
+            aggregates=kwargs.get("aggregates") or [{"field": "id", "operator": "count", "alias": "record_count"}],
+            order_by=kwargs.get("order_by") or [{"field": "record_count", "direction": "desc"}],
+            limit=kwargs.get("limit", 10),
+        )
+
     elif tool_name == "odoo_get_record_details":
         result = odoo.generic_get_record_details(
             model_name=kwargs.get("model_name", ""),
             record_id=kwargs.get("record_id"),
             keyword=kwargs.get("keyword", ""),
+        )
+
+    elif tool_name == "odoo_list_customer_invoices":
+        result = odoo.list_customer_invoices(
+            filters=kwargs.get("filters") or [],
+            limit=kwargs.get("limit", 10),
+        )
+
+    elif tool_name == "odoo_search_analytic_account":
+        result = odoo.search_analytic_accounts(
+            record_query=kwargs.get("record_query", "") or kwargs.get("keyword", ""),
+            limit=kwargs.get("limit", 6),
+        )
+
+    elif tool_name == "odoo_get_analytic_account_details":
+        result = odoo.get_analytic_account_details(
+            record_query=kwargs.get("record_query", "") or kwargs.get("keyword", ""),
+            record_id=kwargs.get("record_id"),
         )
 
     elif tool_name == "odoo_search_bank_accounting":

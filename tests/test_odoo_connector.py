@@ -1,4 +1,5 @@
 from integrations.odoo_connector import OdooConnector
+from orchestrator.odoo_business_catalog import build_odoo_catalog_read_plan
 
 
 def test_odoo_connector_normalizes_configured_base_url(monkeypatch):
@@ -135,6 +136,10 @@ class AnalyticAccountModels:
                 "name": {"type": "char"},
                 "display_name": {"type": "char"},
                 "code": {"type": "char"},
+                "partner_id": {"type": "many2one"},
+                "company_id": {"type": "many2one"},
+                "amount": {"type": "float"},
+                "currency_id": {"type": "many2one"},
                 "x_studio_pointage": {"type": "boolean"},
             }
 
@@ -162,6 +167,43 @@ class AnalyticAccountModels:
         raise AssertionError(f"Unexpected method: {method}")
 
 
+class AccountMoveModels:
+    def __init__(self, records=None):
+        self.records = records if records is not None else []
+        self.calls = []
+
+    def execute_kw(self, database, uid, auth_secret, model, method, args, kwargs=None):
+        self.calls.append((model, method, args, kwargs or {}))
+
+        if model != "account.move":
+            raise AssertionError(f"Unexpected model: {model}")
+
+        if method == "fields_get":
+            return {
+                "id": {"type": "integer"},
+                "name": {"type": "char"},
+                "display_name": {"type": "char"},
+                "partner_id": {"type": "many2one"},
+                "invoice_date": {"type": "date"},
+                "amount_total": {"type": "monetary"},
+                "state": {
+                    "type": "selection",
+                    "selection": [("draft", "Brouillon"), ("posted", "Comptabilisé")],
+                },
+                "payment_state": {"type": "selection", "selection": [("paid", "Payé")]},
+                "currency_id": {"type": "many2one"},
+                "move_type": {
+                    "type": "selection",
+                    "selection": [("out_invoice", "Facture client"), ("in_invoice", "Facture fournisseur")],
+                },
+            }
+
+        if method == "search_read":
+            return list(self.records)
+
+        raise AssertionError(f"Unexpected method: {method}")
+
+
 def test_resolve_analytic_account_by_business_reference():
     fake_models = AnalyticAccountModels(
         search_results=[
@@ -184,6 +226,183 @@ def test_resolve_analytic_account_by_business_reference():
     assert result["record_code"] == "11SOCM0001"
     search_call = next(call for call in fake_models.calls if call[1] == "search_read")
     assert ["code", "=ilike", "11SOCM0001"] in search_call[2][0]
+
+
+def test_list_customer_invoices_uses_safe_account_move_domain():
+    fake_models = AccountMoveModels(
+        records=[
+            {
+                "id": 101,
+                "name": "INV/2026/005",
+                "display_name": "INV/2026/005",
+                "partner_id": [7, "Client Atlas"],
+                "invoice_date": "2026-05-12",
+                "amount_total": 2500.0,
+                "state": "posted",
+                "payment_state": "paid",
+                "currency_id": [129, "MAD"],
+                "move_type": "out_invoice",
+            }
+        ],
+    )
+    connector = real_connector_with_models(fake_models)
+
+    result = connector.list_customer_invoices(
+        filters=[
+            {"field": "move_type", "operator": "=", "value": "out_invoice"},
+            {"field": "state", "operator": "=", "value": "posted"},
+            {"field": "invoice_date", "operator": ">=", "value": "2026-05-01"},
+            {"field": "invoice_date", "operator": "<=", "value": "2026-05-31"},
+        ],
+        limit=10,
+    )
+
+    search_call = next(call for call in fake_models.calls if call[1] == "search_read")
+    domain = search_call[2][0]
+
+    assert result["success"] is True
+    assert result["found"] is True
+    assert result["records"][0]["reference"] == "INV/2026/005"
+    assert result["records"][0]["partner"] == "Client Atlas"
+    assert result["records"][0]["amount_total"] == 2500.0
+    assert result["records"][0]["payment_state"] == "paid"
+    assert ["move_type", "=", "out_invoice"] in domain
+    assert ["state", "=", "posted"] in domain
+    assert ["invoice_date", ">=", "2026-05-01"] in domain
+    assert ["invoice_date", "<=", "2026-05-31"] in domain
+    assert search_call[3]["fields"] == [
+        "id",
+        "name",
+        "display_name",
+        "partner_id",
+        "invoice_date",
+        "amount_total",
+        "state",
+        "payment_state",
+        "currency_id",
+        "move_type",
+    ]
+
+
+def test_list_customer_invoices_no_records_returns_no_records():
+    fake_models = AccountMoveModels(records=[])
+    connector = real_connector_with_models(fake_models)
+
+    result = connector.list_customer_invoices(
+        filters=[
+            {"field": "move_type", "operator": "=", "value": "out_invoice"},
+            {"field": "state", "operator": "=", "value": "posted"},
+            {"field": "invoice_date", "operator": ">=", "value": "2026-05-01"},
+            {"field": "invoice_date", "operator": "<=", "value": "2026-05-31"},
+        ],
+    )
+
+    assert result["success"] is True
+    assert result["found"] is False
+    assert result["failure_reason"] == "no_records"
+    assert result["records"] == []
+
+
+def test_catalog_invoice_plan_executes_through_dynamic_read_domain():
+    fake_models = AccountMoveModels(records=[])
+    connector = real_connector_with_models(fake_models)
+    connector._model_catalog_cache = [
+        {"model": "account.move", "name": "Journal Entries", "allowed": True}
+    ]
+    connector._model_catalog_cached_at = 9999999999.0
+    read_plan = build_odoo_catalog_read_plan(
+        "donne moi les factures clients validées de mois 5 2026"
+    )
+
+    result = connector.dynamic_read(read_plan)
+
+    search_call = next(call for call in fake_models.calls if call[1] == "search_read")
+    domain = search_call[2][0]
+
+    assert result["model"] == "account.move"
+    assert ["move_type", "=", "out_invoice"] in domain
+    assert ["state", "=", "posted"] in domain
+    assert ["invoice_date", ">=", "2026-05-01"] in domain
+    assert ["invoice_date", "<=", "2026-05-31"] in domain
+    assert set(search_call[3]["fields"]) >= {
+        "name",
+        "partner_id",
+        "invoice_date",
+        "amount_total",
+        "state",
+        "payment_state",
+    }
+
+
+def test_search_analytic_account_by_business_reference_returns_safe_fields():
+    fake_models = AnalyticAccountModels(
+        search_results=[
+            {
+                "id": 5935,
+                "name": "11SOCM0001 Services",
+                "display_name": "11SOCM0001 Services",
+                "code": "11SOCM0001",
+                "partner_id": [44, "Client Atlas"],
+                "company_id": [1, "Jamain Baco"],
+                "amount": 1250.0,
+                "currency_id": [129, "MAD"],
+                "x_studio_pointage": True,
+            }
+        ],
+    )
+    connector = real_connector_with_models(fake_models)
+
+    result = connector.search_analytic_accounts("11SOCM0001")
+
+    assert result["success"] is True
+    assert result["found"] is True
+    assert result["model"] == "account.analytic.account"
+    assert result["records"][0]["reference"] == "11SOCM0001"
+    assert result["records"][0]["client"] == "Client Atlas"
+    assert result["records"][0]["company"] == "Jamain Baco"
+    assert result["records"][0]["amount"] == 1250.0
+    assert result["records"][0]["currency"] == "MAD"
+    assert result["records"][0]["pointage"] is True
+    search_call = next(call for call in fake_models.calls if call[1] == "search_read")
+    assert any(condition[:2] == ["code", "ilike"] for condition in search_call[2][0])
+
+
+def test_get_analytic_account_details_resolves_reference_before_details():
+    fake_models = AnalyticAccountModels(
+        search_results=[
+            {
+                "id": 5935,
+                "name": "11SOCM0001 Services",
+                "display_name": "11SOCM0001 Services",
+                "code": "11SOCM0001",
+            }
+        ],
+        read_result={
+            "id": 5935,
+            "name": "11SOCM0001 Services",
+            "display_name": "11SOCM0001 Services",
+            "code": "11SOCM0001",
+            "partner_id": [44, "Client Atlas"],
+            "company_id": [1, "Jamain Baco"],
+            "amount": 1250.0,
+            "currency_id": [129, "MAD"],
+            "x_studio_pointage": False,
+        },
+    )
+    connector = real_connector_with_models(fake_models)
+
+    result = connector.get_analytic_account_details(record_query="11SOCM0001")
+
+    assert result["success"] is True
+    assert result["found"] is True
+    assert result["record"]["reference"] == "11SOCM0001"
+    assert result["record"]["client"] == "Client Atlas"
+    assert result["record"]["company"] == "Jamain Baco"
+    assert result["record"]["amount"] == 1250.0
+    assert result["record"]["currency"] == "MAD"
+    assert result["record"]["pointage"] is False
+    assert any(call[1] == "search_read" for call in fake_models.calls)
+    assert any(call[1] == "read" for call in fake_models.calls)
 
 
 def test_resolve_analytic_account_returns_ambiguous_candidates():
