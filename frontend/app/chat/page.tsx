@@ -1,8 +1,7 @@
 "use client";
 
-import Link from "next/link";
-import Image from "next/image";
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import AppShell from "@/components/AppShell";
 import {
   API_ERROR_MESSAGE,
   ApiRequestError,
@@ -10,6 +9,7 @@ import {
   BACKEND_UNREACHABLE_MESSAGE,
   approveApproval,
   clearAuth,
+  consumeSavedChatDraft,
   getDepartmentLabel,
   getRoleLabel,
   getStoredUser,
@@ -17,6 +17,7 @@ import {
   postChatMessage,
   requireAuth,
   rejectApproval,
+  validateAuthSession,
 } from "@/lib/api";
 
 type LooseRecord = Record<string, unknown>;
@@ -26,8 +27,8 @@ const SHOW_TECHNICAL_DETAILS =
 
 const SUGGESTED_PROMPTS = [
   "Quels fournisseurs apparaissent le plus dans les bons de commande ?",
-  "Vérifie l’état des serveurs",
-  "Raconte-moi l’histoire du groupe Jamain Baco",
+  "Vérifie l’état des serveurs.",
+  "Explique le workflow de validation humaine.",
 ];
 
 type OdooStockResult = {
@@ -159,6 +160,13 @@ export default function ChatPage() {
 
   useEffect(() => {
     if (!requireAuth()) return;
+
+    const savedDraft = consumeSavedChatDraft();
+    if (savedDraft) {
+      setMessage(savedDraft);
+    }
+
+    void validateAuthSession("/chat");
   }, []);
 
   function handleLogout() {
@@ -306,81 +314,17 @@ export default function ChatPage() {
   }, [messages, loading]);
 
   return (
-    <main className="pageShell">
-      <aside className="sidebar">
-        <div>
-          <div className="brand">
-            <div className="brandMark">
-              <Image
-	                className="brandLogo"
-	                src="/jamain-baco-logo.png"
-	                alt="Jamain Baco"
-	                width={56}
-	                height={40}
-	                priority
-	              />
-            </div>
-            <div>
-              <p>Jamain Baco</p>
-              <h1>Orchestrateur IA</h1>
-            </div>
-          </div>
-
-          <p className="navLabel">Navigation</p>
-          <nav className="nav">
-            <Link href="/">
-              <span className="navIcon">□</span>
-              Tableau de bord
-            </Link>
-            <Link href="/chat" className="active">
-              <span className="navIcon">▱</span>
-              Console de chat
-            </Link>
-            <Link href="/odoo">
-              <span className="navIcon">○</span>
-              Odoo
-            </Link>
-            {hasAnyPermission(currentUser, ["all", "view_approvals", "approve_odoo_actions"]) && (
-              <Link href="/approvals">
-                <span className="navIcon">✓</span>
-                Validations
-              </Link>
-            )}
-            {hasAnyPermission(currentUser, ["all", "view_audit_logs"]) && (
-              <Link href="/logs">
-                <span className="navIcon">≡</span>
-                Journaux d’audit
-              </Link>
-            )}
-          </nav>
-        </div>
-
-        <div className="sidebarFooter">
-          <p>{currentUser?.email || "Utilisateur connecté"}</p>
-          <span>Rôle : {getRoleLabel(currentUser)}</span>
-          <span>Département : {getDepartmentLabel(currentUser)}</span>
-          <button className="logoutButton" type="button" onClick={handleLogout}>
-            Se déconnecter
-          </button>
-        </div>
-      </aside>
-
-      <section className="content">
-        <header className="topbar">
-          <div className="topbarTitle">
-            <p className="eyebrow">Console Orchestrateur</p>
-            <h2>Chat</h2>
-          </div>
-
-          <div className="topbarActions">
-            <div className="modelBadge">{latestAssistantModel}</div>
-            <div className="headerBadge">
-              <span className="badgeDot" />
-              Contrôle actif
-            </div>
-          </div>
-        </header>
-
+    <AppShell
+      active="chat"
+      eyebrow="Console IA"
+      title="Console de l’orchestrateur"
+      subtitle="Adressez une requête à l’orchestrateur. Les actions sensibles restent soumises à validation humaine."
+      badges={[
+        { label: latestAssistantModel, tone: "neutral" },
+        { label: "Contrôle actif", tone: "success" },
+      ]}
+      contentClassName="chat-shell"
+    >
         <section className="chatViewport" aria-live="polite">
           {messages.length === 0 ? (
             <div className="emptyState">
@@ -475,7 +419,6 @@ export default function ChatPage() {
             </button>
           </form>
         </section>
-      </section>
 
       <style jsx global>{`
         * {
@@ -517,19 +460,19 @@ export default function ChatPage() {
         }
 
 	        .brandMark {
-	          width: 56px;
-	          height: 40px;
+	          width: 52px;
+	          height: 52px;
 	          background: #ffffff;
 	          display: grid;
 	          place-items: center;
-	          border-radius: 10px;
+	          border-radius: 12px;
 	          overflow: hidden;
-	          flex: 0 0 56px;
+	          flex: 0 0 52px;
 	        }
 
 	        .brandLogo {
-	          width: 56px;
-	          height: 40px;
+	          width: 52px;
+	          height: 52px;
 	          object-fit: contain;
 	          display: block;
 	        }
@@ -1192,16 +1135,16 @@ export default function ChatPage() {
           border-bottom: 1px solid #2a3a5c;
         }
 
-        .brandMark {
-          width: 42px;
-          height: 42px;
-          flex: 0 0 42px;
-          border-radius: 12px;
-          background: #4b7fe8;
-          color: #ffffff;
-          font-weight: 900;
-          font-size: 16px;
-        }
+	        .brandMark {
+	          width: 52px;
+	          height: 52px;
+	          flex: 0 0 52px;
+	          border-radius: 12px;
+	          background: #ffffff;
+	          color: #123f8c;
+	          font-weight: 900;
+	          font-size: 16px;
+	        }
 
         .brandMark span {
           display: block;
@@ -1270,12 +1213,14 @@ export default function ChatPage() {
           color: #8a9bbf;
         }
 
-        .logoutButton {
-          min-height: 34px;
-          border-radius: 8px;
-          border-color: #2a3a5c;
-          color: #8a9bbf;
-        }
+	        .logoutButton {
+	          min-height: 40px;
+	          border-radius: 8px;
+	          border-color: #2a3a5c;
+	          background: #ffffff;
+	          color: #123f8c;
+	          font-weight: 900;
+	        }
 
         .logoutButton:hover {
           border-color: rgba(224, 82, 82, 0.6);
@@ -1876,6 +1821,136 @@ export default function ChatPage() {
           max-width: 820px;
         }
 
+        .chat-shell .app-page-body {
+          flex: 1;
+          min-height: 0;
+          display: flex;
+          flex-direction: column;
+          padding: 0;
+        }
+
+        .chat-shell .chatViewport {
+          flex: 1;
+          min-height: 0;
+          background: #f4f6f8;
+          color: #172033;
+          padding: 34px 32px 18px;
+        }
+
+        .chat-shell .messageList,
+        .chat-shell .emptyState {
+          width: min(900px, 100%);
+          margin-left: auto;
+          margin-right: auto;
+        }
+
+        .chat-shell .emptyState {
+          min-height: calc(100vh - 260px);
+          color: #667085;
+        }
+
+        .chat-shell .emptyIcon {
+          border: 1px solid #d9dee8;
+          background: #ffffff;
+          color: #123f8c;
+        }
+
+        .chat-shell .emptyState h3 {
+          color: #172033;
+        }
+
+        .chat-shell .emptyState p,
+        .chat-shell .messageMeta {
+          color: #667085;
+        }
+
+        .chat-shell .suggestionChip {
+          border: 1px solid #d7deea;
+          background: #ffffff;
+          color: #344054;
+          box-shadow: none;
+        }
+
+        .chat-shell .suggestionChip:hover {
+          border-color: #123f8c;
+          color: #123f8c;
+          background: #f8fbff;
+        }
+
+        .chat-shell .messageTurn.assistant .messageAvatar {
+          background: #eaf1fb;
+          border: 1px solid #c9d8ee;
+          color: #123f8c;
+        }
+
+        .chat-shell .messageTurn.user .messageAvatar {
+          background: #123f8c;
+          border: 1px solid #123f8c;
+          color: #ffffff;
+        }
+
+        .chat-shell .userBubble {
+          background: #123f8c;
+          color: #ffffff;
+          border: 1px solid #123f8c;
+          box-shadow: none;
+        }
+
+        .chat-shell .resultPanel,
+        .chat-shell .approvalPanel,
+        .chat-shell .assistantLoading,
+        .chat-shell .errorBox {
+          background: #ffffff;
+          border: 1px solid #d9dee8;
+          color: #172033;
+          box-shadow: none;
+        }
+
+        .chat-shell .resultPanel .panelHeader,
+        .chat-shell .approvalPanel .panelHeader {
+          border-bottom-color: #e5e9f0;
+        }
+
+        .chat-shell .resultPanel .panelHeader h3,
+        .chat-shell .approvalPanel .panelHeader h3,
+        .chat-shell .genericMessage,
+        .chat-shell .detailsTable,
+        .chat-shell .candidateItem,
+        .chat-shell .sourceItem {
+          color: #172033;
+        }
+
+        .chat-shell .inputArea {
+          position: sticky;
+          bottom: 0;
+          border-top: 1px solid #d9dee8;
+          background: rgba(244, 246, 248, 0.96);
+          backdrop-filter: blur(10px);
+          padding: 12px 32px 16px;
+        }
+
+        .chat-shell .composer {
+          width: min(900px, 100%);
+          margin: 0 auto;
+          border: 1px solid #cfd8e6;
+          background: #ffffff;
+          box-shadow: none;
+        }
+
+        .chat-shell .composer textarea {
+          color: #172033;
+        }
+
+        .chat-shell .composer textarea::placeholder {
+          color: #98a2b3;
+        }
+
+        .chat-shell .sendButton {
+          background: #123f8c;
+          color: #ffffff;
+          box-shadow: none;
+        }
+
         @media (max-width: 720px) {
           .chatViewport {
             padding-bottom: 14px;
@@ -1892,7 +1967,7 @@ export default function ChatPage() {
           }
         }
       `}</style>
-    </main>
+    </AppShell>
   );
 }
 

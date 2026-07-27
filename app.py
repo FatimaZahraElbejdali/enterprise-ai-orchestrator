@@ -28,7 +28,11 @@ from models.openai_adapter import (
 )
 from orchestrator.graph import process_request
 from orchestrator.classifier_router import classify_message
-from orchestrator.audit import log_request
+from orchestrator.audit import (
+    LOG_PATH as AUDIT_LOG_PATH,
+    is_important_audit_event,
+    log_request,
+)
 from orchestrator.auth import (
     ACCESS_DENIED_MESSAGE,
     INVALID_CREDENTIALS_MESSAGE,
@@ -2459,6 +2463,18 @@ def auth_login(request: LoginRequest):
     return result
 
 
+@app.get("/auth/me")
+def auth_me(current_user: dict = Depends(get_current_user)):
+    return {
+        "email": current_user.get("email"),
+        "role": current_user.get("role"),
+        "role_label": current_user.get("role_label"),
+        "department": current_user.get("department"),
+        "department_label": current_user.get("department_label"),
+        "permissions": current_user.get("permissions", []),
+    }
+
+
 @app.post("/chat", response_model=PublicChatResponse)
 def chat(
     request: ChatRequest,
@@ -2937,9 +2953,12 @@ def ingest_official_web(
 
 
 @app.get("/logs")
-def get_logs(current_user: dict = Depends(get_current_user)):
+def get_logs(
+    current_user: dict = Depends(get_current_user),
+    view: Literal["important", "all"] = Query("important"),
+):
     require_permission(current_user, "view_audit_logs")
-    log_path = Path("logs/audit_log.jsonl")
+    log_path = AUDIT_LOG_PATH
 
     if not log_path.exists():
         return []
@@ -2965,7 +2984,8 @@ def get_logs(current_user: dict = Depends(get_current_user)):
             if title == "string" or message == "string":
                 continue
 
-            logs.append(entry)
+            if view == "all" or is_important_audit_event(entry):
+                logs.append(entry)
 
     return sorted(
         logs,

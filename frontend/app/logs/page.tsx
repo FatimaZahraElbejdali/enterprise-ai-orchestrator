@@ -1,21 +1,20 @@
 "use client";
 
-import Link from "next/link";
-import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
+import AppShell from "@/components/AppShell";
 import {
   ACCESS_DENIED_MESSAGE,
   API_ERROR_MESSAGE,
   API_BASE_URL,
   AuthUser,
-  authHeaders,
+  apiFetch,
   clearAuth,
   getDepartmentLabel,
   getRoleLabel,
   getStoredUser,
-  handleAuthFailure,
   hasAnyPermission,
   requireAuth,
+  validateAuthSession,
 } from "@/lib/api";
 
 type ExecutionResult = {
@@ -51,8 +50,11 @@ type LogEntry = {
   execution_result?: ExecutionResult;
 };
 
+type LogView = "important" | "all";
+
 export default function LogsPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logView, setLogView] = useState<LogView>("important");
   const [loading, setLoading] = useState(true);
   const [currentUser] = useState<AuthUser | null>(() => getStoredUser());
   const [error, setError] = useState("");
@@ -63,14 +65,13 @@ export default function LogsPage() {
     window.location.href = "/login";
   }
 
-  async function loadLogs() {
+  async function loadLogs(view: LogView = logView) {
     setLoading(true);
     setError("");
 
     try {
-      const res = await fetch(`${API_BASE_URL}/logs`, {
+      const res = await apiFetch(`${API_BASE_URL}/logs?view=${view}`, {
         cache: "no-store",
-        headers: authHeaders(),
       });
 
       if (res.ok) {
@@ -88,8 +89,10 @@ export default function LogsPage() {
 
         setLogs(cleanLogs);
       } else {
-        setError(handleAuthFailure(res.status) || API_ERROR_MESSAGE);
+        setError(API_ERROR_MESSAGE);
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : API_ERROR_MESSAGE);
     } finally {
       setLoading(false);
     }
@@ -97,6 +100,7 @@ export default function LogsPage() {
 
   useEffect(() => {
     if (!requireAuth()) return;
+    void validateAuthSession("/logs");
 
     const user = getStoredUser();
 
@@ -105,7 +109,7 @@ export default function LogsPage() {
     }
 
     const timer = window.setTimeout(() => {
-      void loadLogs();
+      void loadLogs("important");
     }, 0);
 
     return () => window.clearTimeout(timer);
@@ -140,62 +144,13 @@ export default function LogsPage() {
   );
 
   return (
-    <main className="pageShell">
-      <aside className="sidebar">
-        <div>
-          <div className="brand">
-            <div className="brandMark">
-              <Image
-                className="brandLogo"
-                src="/jamain-baco-logo.png"
-                alt="Jamain Baco"
-                width={48}
-                height={48}
-              />
-            </div>
-            <div>
-              <p>Jamain Baco</p>
-              <h1>Orchestrateur IA</h1>
-            </div>
-          </div>
-
-          <nav className="nav">
-            <Link href="/">Tableau de bord</Link>
-            <Link href="/chat">Console de chat</Link>
-            <Link href="/odoo">Odoo</Link>
-            {hasAnyPermission(currentUser, ["all", "view_approvals", "approve_odoo_actions"]) && (
-              <Link href="/approvals">Validations</Link>
-            )}
-            <Link href="/logs" className="active">
-              Journaux d’audit
-            </Link>
-          </nav>
-        </div>
-
-        <div className="sidebarFooter">
-          <p>{currentUser?.email || "Utilisateur connecté"}</p>
-          <span>Rôle : {getRoleLabel(currentUser)}</span>
-          <span>Département : {getDepartmentLabel(currentUser)}</span>
-          <button className="logoutButton" type="button" onClick={handleLogout}>
-            Se déconnecter
-          </button>
-        </div>
-      </aside>
-
-      <section className="content">
-        <header className="header">
-          <div>
-            <p className="eyebrow">Journal d’audit</p>
-            <h2>Traçabilité des actions</h2>
-            <p className="subtitle">
-              Suivi des consultations Odoo, demandes sensibles, décisions
-              d’approbation et actions bloquées par la politique de sécurité.
-            </p>
-          </div>
-
-          <button onClick={loadLogs}>Actualiser</button>
-        </header>
-
+    <AppShell
+      active="logs"
+      eyebrow="Audit"
+      title="Traçabilité des actions"
+      subtitle="Suivi des consultations Odoo, demandes sensibles, décisions d’approbation et actions bloquées par la politique de sécurité."
+      actions={<button onClick={() => void loadLogs(logView)}>Actualiser</button>}
+    >
         <section className="metrics">
           <Metric label="Événements" value={logs.length} />
           <Metric label="Lectures Odoo" value={odooReads} />
@@ -215,83 +170,108 @@ export default function LogsPage() {
               <p className="eyebrow">Historique</p>
               <h3>Événements récents</h3>
             </div>
+            <div className="auditToggle" aria-label="Filtre du journal d’audit">
+              <button
+                className={logView === "important" ? "active" : ""}
+                onClick={() => {
+                  setLogView("important");
+                  void loadLogs("important");
+                }}
+                type="button"
+              >
+                Événements importants
+              </button>
+              <button
+                className={logView === "all" ? "active" : ""}
+                onClick={() => {
+                  setLogView("all");
+                  void loadLogs("all");
+                }}
+                type="button"
+              >
+                Afficher tout
+              </button>
+            </div>
           </div>
 
           {loading && !accessDenied && <p className="empty">Chargement des logs...</p>}
 
           {!loading && !accessDenied && logs.length === 0 && (
-            <p className="empty">Aucun événement d’audit propre à afficher.</p>
+            <p className="empty">
+              {logView === "important"
+                ? "Aucun événement important à afficher."
+                : "Aucun événement d’audit propre à afficher."}
+            </p>
           )}
 
           {!loading &&
             !accessDenied &&
             logs.map((log, index) => (
-              <article className="logCard" key={log.id || index}>
-                <div className="logTop">
-                  <div>
-                    <div className="titleRow">
-                      <h4>{log.title || translateEvent(log.event_type)}</h4>
-                      <span className={`status ${normalizeStatus(log.status)}`}>
-                        {translateStatus(log.status)}
-                      </span>
-                    </div>
-
-                    <p className="logMessage">
-                      {summarizeLogMessage(log)}
-                    </p>
-                  </div>
-
-                  <span className={`risk ${log.risk || "low"}`}>
-                    Risque {translateRisk(log.risk)}
+              <details className="auditRow" key={log.id || index}>
+                <summary className="auditSummary">
+                  <span className="auditDate">{formatDate(log.timestamp)}</span>
+                  <span className="auditTitle">
+                    <strong>{compactLogTitle(log)}</strong>
+                    <small>{summarizeLogMessage(log)}</small>
                   </span>
-                </div>
+                  <span>{formatAgentName(log.selected_agent || log.agent)}</span>
+                  <span>{translateAction(log.action || log.event_type)}</span>
+                  <span className={`status ${normalizeStatus(log.status)}`}>
+                    {translateStatus(log.status)}
+                  </span>
+                  <span className={`risk ${log.risk || "low"}`}>
+                    {translateRisk(log.risk)}
+                  </span>
+                  <span>{formatValue(log.user_email)}</span>
+                  <span className="detailsButton">Détails</span>
+                </summary>
 
-                <div className="detailsGrid">
-                  <Detail label="Date" value={formatDate(log.timestamp)} />
-                  <Detail label="Utilisateur" value={formatValue(log.user_email)} />
-                  <Detail label="Rôle" value={translateRole(log.user_role)} />
-                  <Detail label="Agent" value={formatAgentName(log.selected_agent || log.agent)} />
-                  <Detail label="Action" value={translateAction(log.action)} />
-                  <Detail
-                    label="Décision d’accès"
-                    value={translatePermissionDecision(log.permission_decision)}
-                  />
-                  <Detail
-                    label="Validation"
-                    value={translateApproval(log.approval_status)}
-                  />
-                  <Detail
-                    label="Statut"
-                    value={translateStatus(log.status)}
-                  />
-                  <Detail
-                    label="Produit/document"
-                    value={formatValue(log.product)}
-                  />
-                  <Detail
-                    label="Valeur demandée"
-                    value={formatValue(log.requested_value)}
-                  />
-                </div>
-
-                {log.user_message && (
-                  <div className="requestBox">
-                    <span>Demande utilisateur</span>
-                    <p>{cleanDisplayText(log.user_message)}</p>
+                <div className="auditDetails">
+                  <div className="detailsGrid">
+                    <Detail label="Date" value={formatDate(log.timestamp)} />
+                    <Detail label="Utilisateur" value={formatValue(log.user_email)} />
+                    <Detail label="Rôle" value={translateRole(log.user_role)} />
+                    <Detail label="Agent" value={formatAgentName(log.selected_agent || log.agent)} />
+                    <Detail label="Action" value={translateAction(log.action || log.event_type)} />
+                    <Detail
+                      label="Décision d’accès"
+                      value={translatePermissionDecision(log.permission_decision)}
+                    />
+                    <Detail
+                      label="Validation"
+                      value={translateApproval(log.approval_status)}
+                    />
+                    <Detail
+                      label="Statut"
+                      value={translateStatus(log.status)}
+                    />
+                    <Detail
+                      label="Produit/document"
+                      value={formatValue(log.product)}
+                    />
+                    <Detail
+                      label="Valeur demandée"
+                      value={formatValue(log.requested_value)}
+                    />
                   </div>
-                )}
 
-                {log.execution_result && (
-                  <div className="requestBox">
-                    <span>Résultat Odoo</span>
-                    <p>{formatExecutionResult(log.execution_result)}</p>
-                  </div>
-                )}
-              </article>
+                  {log.user_message && (
+                    <div className="requestBox">
+                      <span>Demande utilisateur</span>
+                      <p>{cleanDisplayText(log.user_message)}</p>
+                    </div>
+                  )}
+
+                  {log.execution_result && (
+                    <div className="requestBox">
+                      <span>Résultat Odoo</span>
+                      <p>{formatExecutionResult(log.execution_result)}</p>
+                    </div>
+                  )}
+                </div>
+              </details>
             ))}
         </section>
-      </section>
-
       <style jsx global>{`
         * {
           box-sizing: border-box;
@@ -397,6 +377,22 @@ export default function LogsPage() {
           line-height: 1.5;
         }
 
+        .logoutButton {
+          margin-top: 14px;
+          width: 100%;
+          min-height: 40px;
+          border: 1px solid rgba(255, 255, 255, 0.18);
+          border-radius: 8px;
+          background: #ffffff;
+          color: #123f8c;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .logoutButton:hover {
+          background: #eef4ff;
+        }
+
         .content {
           padding: 32px;
         }
@@ -483,6 +479,10 @@ export default function LogsPage() {
 
         .panelHeader {
           margin-bottom: 18px;
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 16px;
         }
 
         .panelHeader h3 {
@@ -491,49 +491,130 @@ export default function LogsPage() {
           color: #101827;
         }
 
+        .auditToggle {
+          display: inline-flex;
+          gap: 4px;
+          border: 1px solid #d9dee7;
+          border-radius: 10px;
+          background: #f8fafc;
+          padding: 4px;
+        }
+
+        .auditToggle button {
+          height: 32px;
+          border: 0;
+          border-radius: 7px;
+          background: transparent;
+          color: #647084;
+          padding: 0 11px;
+          font-size: 12px;
+          font-weight: 850;
+        }
+
+        .auditToggle button.active {
+          background: #ffffff;
+          color: #123f8c;
+          box-shadow: 0 1px 2px rgba(15, 27, 45, 0.08);
+        }
+
         .empty {
           color: #647084;
           font-weight: 700;
         }
 
-        .logCard {
+        .auditRow {
           border: 1px solid #d9dee7;
-          background: #fbfcfe;
-          padding: 22px;
-          margin-bottom: 16px;
-        }
-
-        .logTop {
-          display: flex;
-          justify-content: space-between;
-          gap: 18px;
-          margin-bottom: 18px;
-        }
-
-        .titleRow {
-          display: flex;
-          align-items: center;
-          gap: 10px;
+          background: #ffffff;
           margin-bottom: 8px;
         }
 
-        .titleRow h4 {
-          margin: 0;
-          font-size: 20px;
-          color: #101827;
+        .auditRow[open] {
+          background: #fbfcfe;
         }
 
-        .logMessage {
-          margin: 0;
-          color: #647084;
-          line-height: 1.6;
+        .auditSummary {
+          min-height: 58px;
+          display: grid;
+          grid-template-columns:
+            150px minmax(260px, 1.5fr) minmax(120px, 0.75fr)
+            minmax(130px, 0.85fr) 104px 84px minmax(160px, 1fr) 82px;
+          gap: 12px;
+          align-items: center;
+          padding: 10px 14px;
+          cursor: pointer;
+          list-style: none;
+        }
+
+        .auditSummary::-webkit-details-marker {
+          display: none;
+        }
+
+        .auditSummary > span {
+          min-width: 0;
+          color: #475467;
+          font-size: 12px;
+          font-weight: 750;
+        }
+
+        .auditDate {
+          color: #667085;
+          font-variant-numeric: tabular-nums;
+        }
+
+        .auditTitle {
+          display: grid;
+          gap: 2px;
+        }
+
+        .auditTitle strong {
+          overflow: hidden;
+          color: #172033;
+          font-size: 13px;
+          font-weight: 900;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .auditTitle small {
+          overflow: hidden;
+          color: #667085;
+          font-size: 11px;
+          font-weight: 700;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .detailsButton {
+          justify-self: end;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 30px;
+          border: 1px solid #d9dee7;
+          border-radius: 7px;
+          background: #f8fafc;
+          color: #123f8c !important;
+          padding: 0 10px;
+          font-size: 12px;
+          font-weight: 850;
+        }
+
+        .auditRow[open] .detailsButton {
+          background: #123f8c;
+          border-color: #123f8c;
+          color: #ffffff !important;
+        }
+
+        .auditDetails {
+          border-top: 1px solid #e5e7eb;
+          padding: 14px;
         }
 
         .status,
         .risk {
           border-radius: 999px;
-          padding: 7px 10px;
-          font-size: 12px;
+          padding: 5px 8px;
+          font-size: 11px;
           font-weight: 900;
           white-space: nowrap;
           border: 1px solid #d9dee7;
@@ -568,7 +649,6 @@ export default function LogsPage() {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 0 24px;
-          border-top: 1px solid #e5e7eb;
           border-bottom: 1px solid #e5e7eb;
           margin-bottom: 16px;
         }
@@ -627,12 +707,17 @@ export default function LogsPage() {
           }
 
           .metrics,
-          .detailsGrid {
+          .detailsGrid,
+          .auditSummary {
             grid-template-columns: 1fr;
+          }
+
+          .detailsButton {
+            justify-self: start;
           }
         }
       `}</style>
-    </main>
+    </AppShell>
   );
 }
 
@@ -656,15 +741,27 @@ function Detail({ label, value }: { label: string; value: string }) {
 
 function translateEvent(event?: string) {
   const labels: Record<string, string> = {
+    answer_question: "Question répondue",
     odoo_read: "Consultation Odoo",
     approval_required: "Validation requise",
     approval_decision: "Décision de validation",
+    permission_denied: "Accès refusé",
+    unsupported_action: "Action non prise en charge",
+    official_web_ingestion: "Ingestion site officiel",
+    ai_model_call: "Appel modèle IA",
     odoo_write_executed: "Écriture Odoo exécutée",
     odoo_status: "Vérification Odoo",
   };
 
   if (!event) return "Événement système";
   return labels[event] || event;
+}
+
+function displayLogTitle(title?: string, eventType?: string) {
+  const mappedTitle = translateEvent(title);
+  if (title && mappedTitle !== title) return mappedTitle;
+  if (title && !/^[a-z_]+$/i.test(title)) return cleanDisplayText(title);
+  return translateEvent(eventType || title);
 }
 
 function normalizeStatus(status?: string) {
@@ -737,6 +834,14 @@ function formatAgentName(value?: string) {
   return labels[value] || value;
 }
 
+function compactLogTitle(log: LogEntry) {
+  const prompt = cleanDisplayText(log.user_message);
+
+  if (prompt) return prompt;
+
+  return displayLogTitle(log.title, log.event_type);
+}
+
 function summarizeLogMessage(log: LogEntry) {
   if (log.permission_decision === "denied" || log.status === "access_denied") {
     return "Accès refusé par la politique de rôle.";
@@ -775,6 +880,13 @@ function translateAction(action?: string) {
     check_price: "Consultation prix",
     check_unit: "Consultation unité",
     check_product_details: "Consultation produit",
+    answer_question: "Question répondue",
+    odoo_read: "Lecture Odoo",
+    approval_required: "Validation requise",
+    permission_denied: "Accès refusé",
+    unsupported_action: "Action non prise en charge",
+    official_web_ingestion: "Ingestion site officiel",
+    ai_model_call: "Appel modèle IA",
     change_price: "Modification du prix",
     change_stock: "Modification du stock",
     change_unit: "Modification de l’unité",

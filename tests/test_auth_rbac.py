@@ -46,6 +46,30 @@ def test_login_returns_demo_user_department():
     assert data["user"]["department_label"] == "Informatique"
 
 
+def test_auth_me_returns_current_user_for_valid_token():
+    response = client.get(
+        "/auth/me",
+        headers=auth_headers("admin@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["email"] == "admin@company.local"
+    assert data["role"] == "admin"
+    assert data["department"] == "administration"
+    assert "all" in data["permissions"]
+
+
+def test_auth_me_rejects_invalid_token():
+    response = client.get(
+        "/auth/me",
+        headers={"Authorization": "Bearer invalid-token"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Session invalide ou expirée."
+
+
 def test_login_failure():
     response = client.post(
         "/auth/login",

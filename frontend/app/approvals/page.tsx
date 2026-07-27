@@ -1,21 +1,20 @@
 "use client";
 
-import Link from "next/link";
-import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
+import AppShell from "@/components/AppShell";
 import {
   ACCESS_DENIED_MESSAGE,
   API_ERROR_MESSAGE,
   API_BASE_URL,
   AuthUser,
-  authHeaders,
+  apiFetch,
   clearAuth,
   getDepartmentLabel,
   getRoleLabel,
   getStoredUser,
-  handleAuthFailure,
   hasAnyPermission,
   requireAuth,
+  validateAuthSession,
 } from "@/lib/api";
 
 type ExecutionResult = {
@@ -108,17 +107,18 @@ export default function ApprovalsPage() {
     setError("");
 
     try {
-      const res = await fetch(`${API_BASE_URL}/approvals`, {
+      const res = await apiFetch(`${API_BASE_URL}/approvals`, {
         cache: "no-store",
-        headers: authHeaders(),
       });
 
       if (res.ok) {
         const data = await res.json();
         setApprovals(Array.isArray(data) ? data : []);
       } else {
-        setError(handleAuthFailure(res.status) || API_ERROR_MESSAGE);
+        setError(API_ERROR_MESSAGE);
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : API_ERROR_MESSAGE);
     } finally {
       setLoading(false);
     }
@@ -128,16 +128,17 @@ export default function ApprovalsPage() {
     setActionLoading(id);
 
     try {
-      const res = await fetch(`${API_BASE_URL}/approvals/${id}/${decision}`, {
+      const res = await apiFetch(`${API_BASE_URL}/approvals/${id}/${decision}`, {
         method: "POST",
-        headers: authHeaders(),
       });
 
       if (res.ok) {
         await loadApprovals();
       } else {
-        setError(handleAuthFailure(res.status) || API_ERROR_MESSAGE);
+        setError(API_ERROR_MESSAGE);
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : API_ERROR_MESSAGE);
     } finally {
       setActionLoading(null);
     }
@@ -145,6 +146,7 @@ export default function ApprovalsPage() {
 
   useEffect(() => {
     if (!requireAuth()) return;
+    void validateAuthSession("/approvals");
 
     const user = getStoredUser();
 
@@ -175,64 +177,17 @@ export default function ApprovalsPage() {
   );
 
   return (
-    <main className="pageShell">
-      <aside className="sidebar">
-        <div>
-          <div className="brand">
-            <div className="brandMark">
-              <Image
-                className="brandLogo"
-                src="/jamain-baco-logo.png"
-                alt="Jamain Baco"
-                width={48}
-                height={48}
-              />
-            </div>
-            <div>
-              <p>Jamain Baco</p>
-              <h1>Orchestrateur IA</h1>
-            </div>
-          </div>
-
-          <nav className="nav">
-            <Link href="/">Tableau de bord</Link>
-            <Link href="/chat">Console de chat</Link>
-            <Link href="/odoo">Odoo</Link>
-            <Link href="/approvals" className="active">
-              Validations
-            </Link>
-            {hasAnyPermission(currentUser, ["all", "view_audit_logs"]) && (
-              <Link href="/logs">Journaux d’audit</Link>
-            )}
-          </nav>
-        </div>
-
-        <div className="sidebarFooter">
-          <p>{currentUser?.email || "Utilisateur connecté"}</p>
-          <span>Rôle : {getRoleLabel(currentUser)}</span>
-          <span>Département : {getDepartmentLabel(currentUser)}</span>
-          <button className="logoutButton" type="button" onClick={handleLogout}>
-            Se déconnecter
-          </button>
-        </div>
-      </aside>
-
-      <section className="content">
-        <header className="header">
-          <div>
-            <p className="eyebrow">Workflow de validation</p>
-            <h2>Demandes d’approbation</h2>
-            <p className="subtitle">
-              Les demandes sensibles détectées par l’orchestrateur sont
-              enregistrées ici avant toute exécution dans Odoo.
-            </p>
-          </div>
-
-          <button className="refreshButton" onClick={loadApprovals}>
-            Actualiser
-          </button>
-        </header>
-
+    <AppShell
+      active="approvals"
+      eyebrow="Workflow"
+      title="Demandes d’approbation"
+      subtitle="Les demandes sensibles détectées par l’orchestrateur sont enregistrées ici avant toute exécution dans Odoo."
+      actions={
+        <button className="refreshButton" onClick={loadApprovals}>
+          Actualiser
+        </button>
+      }
+    >
         <section className="metrics">
           <Metric label="En attente" value={pendingCount} tone="warning" />
           <Metric label="Approuvées" value={approvedCount} tone="success" />
@@ -279,7 +234,7 @@ export default function ApprovalsPage() {
 
                       <div className="businessInfo">
                         <span>Demande originale :</span>
-                        <p>{approval.user_message || "Demande enregistrée par l’orchestrateur."}</p>
+                        <p>{displayApprovalText(approval.user_message) || "Demande enregistrée par l’orchestrateur."}</p>
                       </div>
                     </div>
 
@@ -328,8 +283,6 @@ export default function ApprovalsPage() {
               );
             })}
         </section>
-      </section>
-
       <style jsx global>{`
         * {
           box-sizing: border-box;
@@ -434,6 +387,22 @@ export default function ApprovalsPage() {
           color: #94a3b8;
           font-size: 12px;
           line-height: 1.5;
+        }
+
+        .logoutButton {
+          margin-top: 14px;
+          width: 100%;
+          min-height: 40px;
+          border: 1px solid rgba(255, 255, 255, 0.18);
+          border-radius: 8px;
+          background: #ffffff;
+          color: #123f8c;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .logoutButton:hover {
+          background: #eef4ff;
         }
 
         .content {
@@ -735,7 +704,7 @@ export default function ApprovalsPage() {
           }
         }
       `}</style>
-    </main>
+    </AppShell>
   );
 }
 
@@ -788,6 +757,15 @@ function approvalSummary(approval: Approval) {
     getMetadataString(approval.metadata, "document_id");
   const subject = target || document;
   const suffix = subject ? ` pour ${subject}` : "";
+  const displayTitle = displayApprovalText(approval.title || approval.action || approval.user_message);
+
+  if (displayTitle === "Modification du stock") {
+    return `Modification du stock${suffix}`;
+  }
+
+  if (displayTitle === "Modification du prix") {
+    return `Modification du prix${suffix}`;
+  }
 
   if (approval.action === "toggle_boolean_field") {
     return `Modification d’un champ analytique${suffix}`;
@@ -821,7 +799,7 @@ function approvalSummary(approval: Approval) {
     return `Création d’une demande d’achat${suffix}`;
   }
 
-  return `${approval.title || translateAction(approval.action) || "Action sensible"}${suffix}`;
+  return `${displayTitle || translateAction(approval.action) || "Action sensible"}${suffix}`;
 }
 
 function technicalDetails(approval: Approval) {
@@ -877,6 +855,8 @@ function translateAction(action?: string) {
   const labels: Record<string, string> = {
     change_price: "Modification du prix",
     change_stock: "Modification du stock",
+    "Update the stock quantity": "Modification du stock",
+    update_stock_quantity: "Modification du stock",
     change_unit: "Modification de l’unité",
     modify_invoice: "Action sensible sur facture",
     create_purchase_request: "Création d’une demande d’achat",
@@ -888,6 +868,19 @@ function translateAction(action?: string) {
 
   if (!action) return "-";
   return labels[action] || action;
+}
+
+function displayApprovalText(value?: string) {
+  if (!value) return "";
+
+  const normalized = value.trim().toLowerCase();
+  const labels: Record<string, string> = {
+    "update the stock quantity": "Modification du stock",
+    "change_price": "Modification du prix",
+    "change stock": "Modification du stock",
+  };
+
+  return labels[normalized] || value;
 }
 
 function getMetadataString(metadata: Record<string, unknown> | undefined, key: string) {

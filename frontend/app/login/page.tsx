@@ -2,7 +2,12 @@
 
 import { FormEvent, useState } from "react";
 import Image from "next/image";
-import { API_BASE_URL, BACKEND_UNREACHABLE_MESSAGE, storeAuth } from "@/lib/api";
+import {
+  API_BASE_URL,
+  BACKEND_UNREACHABLE_MESSAGE,
+  getPostLoginRedirect,
+  storeAuth,
+} from "@/lib/api";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -40,7 +45,7 @@ export default function LoginPage() {
 
       const data = await response.json();
       storeAuth(data.access_token, data.user);
-      window.location.href = "/chat";
+      window.location.href = getPostLoginRedirect();
     } catch {
       setError(BACKEND_UNREACHABLE_MESSAGE);
     } finally {

@@ -12,11 +12,15 @@ export type AuthUser = {
 
 export const ACCESS_DENIED_MESSAGE =
   "Accès refusé : votre rôle ne permet pas d’effectuer cette action.";
-export const TOKEN_EXPIRED_MESSAGE = "Session expirée. Veuillez vous reconnecter.";
+export const TOKEN_EXPIRED_MESSAGE = "Votre session a expiré. Veuillez vous reconnecter.";
 export const API_ERROR_MESSAGE =
   "Une erreur est survenue lors du traitement de la demande.";
 export const BACKEND_UNREACHABLE_MESSAGE =
   "Impossible de joindre le serveur de l’orchestrateur.";
+
+const AUTH_RETURN_TO_KEY = "auth_return_to";
+const AUTH_ERROR_KEY = "auth_error";
+const CHAT_DRAFT_KEY = "chat_unsent_draft";
 
 const ROLE_LABELS: Record<string, string> = {
   admin: "Administrateur",
@@ -93,25 +97,131 @@ export function authHeaders(): HeadersInit {
     : {};
 }
 
+type ApiFetchOptions = {
+  draftToPreserve?: string;
+  returnTo?: string;
+};
+
+function currentPath() {
+  if (typeof window === "undefined") return "/";
+
+  return `${window.location.pathname}${window.location.search || ""}`;
+}
+
+function loginUrl(returnTo: string) {
+  return `/login?next=${encodeURIComponent(returnTo || "/chat")}`;
+}
+
+export function saveChatDraft(draft: string) {
+  if (typeof window === "undefined") return;
+
+  const trimmedDraft = draft.trim();
+
+  if (trimmedDraft) {
+    window.localStorage.setItem(CHAT_DRAFT_KEY, draft);
+  }
+}
+
+export function consumeSavedChatDraft() {
+  if (typeof window === "undefined") return "";
+
+  const draft = window.localStorage.getItem(CHAT_DRAFT_KEY) || "";
+  window.localStorage.removeItem(CHAT_DRAFT_KEY);
+  return draft;
+}
+
+export function handleSessionExpired(options: ApiFetchOptions = {}) {
+  if (typeof window === "undefined") return TOKEN_EXPIRED_MESSAGE;
+
+  const returnTo = options.returnTo || currentPath();
+
+  if (options.draftToPreserve) {
+    saveChatDraft(options.draftToPreserve);
+  }
+
+  window.localStorage.setItem(AUTH_ERROR_KEY, TOKEN_EXPIRED_MESSAGE);
+  window.localStorage.setItem(AUTH_RETURN_TO_KEY, returnTo);
+  clearAuth();
+  window.location.href = loginUrl(returnTo);
+  return TOKEN_EXPIRED_MESSAGE;
+}
+
+export async function apiFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  options: ApiFetchOptions = {}
+) {
+  const headers = new Headers(authHeaders());
+  new Headers(init.headers || {}).forEach((value, key) => {
+    headers.set(key, value);
+  });
+
+  const response = await fetch(input, {
+    ...init,
+    headers,
+  });
+
+  if (response.status === 401) {
+    handleSessionExpired(options);
+    throw new ApiRequestError(TOKEN_EXPIRED_MESSAGE, response.status);
+  }
+
+  return response;
+}
+
+export async function validateAuthSession(returnTo?: string) {
+  if (!getStoredToken()) {
+    handleSessionExpired({ returnTo });
+    return false;
+  }
+
+  let response: Response;
+
+  try {
+    response = await apiFetch(
+      `${API_BASE_URL}/auth/me`,
+      { cache: "no-store" },
+      { returnTo }
+    );
+  } catch {
+    return false;
+  }
+
+  if (!response.ok) return false;
+
+  const user = (await response.json()) as AuthUser;
+  window.localStorage.setItem("auth_user", JSON.stringify(user));
+  return true;
+}
+
 export async function postChatMessage<T = unknown>(
   message: string,
   sessionId = "demo-session"
 ): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeaders(),
+  const response = await apiFetch(
+    `${API_BASE_URL}/chat`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message,
+        session_id: sessionId,
+      }),
     },
-    body: JSON.stringify({
-      message,
-      session_id: sessionId,
-    }),
-  });
+    {
+      draftToPreserve: message,
+      returnTo: "/chat",
+    }
+  );
 
   if (!response.ok) {
-    const authMessage = handleAuthFailure(response.status);
-    throw new Error(authMessage || API_ERROR_MESSAGE);
+    if (response.status === 403) {
+      throw new ApiRequestError(ACCESS_DENIED_MESSAGE, response.status);
+    }
+
+    throw new ApiRequestError(API_ERROR_MESSAGE, response.status);
   }
 
   return response.json() as Promise<T>;
@@ -131,17 +241,11 @@ async function submitApprovalDecision<T = unknown>(
   approvalId: string,
   decision: "approve" | "reject"
 ): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}/approvals/${approvalId}/${decision}`, {
+  const response = await apiFetch(`${API_BASE_URL}/approvals/${approvalId}/${decision}`, {
     method: "POST",
-    headers: authHeaders(),
   });
 
   if (!response.ok) {
-    if (response.status === 401) {
-      clearAuth();
-      throw new ApiRequestError(TOKEN_EXPIRED_MESSAGE, response.status);
-    }
-
     if (response.status === 403) {
       throw new ApiRequestError(ACCESS_DENIED_MESSAGE, response.status);
     }
@@ -164,7 +268,9 @@ export function requireAuth() {
   const token = getStoredToken();
 
   if (!token) {
-    window.location.href = "/login";
+    const returnTo = currentPath();
+    window.localStorage.setItem(AUTH_RETURN_TO_KEY, returnTo);
+    window.location.href = loginUrl(returnTo);
     return false;
   }
 
@@ -173,9 +279,7 @@ export function requireAuth() {
 
 export function handleAuthFailure(status: number) {
   if (status === 401) {
-    clearAuth();
-    window.localStorage.setItem("auth_error", TOKEN_EXPIRED_MESSAGE);
-    window.location.href = "/login";
+    handleSessionExpired();
     return TOKEN_EXPIRED_MESSAGE;
   }
 
@@ -184,6 +288,18 @@ export function handleAuthFailure(status: number) {
   }
 
   return "";
+}
+
+export function getPostLoginRedirect() {
+  if (typeof window === "undefined") return "/chat";
+
+  const nextParam = new URLSearchParams(window.location.search).get("next");
+  const storedReturnTo = window.localStorage.getItem(AUTH_RETURN_TO_KEY);
+  const destination = nextParam || storedReturnTo || "/chat";
+  window.localStorage.removeItem(AUTH_RETURN_TO_KEY);
+  return destination.startsWith("/") && !destination.startsWith("//")
+    ? destination
+    : "/chat";
 }
 
 export function hasAnyPermission(user: AuthUser | null, permissions: string[]) {

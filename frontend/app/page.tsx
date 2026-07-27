@@ -2,16 +2,17 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import Image from "next/image";
+import AppShell from "@/components/AppShell";
 import {
   API_BASE_URL,
   AuthUser,
-  authHeaders,
+  apiFetch,
   clearAuth,
   getDepartmentLabel,
   getRoleLabel,
   getStoredUser,
   requireAuth,
+  validateAuthSession,
 } from "@/lib/api";
 
 type OdooStatus = {
@@ -73,21 +74,19 @@ export default function Home() {
 
   useEffect(() => {
     if (!requireAuth()) return;
+    void validateAuthSession("/");
 
     async function loadDashboard() {
       try {
         const [odooRes, approvalsRes, logsRes] = await Promise.allSettled([
-          fetch(`${API_BASE_URL}/odoo/status`, {
+          apiFetch(`${API_BASE_URL}/odoo/status`, {
             cache: "no-store",
-            headers: authHeaders(),
           }),
-          fetch(`${API_BASE_URL}/approvals`, {
+          apiFetch(`${API_BASE_URL}/approvals`, {
             cache: "no-store",
-            headers: authHeaders(),
           }),
-          fetch(`${API_BASE_URL}/logs`, {
+          apiFetch(`${API_BASE_URL}/logs`, {
             cache: "no-store",
-            headers: authHeaders(),
           }),
         ]);
 
@@ -135,6 +134,15 @@ export default function Home() {
   }, [approvals]);
 
   const todayApprovals = useMemo(() => countToday(approvals), [approvals]);
+  const blockedActions = useMemo(() => countBlockedActions(logs), [logs]);
+  const agentStates = [
+    ["Agent Odoo", "Actif"],
+    ["Agent Support", "Actif"],
+    ["Agent Serveur", "Actif"],
+    ["Agent Connaissance", "Actif"],
+    ["Validation humaine", "Active"],
+    ["Journal d’audit", "Actif"],
+  ];
   const recentActivities = useMemo(() => {
     const logItems = logs.slice(0, 4).map((log) => ({
       label: activityLabel(log),
@@ -164,16 +172,36 @@ export default function Home() {
   }, [logs, odooStatus?.connected, pendingApprovals]);
 
   return (
-    <main className="dashboard-shell">
+    <AppShell
+      active="dashboard"
+      eyebrow="Tableau de bord"
+      title="Tableau de bord opérationnel"
+      subtitle="Supervision des validations, systèmes connectés et journaux de l’orchestrateur."
+      badges={[{ label: odooBadge.label, tone: odooBadge.tone }]}
+      actions={
+        <>
+          <Link href="/chat" className="app-button primary">
+            Ouvrir la console
+          </Link>
+          <Link href="/odoo" className="app-button">
+            Odoo
+          </Link>
+        </>
+      }
+    >
       <style>{`
-        .dashboard-shell {
-          --brand-blue: #28298f;
-          --brand-blue-mid: #3839a8;
-          --brand-blue-soft: #ececf8;
-          --brand-blue-xsoft: #f6f6fc;
-          --brand-border: #d6d7f0;
+        .dashboard-page {
+          --brand-blue: #123f8c;
+          --brand-blue-mid: #1d5fc3;
+          --brand-blue-soft: #e9f0fb;
+          --brand-blue-xsoft: #f5f8fd;
+          --brand-border: #d7deea;
+          --sidebar-bg: #0f1b2d;
+          --sidebar-panel: #14223a;
+          --sidebar-border: #243653;
+          --sidebar-muted: #8da0bd;
           --surface: #ffffff;
-          --page-bg: #f3f3f7;
+          --page-bg: #f4f6f9;
           --text-strong: #191a3d;
           --text-muted: #5e6090;
           --text-faint: #989ac0;
@@ -199,8 +227,8 @@ export default function Home() {
           position: sticky;
           top: 0;
           height: 100vh;
-          background: var(--surface);
-          border-right: 1px solid var(--brand-border);
+          background: var(--sidebar-bg);
+          border-right: 1px solid var(--sidebar-border);
           display: flex;
           flex-direction: column;
         }
@@ -211,7 +239,7 @@ export default function Home() {
           align-items: center;
           gap: 12px;
           padding: 20px 18px;
-          border-bottom: 1px solid var(--brand-border);
+          border-bottom: 1px solid var(--sidebar-border);
         }
 
         .brand-mark {
@@ -220,7 +248,7 @@ export default function Home() {
           border-radius: 10px;
           display: grid;
           place-items: center;
-          background: var(--brand-blue-soft);
+          background: #ffffff;
           overflow: hidden;
           flex: 0 0 auto;
         }
@@ -234,7 +262,7 @@ export default function Home() {
 
         .brand-name {
           margin: 0;
-          color: var(--text-strong);
+          color: #f7fbff;
           font-size: 14px;
           font-weight: 800;
           line-height: 1.15;
@@ -242,7 +270,7 @@ export default function Home() {
 
         .brand-subtitle {
           margin: 3px 0 0;
-          color: var(--text-faint);
+          color: var(--sidebar-muted);
           font-size: 12px;
           font-weight: 650;
         }
@@ -254,7 +282,7 @@ export default function Home() {
 
         .nav-label,
         .section-label {
-          color: var(--text-faint);
+          color: var(--sidebar-muted);
           font-size: 11px;
           font-weight: 800;
           letter-spacing: 0.12em;
@@ -277,7 +305,7 @@ export default function Home() {
           gap: 11px;
           padding: 9px 11px;
           border-radius: 10px;
-          color: var(--text-muted);
+          color: #c8d4e8;
           text-decoration: none;
           font-size: 14px;
           font-weight: 750;
@@ -285,14 +313,14 @@ export default function Home() {
         }
 
         .nav-item svg {
-          color: var(--text-faint);
+          color: var(--sidebar-muted);
           flex: 0 0 auto;
           transition: color 160ms ease;
         }
 
         .nav-item:hover {
-          background: var(--brand-blue-xsoft);
-          color: var(--text-strong);
+          background: var(--sidebar-panel);
+          color: #ffffff;
         }
 
         .nav-item:hover svg,
@@ -301,13 +329,13 @@ export default function Home() {
         }
 
         .nav-item.active {
-          background: var(--brand-blue-soft);
-          color: var(--brand-blue);
+          background: rgba(29, 95, 195, 0.18);
+          color: #9fc2ff;
         }
 
         .sidebar-footer {
           padding: 14px 12px 18px;
-          border-top: 1px solid var(--brand-border);
+          border-top: 1px solid var(--sidebar-border);
         }
 
         .user-card {
@@ -353,7 +381,7 @@ export default function Home() {
 
         .user-email {
           overflow-wrap: anywhere;
-          color: var(--text-strong);
+          color: #ffffff;
           font-size: 12px;
           font-weight: 800;
           line-height: 1.25;
@@ -361,7 +389,7 @@ export default function Home() {
 
         .user-role {
           margin-top: 2px;
-          color: var(--text-faint);
+          color: var(--sidebar-muted);
           font-size: 11px;
           line-height: 1.35;
         }
@@ -370,9 +398,9 @@ export default function Home() {
           grid-column: 1 / -1;
           width: 100%;
           min-height: 38px;
-          border: 1px solid var(--brand-border);
+          border: 1px solid var(--sidebar-border);
           border-radius: 10px;
-          background: var(--brand-blue-soft);
+          background: #ffffff;
           color: var(--brand-blue);
           cursor: pointer;
           display: inline-flex;
@@ -402,30 +430,6 @@ export default function Home() {
           overflow: hidden;
           background: var(--brand-blue);
           padding: 34px 42px 36px;
-        }
-
-        .hero::before,
-        .hero::after {
-          content: "";
-          position: absolute;
-          pointer-events: none;
-          background: rgba(255, 255, 255, 0.08);
-          clip-path: polygon(50% 0%, 60% 40%, 100% 50%, 60% 60%, 50% 100%, 40% 60%, 0% 50%, 40% 40%);
-        }
-
-        .hero::before {
-          width: 190px;
-          height: 190px;
-          top: -38px;
-          right: 42px;
-        }
-
-        .hero::after {
-          width: 76px;
-          height: 76px;
-          left: 92px;
-          bottom: -24px;
-          opacity: 0.72;
         }
 
         .hero-inner {
@@ -548,7 +552,7 @@ export default function Home() {
 
         .stat-grid {
           display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
+          grid-template-columns: repeat(4, minmax(0, 1fr));
           gap: 16px;
         }
 
@@ -655,13 +659,17 @@ export default function Home() {
 
         .dashboard-bottom {
           display: grid;
-          grid-template-columns: minmax(0, 1fr) minmax(300px, 330px);
+          grid-template-columns: minmax(0, 1fr) minmax(320px, 360px);
           gap: 18px;
           align-items: start;
         }
 
         .recent-panel {
           grid-column: 2;
+        }
+
+        .agents-panel {
+          grid-column: 1;
         }
 
         .panel {
@@ -742,6 +750,48 @@ export default function Home() {
           font-weight: 700;
         }
 
+        .agent-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 0;
+          padding: 6px 20px 18px;
+        }
+
+        .agent-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          min-height: 46px;
+          border-bottom: 1px solid var(--brand-border);
+          padding: 0 12px 0 0;
+          color: var(--text-strong);
+          font-size: 14px;
+          font-weight: 760;
+        }
+
+        .agent-row:nth-last-child(-n + 2) {
+          border-bottom: 0;
+        }
+
+        .agent-status {
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+          color: var(--green);
+          font-size: 12px;
+          font-weight: 850;
+          white-space: nowrap;
+        }
+
+        .agent-status::before {
+          content: "";
+          width: 7px;
+          height: 7px;
+          border-radius: 999px;
+          background: currentColor;
+        }
+
         @media (max-width: 1040px) {
           .dashboard-layout {
             grid-template-columns: 1fr;
@@ -764,11 +814,15 @@ export default function Home() {
             padding-top: 8px;
           }
 
-          .dashboard-bottom {
-            grid-template-columns: 1fr;
-          }
+	          .dashboard-bottom {
+	            grid-template-columns: 1fr;
+	          }
 
-          .recent-panel {
+	          .recent-panel {
+	            grid-column: auto;
+	          }
+
+          .agents-panel {
             grid-column: auto;
           }
         }
@@ -792,98 +846,15 @@ export default function Home() {
             flex: 1 1 180px;
           }
 
-          .stat-grid,
-          .nav-list {
-            grid-template-columns: 1fr;
-          }
+	          .stat-grid,
+          .agent-grid,
+	          .nav-list {
+	            grid-template-columns: 1fr;
+	          }
         }
       `}</style>
 
-      <div className="dashboard-layout">
-        <aside className="sidebar">
-          <div className="brand">
-            <div className="brand-mark">
-              <Image
-                className="brand-logo"
-                src="/jamain-baco-logo.png"
-                alt="Jamain Baco"
-                width={52}
-                height={52}
-                priority
-              />
-            </div>
-            <div>
-              <p className="brand-name">Jamain Baco</p>
-              <p className="brand-subtitle">Orchestrateur IA</p>
-            </div>
-          </div>
-
-          <nav className="sidebar-nav" aria-label="Navigation principale">
-            <div className="nav-label">Navigation</div>
-            <div className="nav-list">
-              {actions.map((action) => (
-                <Link
-                  key={action.title}
-                  className={`nav-item${action.href === "/" ? " active" : ""}`}
-                  href={action.href}
-                >
-                  <Icon name={action.icon} size={17} />
-                  <span>{action.title}</span>
-                </Link>
-              ))}
-            </div>
-          </nav>
-
-          <div className="sidebar-footer">
-            <div className="user-card">
-              <div className="avatar" aria-hidden="true">
-                {userInitial(currentUser)}
-              </div>
-              <div className="user-info">
-                <div className="user-email">{currentUser?.email || "Utilisateur connecté"}</div>
-                <div className="user-role">
-                  {getRoleLabel(currentUser)} · {getDepartmentLabel(currentUser)}
-                </div>
-              </div>
-              <button
-                className="logout-button"
-                type="button"
-                onClick={handleLogout}
-                aria-label="Se déconnecter"
-                title="Se déconnecter"
-              >
-                <Icon name="logout" size={16} />
-                <span>Se déconnecter</span>
-              </button>
-            </div>
-          </div>
-        </aside>
-
-        <section className="main">
-          <header className="hero">
-            <div className="hero-inner">
-              <div className="hero-eyebrow">Tableau de bord opérationnel</div>
-              <h1 className="hero-title">Supervision de l’orchestrateur IA</h1>
-
-              <div className="hero-actions">
-                <Link href="/chat" className="button primary">
-                  <Icon name="chat" size={17} />
-                  Ouvrir le chat
-                </Link>
-                <Link href="/odoo" className="button secondary">
-                  <Icon name="odoo" size={17} />
-                  Ouvrir Odoo
-                </Link>
-                <span className={`status-badge ${odooBadge.tone}`}>
-                  <span className="status-dot" />
-                  {odooBadge.label}
-                </span>
-              </div>
-            </div>
-          </header>
-
-          <div className="content">
-            <div className="content-inner">
+      <div className="dashboard-page">
               <section>
                 <div className="section-label">Métriques clés</div>
                 <div className="stat-grid">
@@ -911,10 +882,34 @@ export default function Home() {
                     tag={odooStatus?.connected ? "En ligne" : "Hors ligne"}
                     sub={odooStatus?.connected ? "Odoo accessible" : "Odoo inaccessible"}
                   />
+                  <StatCard
+                    label="Actions bloquées"
+                    value={blockedActions}
+                    tone={blockedActions > 0 ? "err" : "ok"}
+                    icon="approval"
+                    tag={blockedActions > 0 ? "Surveillé" : "Aucune alerte"}
+                    sub="Politique de sécurité"
+                  />
                 </div>
               </section>
 
               <section className="dashboard-bottom">
+                <div className="panel agents-panel">
+                  <div className="panel-header">
+                    <div>
+                      <div className="panel-title">État des agents</div>
+                      <div className="stat-sub">Modules configurés dans l’orchestrateur</div>
+                    </div>
+                  </div>
+                  <div className="agent-grid">
+                    {agentStates.map(([label, state]) => (
+                      <div className="agent-row" key={label}>
+                        <span>{label}</span>
+                        <span className="agent-status">{state}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
                 <div className="panel recent-panel">
                   <div className="panel-header">
                     <div className="panel-title">Activité récente</div>
@@ -935,11 +930,8 @@ export default function Home() {
                   </div>
                 </div>
               </section>
-            </div>
-          </div>
-        </section>
       </div>
-    </main>
+    </AppShell>
   );
 }
 
@@ -1081,9 +1073,9 @@ function activityLabel(log: AuditLog) {
   const message = stringValue(log.message);
   const eventType = stringValue(log.event_type);
 
-  if (title) return title;
-  if (message) return message;
-  if (eventType) return eventType.replaceAll("_", " ");
+  if (title) return displayAuditLabel(title);
+  if (message) return displayAuditLabel(message);
+  if (eventType) return displayAuditLabel(eventType);
   return "Événement d’audit enregistré";
 }
 
@@ -1125,6 +1117,34 @@ function relativeTime(value?: string) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat("fr-FR").format(value);
+}
+
+function countBlockedActions(logs: AuditLog[]) {
+  return logs.filter((log) => {
+    const status = stringValue(log.status).toLowerCase();
+    const eventType = stringValue(log.event_type).toLowerCase();
+    return (
+      status.includes("blocked") ||
+      status.includes("denied") ||
+      eventType.includes("permission_denied") ||
+      eventType.includes("unsupported_action")
+    );
+  }).length;
+}
+
+function displayAuditLabel(value: string) {
+  const normalized = value.trim();
+  const labels: Record<string, string> = {
+    answer_question: "Question répondue",
+    odoo_read: "Lecture Odoo",
+    approval_required: "Validation requise",
+    permission_denied: "Accès refusé",
+    unsupported_action: "Action non prise en charge",
+    official_web_ingestion: "Ingestion site officiel",
+    ai_model_call: "Appel modèle IA",
+  };
+
+  return labels[normalized] || normalized.replaceAll("_", " ");
 }
 
 function stringValue(value: unknown) {

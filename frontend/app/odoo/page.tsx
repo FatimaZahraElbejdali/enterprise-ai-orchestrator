@@ -1,21 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import Image from "next/image";
 import { FormEvent, useEffect, useState } from "react";
+import AppShell from "@/components/AppShell";
 import {
   API_ERROR_MESSAGE,
   API_BASE_URL,
   AuthUser,
   BACKEND_UNREACHABLE_MESSAGE,
-  authHeaders,
+  apiFetch,
   clearAuth,
   getDepartmentLabel,
   getRoleLabel,
   getStoredUser,
-  handleAuthFailure,
   hasAnyPermission,
   requireAuth,
+  validateAuthSession,
 } from "@/lib/api";
 
 type OdooStatus = {
@@ -54,15 +54,14 @@ export default function OdooPage() {
     setLoadingStatus(true);
 
     try {
-      const res = await fetch(`${API_BASE_URL}/odoo/status`, {
+      const res = await apiFetch(`${API_BASE_URL}/odoo/status`, {
         cache: "no-store",
-        headers: authHeaders(),
       });
 
       if (res.ok) {
         setStatus(await res.json());
       } else {
-        setError(handleAuthFailure(res.status) || API_ERROR_MESSAGE);
+        setError(API_ERROR_MESSAGE);
       }
     } finally {
       setLoadingStatus(false);
@@ -81,16 +80,15 @@ export default function OdooPage() {
     setProduct(null);
 
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE_URL}/odoo/stock/${encodeURIComponent(cleanName)}`,
         {
           cache: "no-store",
-          headers: authHeaders(),
         }
       );
 
       if (!res.ok) {
-        throw new Error(handleAuthFailure(res.status) || API_ERROR_MESSAGE);
+        throw new Error(API_ERROR_MESSAGE);
       }
 
       const data = await res.json();
@@ -110,6 +108,7 @@ export default function OdooPage() {
 
   useEffect(() => {
     if (!requireAuth()) return;
+    void validateAuthSession("/odoo");
 
     const timer = window.setTimeout(() => {
       void loadStatus();
@@ -121,74 +120,19 @@ export default function OdooPage() {
   const connected = Boolean(status?.connected);
 
   return (
-    <main className="pageShell">
-      <aside className="sidebar">
-        <div>
-          <div className="brand">
-            <div className="brandMark">
-              <Image
-                className="brandLogo"
-                src="/jamain-baco-logo.png"
-                alt="Jamain Baco"
-                width={48}
-                height={48}
-              />
-            </div>
-            <div>
-              <p>Jamain Baco</p>
-              <h1>Orchestrateur IA</h1>
-            </div>
-          </div>
-
-          <nav className="nav">
-            <Link href="/">Tableau de bord</Link>
-            <Link href="/chat">Console de chat</Link>
-            <Link href="/odoo" className="active">
-              Odoo
-            </Link>
-            {hasAnyPermission(currentUser, ["all", "view_approvals", "approve_odoo_actions"]) && (
-              <Link href="/approvals">Validations</Link>
-            )}
-            {hasAnyPermission(currentUser, ["all", "view_audit_logs"]) && (
-              <Link href="/logs">Journaux d’audit</Link>
-            )}
-          </nav>
-        </div>
-
-        <div className="sidebarFooter">
-          <p>{currentUser?.email || "Utilisateur connecté"}</p>
-          <span>Rôle : {getRoleLabel(currentUser)}</span>
-          <span>Département : {getDepartmentLabel(currentUser)}</span>
-          <button className="logoutButton" type="button" onClick={handleLogout}>
-            Se déconnecter
-          </button>
-        </div>
-      </aside>
-
-      <section className="content">
-        <header className="header">
-          <div>
-            <p className="eyebrow">Intégration ERP</p>
-            <h2>Console Odoo</h2>
-            <p className="subtitle">
-              Consultation sécurisée des données produits Odoo. Les opérations
-              de lecture sont exécutées directement, tandis que les modifications
-              restent soumises à validation humaine.
-            </p>
-          </div>
-
-          <span className={`connectionBadge ${connected ? "ok" : "bad"}`}>
-            <span />
-            {connected ? "Connecté" : "Non connecté"}
-          </span>
-        </header>
-
+    <AppShell
+      active="odoo"
+      eyebrow="Intégration ERP"
+      title="Console Odoo"
+      subtitle="Consultation sécurisée des données Odoo. Les lectures sont directes, les écritures restent soumises à validation humaine."
+      badges={[{ label: connected ? "Connecté" : "Non connecté", tone: connected ? "success" : "danger" }]}
+    >
         <section className="topGrid">
           <div className="panel">
             <div className="panelHeader">
               <div>
                 <p className="eyebrow">État système</p>
-                <h3>Connexion Odoo</h3>
+                <h3>Connexion & environnement</h3>
               </div>
             </div>
 
@@ -196,28 +140,56 @@ export default function OdooPage() {
 
             {!loadingStatus && (
               <div className="details">
-                <Detail
-                  label="Statut"
-                  value={connected ? "Connecté" : "Non connecté"}
-                />
-                <Detail
-                  label="Message"
-                  value={connected ? "Odoo connected" : "Odoo indisponible"}
-                />
-              </div>
-            )}
-          </div>
+	                <Detail
+	                  label="Statut"
+	                  value={connected ? "Connecté" : "Non connecté"}
+	                />
+	                <Detail
+	                  label="Hôte"
+	                  value={connected ? "Serveur Odoo configuré" : "Non disponible"}
+	                />
+	                <Detail
+	                  label="Base de données"
+	                  value={connected ? "Base de test" : "Non disponible"}
+	                />
+	                <Detail
+	                  label="Utilisateur API"
+	                  value={connected ? "Compte technique" : "Non disponible"}
+	                />
+	                <Detail
+	                  label="Message"
+	                  value={connected ? "Connexion opérationnelle" : "Odoo indisponible"}
+	                />
+	              </div>
+	            )}
+	          </div>
 
-          <div className="panel">
-            <div className="panelHeader">
-              <div>
-                <p className="eyebrow">Consultation</p>
-                <h3>Recherche produit</h3>
-              </div>
-            </div>
+	          <div className="panel">
+	            <div className="panelHeader">
+	              <div>
+	                <p className="eyebrow">Sécurité</p>
+	                <h3>Mode d’accès</h3>
+	              </div>
+	            </div>
 
-            <form onSubmit={searchProduct}>
-              <label htmlFor="productName">Nom du produit</label>
+	            <div className="accessList">
+	              <div className="accessItem ok">Lectures Odoo: exécution directe, sans validation.</div>
+	              <div className="accessItem warn">Écritures Odoo: interception obligatoire + validation humaine.</div>
+	              <div className="accessItem warn">Actions sensibles: journalisées et soumises à approbation.</div>
+	            </div>
+	          </div>
+	        </section>
+
+	        <section className="panel productSearchPanel">
+	          <div className="panelHeader">
+	            <div>
+	              <p className="eyebrow">Consultation</p>
+	              <h3>Recherche produit</h3>
+	            </div>
+	          </div>
+
+	            <form onSubmit={searchProduct}>
+	              <label htmlFor="productName">Nom du produit</label>
               <input
                 id="productName"
                 value={productName}
@@ -243,9 +215,8 @@ export default function OdooPage() {
                 aucune validation n’est requise et aucune donnée Odoo n’est
                 modifiée.
               </p>
-            </div>
-          </div>
-        </section>
+	            </div>
+	        </section>
 
         {error && <div className="errorBox">{error}</div>}
 
@@ -262,7 +233,7 @@ export default function OdooPage() {
               </div>
 
               <span className="sourceBadge">
-                {product.source || "real_odoo"}
+	                {product.source ? "Connecteur Odoo sécurisé" : "Odoo"}
               </span>
             </div>
 
@@ -312,8 +283,6 @@ export default function OdooPage() {
             )}
           </section>
         )}
-      </section>
-
       <style jsx global>{`
         * {
           box-sizing: border-box;
@@ -419,6 +388,22 @@ export default function OdooPage() {
           line-height: 1.5;
         }
 
+        .logoutButton {
+          margin-top: 14px;
+          width: 100%;
+          min-height: 40px;
+          border: 1px solid rgba(255, 255, 255, 0.18);
+          border-radius: 8px;
+          background: #ffffff;
+          color: #123f8c;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .logoutButton:hover {
+          background: #eef4ff;
+        }
+
         .content {
           padding: 32px;
         }
@@ -514,6 +499,44 @@ export default function OdooPage() {
           margin: 6px 0 0;
           font-size: 22px;
           color: #101827;
+        }
+
+        .accessList {
+          display: grid;
+          gap: 0;
+          border-top: 1px solid #e5e7eb;
+        }
+
+        .accessItem {
+          min-height: 48px;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          border-bottom: 1px solid #e5e7eb;
+          color: #334155;
+          font-size: 14px;
+          font-weight: 800;
+        }
+
+        .accessItem:last-child {
+          border-bottom: 0;
+        }
+
+        .accessItem::before {
+          content: "";
+          width: 8px;
+          height: 8px;
+          border-radius: 999px;
+          background: currentColor;
+          flex: 0 0 auto;
+        }
+
+        .accessItem.ok {
+          color: #13754a;
+        }
+
+        .accessItem.warn {
+          color: #a35b13;
         }
 
         .details {
@@ -692,7 +715,7 @@ export default function OdooPage() {
           }
         }
       `}</style>
-    </main>
+    </AppShell>
   );
 }
 
