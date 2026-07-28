@@ -1,5 +1,16 @@
 from orchestrator.classifier_router import classify_message
-from models.openai_router import classify_with_openai_router
+from models.openai_router import OPENAI_ROUTER_PROMPT, classify_with_openai_router
+
+
+def test_openai_router_prompt_contains_business_routing_guidance():
+    assert "First identify the domain" in OPENAI_ROUTER_PROMPT
+    assert "factures clients" in OPENAI_ROUTER_PROMPT
+    assert "move_type=out_invoice" in OPENAI_ROUTER_PROMPT
+    assert "mois 5 2026" in OPENAI_ROUTER_PROMPT
+    assert "invoice_date for invoices" in OPENAI_ROUTER_PROMPT
+    assert "Odoo writes must never execute directly" in OPENAI_ROUTER_PROMPT
+    assert "orchestrator/system help" in OPENAI_ROUTER_PROMPT
+    assert "Never invent Odoo data" in OPENAI_ROUTER_PROMPT
 
 
 def _parsed_route(

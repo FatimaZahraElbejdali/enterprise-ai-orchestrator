@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 import app as app_module
 from app import app
+from orchestrator import auth as auth_module
 from orchestrator.approval_store import get_approvals
 from tests.auth_helpers import auth_headers
 from tests.semantic_helpers import make_semantic_request
@@ -58,6 +59,27 @@ def test_auth_me_returns_current_user_for_valid_token():
     assert data["role"] == "admin"
     assert data["department"] == "administration"
     assert "all" in data["permissions"]
+
+
+def test_demo_token_survives_process_local_session_cache_loss():
+    login_response = client.post(
+        "/auth/login",
+        json={
+            "email": "admin@company.local",
+            "password": "admin123",
+        },
+    )
+    token = login_response.json()["access_token"]
+
+    auth_module._sessions.clear()
+
+    response = client.get(
+        "/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["email"] == "admin@company.local"
 
 
 def test_auth_me_rejects_invalid_token():

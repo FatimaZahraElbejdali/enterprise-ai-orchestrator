@@ -2317,6 +2317,7 @@ def normalize_stock_result(raw_result: dict, action: str):
         "available_stock": raw_result.get("stock_quantity"),
         "forecast_stock": raw_result.get("forecast_quantity"),
         "sale_price": raw_result.get("sale_price"),
+        "currency": raw_result.get("currency") or "MAD",
         "unit": raw_result.get("unit"),
         "warehouse": raw_result.get("warehouse"),
         "source": raw_result.get("source", "real_odoo"),
@@ -3633,6 +3634,12 @@ def build_dynamic_read_response(message: str, parsed_action: dict, raw_result: d
 
     operation = (raw_result.get("read_plan") or {}).get("operation")
     count = raw_result.get("record_count") or 0
+    _debug_odoo_query(
+        raw_result.get("model"),
+        operation,
+        raw_result.get("search_domain") or raw_result.get("domain_used") or [],
+        count,
+    )
     message_text, normalized_read, synthesis = _synthesize_read_message(
         message,
         parsed_action,
@@ -3659,6 +3666,16 @@ def build_dynamic_read_response(message: str, parsed_action: dict, raw_result: d
         "data": raw_result,
         "result": raw_result,
     }, parsed_action, "odoo_generic_read")
+
+
+def _debug_odoo_query(model: str | None, operation: str | None, domain: list | None, result_count: int | None):
+    if str(os.getenv("ODOO_QUERY_DEBUG", "")).strip().lower() not in {"1", "true", "yes"}:
+        return
+
+    print(
+        "[odoo_query] "
+        f"model={model}, operation={operation}, domain={domain or []}, count/result_count={result_count or 0}"
+    )
 
 
 def execute_analytic_account_read(message: str, parsed_action: dict):
@@ -3843,11 +3860,11 @@ def _format_customer_invoice_summary(raw_result: dict, filters: list) -> str:
 
     for record in records[:10]:
         reference = record.get("reference") or record.get("document") or record.get("name") or f"ID {record.get('id')}"
-        partner = record.get("partner") or "client non renseigné"
-        date = record.get("date") or "date non renseignée"
+        partner = record.get("partner") or record.get("partner_id") or "client non renseigné"
+        date = record.get("date") or record.get("invoice_date") or "date non renseignée"
         amount = record.get("amount_total")
-        currency = record.get("currency") or ""
-        status = record.get("status") or "statut non renseigné"
+        currency = record.get("currency") or record.get("currency_id") or "MAD"
+        status = record.get("status") or record.get("state") or "statut non renseigné"
         payment_state = record.get("payment_state") or ""
         amount_text = (
             f"{amount} {currency}".strip()
@@ -3862,14 +3879,47 @@ def _format_customer_invoice_summary(raw_result: dict, filters: list) -> str:
 
 def execute_customer_invoice_list(message: str, parsed_action: dict):
     filters = parsed_action.get("filters") if isinstance(parsed_action.get("filters"), list) else []
+    requested_fields = (
+        parsed_action.get("requested_fields")
+        if isinstance(parsed_action.get("requested_fields"), list)
+        else []
+    )
+    read_plan = {
+        "operation": parsed_action.get("operation") or "list",
+        "business_object": parsed_action.get("business_object") or "customer_invoices",
+        "model": parsed_action.get("model") or parsed_action.get("target_model") or "account.move",
+        "model_hint": parsed_action.get("model") or parsed_action.get("target_model") or "account.move",
+        "model_candidates": parsed_action.get("model_candidates") or ["account.move"],
+        "filters": filters,
+        "requested_fields": requested_fields or [
+            "name",
+            "partner_id",
+            "invoice_date",
+            "amount_total",
+            "state",
+            "payment_state",
+            "currency_id",
+        ],
+        "sort": parsed_action.get("sort") if isinstance(parsed_action.get("sort"), list) else [],
+        "limit": parsed_action.get("limit") or 10,
+        "query": parsed_action.get("query"),
+        "catalog_read": True,
+        "catalog_entry": parsed_action.get("catalog_entry") or "customer_invoices",
+        "period": parsed_action.get("period") if isinstance(parsed_action.get("period"), dict) else None,
+    }
     raw_result = unwrap_tool_response(
         execute_tool(
-            "odoo_list_customer_invoices",
-            filters=filters,
-            limit=parsed_action.get("limit") or 10,
+            "odoo_generic_read",
+            read_plan=read_plan,
         )
     )
     found = bool(isinstance(raw_result, dict) and raw_result.get("found"))
+    _debug_odoo_query(
+        raw_result.get("model") if isinstance(raw_result, dict) else "account.move",
+        read_plan.get("operation"),
+        raw_result.get("search_domain") if isinstance(raw_result, dict) else [],
+        raw_result.get("record_count") if isinstance(raw_result, dict) else 0,
+    )
     message_text = _format_customer_invoice_summary(
         raw_result if isinstance(raw_result, dict) else {},
         filters,
@@ -3899,19 +3949,28 @@ def execute_customer_invoice_list(message: str, parsed_action: dict):
         "approval_required": False,
         "status": "completed" if found else "not_found",
         "message": message_text,
-        "tool_used": "odoo_list_customer_invoices",
+        "tool_used": "odoo_generic_read",
         "capability": "odoo.customer_invoice_list",
         "target_system": "odoo",
         "odoo_model": "account.move",
         "selected_model": "account.move",
         "filters": filters,
-        "domain_used": raw_result.get("domain_used") if isinstance(raw_result, dict) else [],
-        "fields_used": raw_result.get("fields_used") if isinstance(raw_result, dict) else [],
+        "read_plan": read_plan,
+        "domain_used": (
+            raw_result.get("search_domain") or raw_result.get("domain_used")
+            if isinstance(raw_result, dict)
+            else []
+        ),
+        "fields_used": (
+            raw_result.get("fields") or raw_result.get("fields_used")
+            if isinstance(raw_result, dict)
+            else []
+        ),
         "count_returned": raw_result.get("record_count") if isinstance(raw_result, dict) else 0,
         "failure_reason": raw_result.get("failure_reason") if isinstance(raw_result, dict) else "invalid_result",
         "data": raw_result,
         "result": raw_result,
-    }, parsed_action, "list_customer_invoices")
+    }, parsed_action, "odoo_generic_read")
 
 
 def format_bank_accounting_summary(raw_result: dict, keyword: str) -> str:

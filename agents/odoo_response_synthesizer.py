@@ -21,7 +21,35 @@ Generic grounding rules:
 - If data is a sample or truncated, say so.
 - Do not expose raw JSON, tool names, model internals, prompts, or implementation
   details unless the user explicitly asks.
+- For Odoo monetary values, use the provided record currency. If no currency is
+  provided, default to MAD/DH. Never choose EUR/euros unless the normalized
+  result explicitly contains EUR.
 """
+
+DEFAULT_ODOO_CURRENCY = "MAD"
+EURO_SYMBOL = chr(8364)
+
+MONETARY_FIELDS = {
+    "amount",
+    "amount_currency",
+    "amount_residual",
+    "amount_tax",
+    "amount_total",
+    "amount_untaxed",
+    "balance",
+    "credit",
+    "debit",
+    "list_price",
+    "new_price",
+    "old_price",
+    "price",
+    "price_subtotal",
+    "price_total",
+    "price_unit",
+    "requested_price",
+    "sale_price",
+    "standard_price",
+}
 
 
 def _as_dict(value):
@@ -138,7 +166,7 @@ def normalize_odoo_read_result(
     query_context: dict | None = None,
 ) -> dict:
     raw_result = _as_dict(raw_result)
-    records = _records_from_raw(raw_result)
+    records = _normalize_currency_metadata(_records_from_raw(raw_result))
     groups = _as_list(raw_result.get("groups"))
     normalized_operation = _infer_operation(raw_result, operation)
     status = _status_from_raw(raw_result, records, groups)
@@ -172,6 +200,108 @@ def _display_value(value):
     return value
 
 
+def _currency_label(value) -> str | None:
+    if isinstance(value, dict):
+        label = _first_present(
+            value.get("display_name"),
+            value.get("name"),
+            value.get("label"),
+            value.get("code"),
+        )
+        return str(label).strip().upper() if label not in (None, "") else None
+
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return str(value[1]).strip().upper()
+
+    if isinstance(value, str) and value.strip():
+        return value.strip().upper()
+
+    return None
+
+
+def _record_currency(record: dict) -> str:
+    return (
+        _currency_label(record.get("currency"))
+        or _currency_label(record.get("currency_id"))
+        or DEFAULT_ODOO_CURRENCY
+    )
+
+
+def _is_monetary_field(field_name: str) -> bool:
+    return str(field_name or "").strip().lower() in MONETARY_FIELDS
+
+
+def _format_monetary_value(value, currency: str) -> str:
+    if value in (None, ""):
+        return ""
+
+    return f"{value} {currency or DEFAULT_ODOO_CURRENCY}"
+
+
+def _display_record_value(field_name: str, value, record: dict):
+    if _is_monetary_field(field_name):
+        return _format_monetary_value(value, _record_currency(record))
+
+    return _display_value(value)
+
+
+def _record_has_monetary_value(record: dict) -> bool:
+    return any(
+        _is_monetary_field(key) and value not in (None, "")
+        for key, value in record.items()
+    )
+
+
+def _with_default_currency(record: dict) -> dict:
+    if not isinstance(record, dict):
+        return record
+
+    if not _record_has_monetary_value(record):
+        return record
+
+    if record.get("currency") or record.get("currency_id"):
+        return record
+
+    return {**record, "currency": DEFAULT_ODOO_CURRENCY}
+
+
+def _normalize_currency_metadata(records: list[dict]) -> list[dict]:
+    return [
+        _with_default_currency(record)
+        if isinstance(record, dict)
+        else record
+        for record in records
+    ]
+
+
+def _explicit_currency_codes(normalized_result: dict) -> set[str]:
+    codes = set()
+
+    for record in _as_list(normalized_result.get("records")):
+        if not isinstance(record, dict):
+            continue
+
+        code = (
+            _currency_label(record.get("currency"))
+            or _currency_label(record.get("currency_id"))
+        )
+
+        if code:
+            codes.add(code)
+
+    return codes
+
+
+def _sanitize_generated_currency(response: str, normalized_result: dict) -> str:
+    if not response:
+        return response
+
+    if "EUR" in _explicit_currency_codes(normalized_result):
+        return response
+
+    return response.replace(EURO_SYMBOL, DEFAULT_ODOO_CURRENCY)
+
+
 def _record_label(record: dict):
     return str(
         _first_present(
@@ -195,7 +325,7 @@ def _summarize_record(record: dict):
         if value in (None, "", [], {}):
             continue
 
-        parts.append(f"{key}: {_display_value(value)}")
+        parts.append(f"{key}: {_display_record_value(key, value, record)}")
 
         if len(parts) >= 8:
             break
@@ -276,7 +406,7 @@ def synthesize_odoo_read_response(
 
     if response:
         return {
-            "response": response,
+            "response": _sanitize_generated_currency(response, normalized_result),
             "used_llm": True,
             "provider": llm_result.get("provider"),
             "model": llm_result.get("model"),

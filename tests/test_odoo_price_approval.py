@@ -1192,6 +1192,57 @@ def test_product_details_uses_stock_resolver_with_clean_product_query(monkeypatc
     assert result["data"]["sale_price"] == 4.0
 
 
+def test_product_sale_price_response_uses_mad_not_euro(monkeypatch):
+    def fake_execute_tool(tool_name, **kwargs):
+        return {
+            "success": True,
+            "result": {
+                "success": True,
+                "source": "real_odoo",
+                "model": "product.product",
+                "product": kwargs["product_name"],
+                "found": True,
+                "internal_reference": "PDSBACCLN0001",
+                "stock_quantity": 12,
+                "forecast_quantity": 14,
+                "sale_price": 10.0,
+                "unit": "Unité(s)",
+            },
+        }
+
+    monkeypatch.setattr(
+        "agents.odoo_agent.parse_odoo_action_with_openai",
+        lambda message: {
+            "intent": "odoo",
+            "action": "check_price",
+            "business_action": "product_details",
+            "risk": "low",
+            "requires_approval": False,
+            "target_model": "product.template",
+            "record_query": "BACO CLEAN",
+            "confidence": 0.9,
+            "parser_source": "test",
+            "parser_error": None,
+        },
+    )
+    monkeypatch.setattr("agents.odoo_agent.execute_tool", fake_execute_tool)
+    monkeypatch.setattr("agents.odoo_agent.log_request", lambda data: None)
+    monkeypatch.setattr(
+        "agents.odoo_response_synthesizer.generate_response",
+        lambda *args, **kwargs: {
+            "success": True,
+            "response": f"Le prix de vente de BACO CLEAN est de 10.0 {chr(8364)} par Unité(s).",
+        },
+    )
+
+    result = run_odoo_agent("Quel est le prix de vente de BACO CLEAN ?")
+
+    assert result["status"] == "completed"
+    assert "10.0 MAD" in result["message"]
+    assert chr(8364) not in result["message"]
+    assert result["data"]["currency"] == "MAD"
+
+
 def test_inventory_product_search_calls_odoo_with_extracted_keyword(monkeypatch):
     captured = {}
 
@@ -1499,10 +1550,11 @@ def test_customer_invoice_listing_uses_safe_read_tool(monkeypatch):
         },
     )
 
-    assert captured["tool_name"] == "odoo_list_customer_invoices"
-    assert captured["kwargs"]["filters"] == filters
+    assert captured["tool_name"] == "odoo_generic_read"
+    assert captured["kwargs"]["read_plan"]["model"] == "account.move"
+    assert captured["kwargs"]["read_plan"]["filters"] == filters
     assert result["status"] == "completed"
-    assert result["tool_used"] == "odoo_list_customer_invoices"
+    assert result["tool_used"] == "odoo_generic_read"
     assert result["capability"] == "odoo.customer_invoice_list"
     assert "INV/2026/005" in result["message"]
     assert "Client Atlas" in result["message"]

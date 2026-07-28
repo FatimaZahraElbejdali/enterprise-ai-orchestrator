@@ -69,6 +69,107 @@ def test_search_one_result_uses_returned_record_without_static_success(monkeypat
     assert "Document consulté" not in result["response"]
 
 
+def test_product_price_defaults_to_mad_when_currency_missing(monkeypatch):
+    monkeypatch.setattr(
+        synthesizer,
+        "generate_response",
+        lambda *args, **kwargs: {"success": False, "response": "", "error": "provider_unavailable"},
+    )
+    normalized = synthesizer.normalize_odoo_read_result(
+        {
+            "status": "completed",
+            "model": "product.product",
+            "record_count": 1,
+            "record": {
+                "id": 3471,
+                "name": "BACO CLEAN",
+                "sale_price": 10.0,
+                "unit": "Unité(s)",
+            },
+        },
+        operation="read",
+    )
+
+    result = synthesizer.synthesize_odoo_read_response(
+        user_message="Quel est le prix de vente de BACO CLEAN ?",
+        semantic_request={"operation": "read", "business_object": "product"},
+        normalized_result=normalized,
+    )
+
+    assert "10.0 MAD" in result["response"]
+    assert chr(8364) not in result["response"]
+
+
+def test_generated_odoo_price_response_cannot_use_euro_without_eur_currency(monkeypatch):
+    monkeypatch.setattr(
+        synthesizer,
+        "generate_response",
+        lambda *args, **kwargs: {
+            "success": True,
+            "response": f"Le prix de vente de BACO CLEAN est de 10.0 {chr(8364)} par Unité(s).",
+            "provider": "openai",
+            "model": "gpt-4.1-mini",
+        },
+    )
+    normalized = synthesizer.normalize_odoo_read_result(
+        {
+            "status": "completed",
+            "model": "product.product",
+            "record_count": 1,
+            "record": {
+                "id": 3471,
+                "name": "BACO CLEAN",
+                "sale_price": 10.0,
+                "unit": "Unité(s)",
+            },
+        },
+        operation="read",
+    )
+
+    result = synthesizer.synthesize_odoo_read_response(
+        user_message="Quel est le prix de vente de BACO CLEAN ?",
+        semantic_request={"operation": "read", "business_object": "product"},
+        normalized_result=normalized,
+    )
+
+    assert result["used_llm"] is True
+    assert "10.0 MAD" in result["response"]
+    assert chr(8364) not in result["response"]
+
+
+def test_generated_odoo_price_response_keeps_explicit_eur_currency(monkeypatch):
+    monkeypatch.setattr(
+        synthesizer,
+        "generate_response",
+        lambda *args, **kwargs: {
+            "success": True,
+            "response": f"Le prix est de 10.0 {chr(8364)}.",
+        },
+    )
+    normalized = synthesizer.normalize_odoo_read_result(
+        {
+            "status": "completed",
+            "model": "product.product",
+            "record_count": 1,
+            "record": {
+                "id": 1,
+                "name": "Export EUR",
+                "sale_price": 10.0,
+                "currency": "EUR",
+            },
+        },
+        operation="read",
+    )
+
+    result = synthesizer.synthesize_odoo_read_response(
+        user_message="Quel est le prix ?",
+        semantic_request={"operation": "read", "business_object": "product"},
+        normalized_result=normalized,
+    )
+
+    assert chr(8364) in result["response"]
+
+
 def test_search_zero_results_reports_no_match_without_inventing(monkeypatch):
     monkeypatch.setattr(
         synthesizer,

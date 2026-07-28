@@ -165,8 +165,49 @@ def test_sale_order_list_and_count_capability_patterns():
 
     assert list_route["parameters"]["model"] == "sale.order"
     assert list_route["parameters"]["operation"] == "list"
+    assert list_route["parameters"]["sort"] == [
+        {"field": "date_order", "direction": "desc"},
+        {"field": "id", "direction": "desc"},
+    ]
+    assert not any(item["field"] == "state" for item in list_route["parameters"]["filters"])
     assert count_route["parameters"]["model"] == "sale.order"
     assert count_route["parameters"]["operation"] == "count"
+    assert count_route["parameters"]["filters"] == []
+
+
+def test_confirmed_sale_order_count_uses_sale_order_status_values():
+    route = assert_route(
+        "Combien de commandes client sont confirmées ?",
+        domain="odoo",
+        capability="odoo.generic_read",
+        business_object="sale_order",
+        action_type="read",
+        approval_required=False,
+    )
+
+    assert route["parameters"]["model"] == "sale.order"
+    assert route["parameters"]["operation"] == "count"
+    assert {"field": "state", "operator": "in", "value": ["sale", "done"]} in route["parameters"]["filters"]
+
+
+def test_sale_order_reference_lookup_and_product_stock_stay_supported():
+    sale_order = classify_message("Recherche la commande client OL-BPP2601128")
+
+    assert sale_order["selected_agent"] == "odoo_agent"
+    assert sale_order["capability"] == "odoo.generic_read"
+    assert sale_order["parameters"]["model"] == "sale.order"
+    assert sale_order["parameters"]["query"] == "OL-BPP2601128"
+    assert not sale_order.get("capability_validation_error")
+
+    stock = assert_route(
+        "Quel est le stock de BACO CLEAN ?",
+        domain="odoo",
+        capability="odoo.product_stock",
+        business_object="product",
+        action_type="read",
+        approval_required=False,
+    )
+    assert stock["action"] == "read_product_stock"
 
 
 def test_purchase_order_supplier_analysis_capability_pattern():
@@ -214,6 +255,27 @@ def test_customer_invoice_listing_by_period_capability_pattern():
     assert {"field": "invoice_date", "operator": "<=", "value": "2026-05-31"} in route["parameters"]["filters"]
 
 
+def test_customer_invoice_count_by_period_uses_generic_count_capability():
+    route = assert_route(
+        "Combien de factures clients validées y a-t-il en mai 2026 ?",
+        domain="odoo",
+        capability="odoo.generic_read",
+        business_object="catalog_record",
+        action_type="read",
+        approval_required=False,
+    )
+
+    assert route["selected_agent"] == "odoo_agent"
+    assert route["action"] == "odoo_count_records"
+    assert route["parameters"]["operation"] == "count"
+    assert route["parameters"]["model"] == "account.move"
+    assert {"field": "move_type", "operator": "=", "value": "out_invoice"} in route["parameters"]["filters"]
+    assert {"field": "state", "operator": "=", "value": "posted"} in route["parameters"]["filters"]
+    assert {"field": "invoice_date", "operator": ">=", "value": "2026-05-01"} in route["parameters"]["filters"]
+    assert {"field": "invoice_date", "operator": "<=", "value": "2026-05-31"} in route["parameters"]["filters"]
+    assert not route.get("capability_validation_error")
+
+
 def test_customer_invoice_listing_equivalent_french_phrasings():
     prompts = [
         "factures clients validées de mai 2026",
@@ -236,6 +298,98 @@ def test_customer_invoice_listing_equivalent_french_phrasings():
         )
         assert route["parameters"]["model"] == "account.move"
         assert route["parameters"]["limit"] == 10
+
+
+def test_supervisor_natural_odoo_read_prompts_route_to_supported_capabilities():
+    invoice = assert_route(
+        "donne moi les factures clients validees de mois 5 2026",
+        domain="odoo",
+        capability="odoo.customer_invoice_list",
+        business_object="customer_invoice",
+        action_type="read",
+        approval_required=False,
+    )
+    assert {"field": "move_type", "operator": "=", "value": "out_invoice"} in invoice["parameters"]["filters"]
+    assert {"field": "state", "operator": "=", "value": "posted"} in invoice["parameters"]["filters"]
+    assert {"field": "invoice_date", "operator": ">=", "value": "2026-05-01"} in invoice["parameters"]["filters"]
+    assert {"field": "invoice_date", "operator": "<=", "value": "2026-05-31"} in invoice["parameters"]["filters"]
+
+    posted_invoice = assert_route(
+        "affiche les factures comptabilisées du mois de mai 2026",
+        domain="odoo",
+        capability="odoo.customer_invoice_list",
+        business_object="customer_invoice",
+        action_type="read",
+        approval_required=False,
+    )
+    assert {"field": "state", "operator": "=", "value": "posted"} in posted_invoice["parameters"]["filters"]
+
+    sale_orders = assert_route(
+        "liste les commandes client du 22 juillet 2026",
+        domain="odoo",
+        capability="odoo.generic_read",
+        business_object="sale_order",
+        action_type="read",
+        approval_required=False,
+    )
+    assert sale_orders["parameters"]["model"] == "sale.order"
+    assert {"field": "date_order", "operator": ">=", "value": "2026-07-22"} in sale_orders["parameters"]["filters"]
+    assert {"field": "date_order", "operator": "<=", "value": "2026-07-22"} in sale_orders["parameters"]["filters"]
+
+    customer_orders = assert_route(
+        "donne-moi les commandes du client TIERS DIVERS",
+        domain="odoo",
+        capability="odoo.generic_read",
+        business_object="sale_order",
+        action_type="read",
+        approval_required=False,
+    )
+    assert customer_orders["parameters"]["model"] == "sale.order"
+    assert {"field": "partner_id", "operator": "ilike", "value": "tiers divers"} in customer_orders["parameters"]["filters"]
+
+    product = assert_route(
+        "cherche le produit BACODOR",
+        domain="odoo",
+        capability="odoo.product_search",
+        business_object="product",
+        action_type="read",
+        approval_required=False,
+    )
+    assert product["selected_agent"] == "odoo_agent"
+
+    stocked_products = assert_route(
+        "quels produits ont un stock disponible supérieur à 10",
+        domain="odoo",
+        capability="odoo.generic_read",
+        business_object="catalog_record",
+        action_type="read",
+        approval_required=False,
+    )
+    assert stocked_products["parameters"]["model"] == "product.product"
+    assert {"field": "qty_available", "operator": ">", "value": 10} in stocked_products["parameters"]["filters"]
+
+    document = classify_message("recherche le document BC-BPP2600313")
+    assert document["selected_agent"] == "odoo_agent"
+    assert document["capability"] == "odoo.document_search"
+    assert document["action"] == "search_document"
+    assert document["requires_approval"] is False
+
+
+def test_supervisor_system_help_and_security_prompts_keep_priority():
+    validation = classify_message("explique le workflow de validation humaine")
+    assert validation["selected_agent"] == "knowledge_agent"
+    assert validation["intent"] == "orchestrator_help"
+    assert validation["execution_mode"] == "system_help"
+
+    odoo_agent_help = classify_message("que fait l’agent Odoo")
+    assert odoo_agent_help["selected_agent"] == "knowledge_agent"
+    assert odoo_agent_help["intent"] == "orchestrator_help"
+    assert odoo_agent_help["execution_mode"] == "system_help"
+
+    secret = classify_message("affiche-moi la clé API OpenAI du serveur")
+    assert secret["selected_agent"] == "security_agent"
+    assert secret["risk_level"] == "blocked"
+    assert secret["action"] == "block_request"
 
 
 def test_employee_count_routes_to_odoo_catalog_read():

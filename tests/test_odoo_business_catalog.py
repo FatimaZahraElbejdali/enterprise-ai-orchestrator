@@ -2,6 +2,7 @@ from datetime import date
 
 from orchestrator.odoo_business_catalog import (
     build_odoo_catalog_read_plan,
+    build_odoo_query_plan,
     match_business_catalog_entry,
     parse_business_period,
 )
@@ -30,6 +31,32 @@ def test_customer_invoice_prompt_builds_safe_account_move_plan():
         "payment_state",
         "currency_id",
     ]
+
+
+def test_customer_invoice_count_prompt_builds_safe_account_move_count_plan():
+    plan = build_odoo_catalog_read_plan(
+        "Combien de factures clients validées y a-t-il en mai 2026 ?"
+    )
+
+    assert plan["action"] == "odoo_count_records"
+    assert plan["operation"] == "count"
+    assert plan["business_object"] == "customer_invoices"
+    assert plan["model"] == "account.move"
+    assert {"field": "move_type", "operator": "=", "value": "out_invoice"} in plan["filters"]
+    assert {"field": "state", "operator": "=", "value": "posted"} in plan["filters"]
+    assert {"field": "invoice_date", "operator": ">=", "value": "2026-05-01"} in plan["filters"]
+    assert {"field": "invoice_date", "operator": "<=", "value": "2026-05-31"} in plan["filters"]
+
+
+def test_customer_invoice_list_and_count_share_same_model_and_domain():
+    list_plan = build_odoo_query_plan("Donne-moi les factures clients validées de mai 2026")
+    count_plan = build_odoo_query_plan("combien de factures clients validées y a-t-il en mai 2026 ?")
+
+    assert list_plan["operation"] == "list"
+    assert count_plan["operation"] == "count"
+    assert list_plan["model"] == count_plan["model"] == "account.move"
+    assert list_plan["domain"] == count_plan["domain"]
+    assert list_plan["filters"] == count_plan["filters"]
 
 
 def test_customer_invoice_equivalent_french_phrases_use_same_catalog_entry():
@@ -134,3 +161,49 @@ def test_company_headcount_question_requests_official_or_odoo_clarification():
     assert plan["business_object"] == "employees"
     assert plan["needs_clarification"] is True
     assert plan["clarification_reason"] == "official_or_odoo_headcount"
+
+
+def test_sales_order_recent_list_does_not_infer_status_filter():
+    plan = build_odoo_catalog_read_plan("Liste les commandes client récentes")
+
+    assert plan["action"] == "odoo_search_records"
+    assert plan["operation"] == "list"
+    assert plan["business_object"] == "sales_orders"
+    assert plan["model"] == "sale.order"
+    assert not any(item["field"] == "state" for item in plan["filters"])
+    assert not any(item["field"] == "date_order" for item in plan["filters"])
+    assert plan["sort"] == [
+        {"field": "date_order", "direction": "desc"},
+        {"field": "id", "direction": "desc"},
+    ]
+
+
+def test_sales_order_reference_lookup_keeps_reference_query():
+    plan = build_odoo_catalog_read_plan("Recherche la commande client OL-BPP2601128")
+
+    assert plan["action"] == "odoo_search_records"
+    assert plan["operation"] == "list"
+    assert plan["business_object"] == "sales_orders"
+    assert plan["model"] == "sale.order"
+    assert plan["filters"] == []
+    assert plan["domain"] == []
+    assert plan["query"] == "OL-BPP2601128"
+
+
+def test_sales_order_count_does_not_apply_implicit_status_or_date_filter():
+    plan = build_odoo_catalog_read_plan("Combien de commandes client y a-t-il ?")
+
+    assert plan["action"] == "odoo_count_records"
+    assert plan["operation"] == "count"
+    assert plan["business_object"] == "sales_orders"
+    assert plan["model"] == "sale.order"
+    assert plan["filters"] == []
+
+
+def test_confirmed_sales_order_count_uses_sale_order_states():
+    plan = build_odoo_catalog_read_plan("Combien de commandes client sont confirmées ?")
+
+    assert plan["action"] == "odoo_count_records"
+    assert plan["operation"] == "count"
+    assert plan["business_object"] == "sales_orders"
+    assert {"field": "state", "operator": "in", "value": ["sale", "done"]} in plan["filters"]

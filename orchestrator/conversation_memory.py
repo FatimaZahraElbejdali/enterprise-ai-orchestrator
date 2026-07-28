@@ -76,6 +76,10 @@ SENSITIVE_KEYS = {
 SAFE_MEMORY_FIELDS = [
     "last_agent",
     "last_intent",
+    "last_status",
+    "last_response_summary",
+    "last_failure_reason",
+    "last_target_system",
     "last_model",
     "last_business_object",
     "last_action",
@@ -572,23 +576,26 @@ class ConversationMemory:
         document_memory_worthy = self._is_memory_worthy_document_result(result)
         odoo_read_memory = self._extract_odoo_read_memory(result)
         recent_document_candidates = self._extract_recent_document_candidates(result)
+        last_interaction_memory = self._extract_last_interaction_memory(result)
 
         if (
             not product_memory_worthy
             and not document_memory_worthy
             and not odoo_read_memory
             and not recent_document_candidates
+            and not last_interaction_memory
         ):
             return dict(self._sessions.get(session_id, {}))
 
         context = self._sessions.setdefault(session_id, {})
 
-        extracted = {
+        extracted = dict(last_interaction_memory)
+        extracted.update({
             "last_agent": _normalize_agent(
                 self._find_first(result, ["agent", "selected_agent"])
             ),
             "last_intent": self._find_first(result, ["intent"]),
-        }
+        })
 
         if product_memory_worthy:
             extracted.update({
@@ -617,6 +624,53 @@ class ConversationMemory:
 
         context["updated_at"] = _utc_timestamp()
         return dict(context)
+
+    def _extract_last_interaction_memory(self, result: Any) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            return {}
+
+        status = _clean_product_name(result.get("status")) or "completed"
+        response_summary = self._extract_response_summary(result)
+        failure_reason = _clean_product_name(self._find_first(result, ["failure_reason"]))
+        target_system = _clean_product_name(
+            self._find_first(result, ["target_system", "domain"])
+        )
+
+        if not any([status, response_summary, failure_reason, target_system]):
+            return {}
+
+        extracted: dict[str, Any] = {
+            "last_status": status,
+        }
+
+        if response_summary:
+            extracted["last_response_summary"] = response_summary
+
+        if failure_reason:
+            extracted["last_failure_reason"] = failure_reason
+
+        if target_system:
+            extracted["last_target_system"] = target_system
+
+        return extracted
+
+    def _extract_response_summary(self, result: dict) -> str | None:
+        for value in (
+            result.get("response"),
+            result.get("message"),
+            self._find_first(result.get("result"), ["answer", "message", "response"]),
+            self._find_first(result.get("data"), ["answer", "message", "response"]),
+            self._find_first(result.get("agent_result"), ["answer", "message", "response"]),
+            result.get("error"),
+        ):
+            if isinstance(value, dict):
+                value = value.get("content")
+
+            if isinstance(value, str) and value.strip():
+                normalized = " ".join(value.split())
+                return normalized[:600]
+
+        return None
 
     def _extract_odoo_read_memory(self, result: Any) -> dict[str, Any]:
         if not isinstance(result, dict):

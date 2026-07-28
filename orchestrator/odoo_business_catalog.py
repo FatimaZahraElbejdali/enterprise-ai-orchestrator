@@ -24,7 +24,7 @@ class OdooBusinessCatalogEntry:
     safe_readable_fields: tuple[str, ...]
     default_domain_filters: tuple[dict, ...] = field(default_factory=tuple)
     date_field_candidates: tuple[str, ...] = field(default_factory=tuple)
-    status_mappings: dict[str, tuple[str, tuple[str, ...]]] = field(default_factory=dict)
+    status_mappings: dict[str | tuple[str, ...], tuple[str, tuple[str, ...]]] = field(default_factory=dict)
     model_candidates: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -146,6 +146,10 @@ BUSINESS_MODEL_CATALOG: tuple[OdooBusinessCatalogEntry, ...] = (
         keywords=(
             "commande client",
             "commandes client",
+            "commande du client",
+            "commandes du client",
+            "commande de client",
+            "commandes de client",
             "commande de vente",
             "commandes de vente",
             "devis",
@@ -161,7 +165,7 @@ BUSINESS_MODEL_CATALOG: tuple[OdooBusinessCatalogEntry, ...] = (
         date_field_candidates=("date_order", "create_date"),
         status_mappings={
             "draft": ("state", ("brouillon", "draft", "devis")),
-            "sale": ("state", ("confirmee", "confirmees", "confirme", "confirmes", "sale order", "commande")),
+            ("sale", "done"): ("state", ("confirmee", "confirmees", "confirme", "confirmes", "confirmed")),
             "cancel": ("state", ("annulee", "annulees", "annule", "annules", "cancelled", "canceled", "cancel")),
         },
     ),
@@ -182,7 +186,7 @@ BUSINESS_MODEL_CATALOG: tuple[OdooBusinessCatalogEntry, ...] = (
         date_field_candidates=("date_order", "create_date"),
         status_mappings={
             "draft": ("state", ("brouillon", "draft", "demande de prix")),
-            "purchase": ("state", ("confirmee", "confirmees", "confirme", "confirmes", "purchase order", "commande")),
+            ("purchase", "done"): ("state", ("confirmee", "confirmees", "confirme", "confirmes", "confirmed")),
             "cancel": ("state", ("annulee", "annulees", "annule", "annules", "cancelled", "canceled", "cancel")),
         },
     ),
@@ -268,6 +272,11 @@ MONTH_NAMES = {
 }
 
 
+REFERENCE_PATTERN = re.compile(
+    r"\b(?=[A-Z0-9/.-]*\d)[A-Z]{1,8}[-/][A-Z0-9][A-Z0-9/.-]{3,}\b"
+)
+
+
 def match_business_catalog_entry(message: str) -> OdooBusinessCatalogEntry | None:
     text = normalize_business_text(message)
     matches = []
@@ -313,6 +322,22 @@ def parse_business_period(message: str, today: date | None = None) -> dict | Non
         return None
 
     year = int(year_match.group(1))
+
+    for label, value in MONTH_NAMES.items():
+        day_match = re.search(
+            rf"\b(?:du|le|on)?\s*(\d{{1,2}})\s+{re.escape(label)}\s+{year}\b",
+            text,
+        )
+        if day_match:
+            day = int(day_match.group(1))
+            last_day = calendar.monthrange(year, value)[1]
+            if 1 <= day <= last_day:
+                return {
+                    "start": f"{year:04d}-{value:02d}-{day:02d}",
+                    "end": f"{year:04d}-{value:02d}-{day:02d}",
+                    "period": "day",
+                }
+
     month = None
 
     for label, value in MONTH_NAMES.items():
@@ -376,12 +401,115 @@ def _status_filters(entry: OdooBusinessCatalogEntry, message: str) -> list[dict]
     for technical_value, mapping in entry.status_mappings.items():
         field_name, labels = mapping
         if any(re.search(rf"\b{re.escape(normalize_business_text(label))}\b", text) for label in labels):
-            filters.append({"field": field_name, "operator": "=", "value": technical_value})
+            if isinstance(technical_value, (tuple, list, set)):
+                filters.append({
+                    "field": field_name,
+                    "operator": "in",
+                    "value": list(technical_value),
+                })
+            else:
+                filters.append({"field": field_name, "operator": "=", "value": technical_value})
 
     return filters
 
 
-def build_odoo_catalog_read_plan(message: str, *, today: date | None = None) -> dict | None:
+def _sort_for_message(entry: OdooBusinessCatalogEntry, message: str) -> list[dict]:
+    text = normalize_business_text(message)
+    if not _contains_any(text, {"recent", "recents", "recente", "recentes", "dernier", "derniers", "derniere", "dernieres", "latest"}):
+        return []
+
+    sort = []
+    if entry.date_field_candidates:
+        sort.append({"field": entry.date_field_candidates[0], "direction": "desc"})
+
+    sort.append({"field": "id", "direction": "desc"})
+    return sort
+
+
+def _comparison_filters(entry: OdooBusinessCatalogEntry, message: str) -> list[dict]:
+    if entry.business_object != "products":
+        return []
+
+    text = normalize_business_text(message)
+    match = re.search(
+        r"\b(?:stock\s+disponible|available\s+stock|stock|quantite|quantity)\s+"
+        r"(?:est\s+)?(?:superieur(?:e)?\s+a|supérieur(?:e)?\s+à|greater\s+than|above|>\s*)\s*(\d+(?:[.,]\d+)?)\b",
+        text,
+    )
+
+    if not match:
+        return []
+
+    raw_value = match.group(1).replace(",", ".")
+    value = float(raw_value) if "." in raw_value else int(raw_value)
+    return [{"field": "qty_available", "operator": ">", "value": value}]
+
+
+def _partner_filters(entry: OdooBusinessCatalogEntry, message: str) -> list[dict]:
+    if "partner_id" not in entry.safe_readable_fields:
+        return []
+
+    text = normalize_business_text(message)
+    match = re.search(
+        r"\b(?:du|de|pour|avec|from|for)\s+"
+        r"(?:client|customer|fournisseur|supplier|vendor|partenaire|partner)\s+(.+)$",
+        text,
+    )
+
+    if not match:
+        return []
+
+    value = match.group(1)
+    value = re.sub(
+        r"\b(?:du|de|des|d|le|la|les|un|une|en|sur|dans|pour|mois|month)\b",
+        " ",
+        value,
+    )
+    value = re.sub(r"\b(?:19\d{2}|20\d{2})\b", " ", value)
+    value = re.sub(r"\b\d{1,2}\b", " ", value)
+    value = " ".join(value.strip(" .,:;!?\"'").split())
+
+    if len(value) < 2:
+        return []
+
+    return [{"field": "partner_id", "operator": "ilike", "value": value}]
+
+
+def _filters_to_domain(filters: list[dict]) -> list[list]:
+    domain = []
+
+    for item in filters or []:
+        if not isinstance(item, dict):
+            continue
+
+        field_name = item.get("field")
+        operator = item.get("operator")
+        value = item.get("value")
+
+        if field_name and operator:
+            domain.append([field_name, operator, value])
+
+    return domain
+
+
+def extract_business_reference(message: str) -> str | None:
+    match = REFERENCE_PATTERN.search((message or "").upper())
+    return match.group(0) if match else None
+
+
+def _query_for_message(entry: OdooBusinessCatalogEntry, message: str) -> str | None:
+    if entry.business_object not in {
+        "sales_orders",
+        "purchase_orders",
+        "customer_invoices",
+        "vendor_bills",
+    }:
+        return None
+
+    return extract_business_reference(message)
+
+
+def build_odoo_query_plan(message: str, *, today: date | None = None) -> dict | None:
     entry = match_business_catalog_entry(message)
     if not entry:
         return None
@@ -389,6 +517,8 @@ def build_odoo_catalog_read_plan(message: str, *, today: date | None = None) -> 
     operation = _operation_for_message(message)
     filters = [dict(item) for item in entry.default_domain_filters]
     filters.extend(_status_filters(entry, message))
+    filters.extend(_comparison_filters(entry, message))
+    filters.extend(_partner_filters(entry, message))
 
     period = parse_business_period(message, today=today)
     date_field = entry.date_field_candidates[0] if entry.date_field_candidates else None
@@ -413,6 +543,9 @@ def build_odoo_catalog_read_plan(message: str, *, today: date | None = None) -> 
         "list": "odoo_search_records",
         "search": "odoo_search_records",
     }
+    fields = list(entry.safe_readable_fields)
+    query = _query_for_message(entry, message)
+    domain = _filters_to_domain(filters)
 
     return {
         "action": action_by_operation.get(operation, "odoo_search_records"),
@@ -422,10 +555,14 @@ def build_odoo_catalog_read_plan(message: str, *, today: date | None = None) -> 
         "model_hint": entry.model,
         "model_candidates": list(entry.model_candidates or (entry.model,)),
         "filters": filters,
-        "requested_fields": list(entry.safe_readable_fields),
+        "domain": domain,
+        "fields": fields,
+        "requested_fields": fields,
         "date_field_candidates": list(entry.date_field_candidates),
         "period": period,
+        "sort": _sort_for_message(entry, message),
         "limit": _limit_for_message(message),
+        "query": query,
         "catalog_entry": entry.business_object,
         "catalog_read": True,
         "needs_clarification": needs_official_headcount_clarification,
@@ -435,3 +572,7 @@ def build_odoo_catalog_read_plan(message: str, *, today: date | None = None) -> 
             else None
         ),
     }
+
+
+def build_odoo_catalog_read_plan(message: str, *, today: date | None = None) -> dict | None:
+    return build_odoo_query_plan(message, today=today)

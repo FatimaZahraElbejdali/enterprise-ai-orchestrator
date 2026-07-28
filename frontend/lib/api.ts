@@ -21,6 +21,8 @@ export const BACKEND_UNREACHABLE_MESSAGE =
 const AUTH_RETURN_TO_KEY = "auth_return_to";
 const AUTH_ERROR_KEY = "auth_error";
 const CHAT_DRAFT_KEY = "chat_unsent_draft";
+const CHAT_HISTORY_FALLBACK_KEY = "orchestrator_chat_history_demo";
+const CHAT_HISTORY_PREFIX = "orchestrator_chat_history";
 
 const ROLE_LABELS: Record<string, string> = {
   admin: "Administrateur",
@@ -71,6 +73,65 @@ export function clearAuth() {
   window.localStorage.removeItem("auth_user");
 }
 
+export function getChatHistoryStorageKey(user?: Pick<AuthUser, "email"> | null) {
+  const email = user?.email || getStoredUser()?.email;
+
+  if (!email) return CHAT_HISTORY_FALLBACK_KEY;
+
+  return `${CHAT_HISTORY_PREFIX}_${email.trim().toLowerCase()}`;
+}
+
+function sanitizeStoredChatHistory<T = unknown>(messages: T[]): T[] {
+  return messages.filter((message) => {
+    if (!message || typeof message !== "object") return true;
+
+    return (message as { loading?: unknown }).loading !== true;
+  });
+}
+
+export function loadStoredChatHistory<T = unknown>(
+  user?: Pick<AuthUser, "email"> | null
+): T[] {
+  if (typeof window === "undefined") return [];
+
+  const rawHistory = window.localStorage.getItem(getChatHistoryStorageKey(user));
+
+  if (!rawHistory) return [];
+
+  try {
+    const parsed = JSON.parse(rawHistory);
+    if (!Array.isArray(parsed)) return [];
+
+    const sanitized = sanitizeStoredChatHistory(parsed as T[]);
+
+    if (sanitized.length !== parsed.length) {
+      saveStoredChatHistory(sanitized, user);
+    }
+
+    return sanitized;
+  } catch {
+    return [];
+  }
+}
+
+export function saveStoredChatHistory<T = unknown>(
+  messages: T[],
+  user?: Pick<AuthUser, "email"> | null
+) {
+  if (typeof window === "undefined") return;
+
+  window.localStorage.setItem(
+    getChatHistoryStorageKey(user),
+    JSON.stringify(sanitizeStoredChatHistory(messages))
+  );
+}
+
+export function clearStoredChatHistory(user?: Pick<AuthUser, "email"> | null) {
+  if (typeof window === "undefined") return;
+
+  window.localStorage.removeItem(getChatHistoryStorageKey(user));
+}
+
 export function getRoleLabel(user: AuthUser | null) {
   if (!user) return "Lecture seule";
 
@@ -101,6 +162,31 @@ type ApiFetchOptions = {
   draftToPreserve?: string;
   returnTo?: string;
 };
+
+async function readApiErrorDetail(response: Response) {
+  try {
+    const payload = await response.clone().json();
+    const detail = (payload as { detail?: unknown }).detail;
+
+    return typeof detail === "string" ? detail : "";
+  } catch {
+    return "";
+  }
+}
+
+function isAuthSessionError(detail: string) {
+  const normalized = detail.toLowerCase();
+
+  return (
+    normalized.includes("authentification") ||
+    normalized.includes("session invalide") ||
+    normalized.includes("session expir") ||
+    normalized.includes("unauthorized") ||
+    normalized.includes("not authenticated") ||
+    normalized.includes("invalid token") ||
+    normalized.includes("expired")
+  );
+}
 
 function currentPath() {
   if (typeof window === "undefined") return "/";
@@ -170,8 +256,14 @@ export async function apiFetch(
   });
 
   if (response.status === 401) {
-    handleSessionExpired(options);
-    throw new ApiRequestError(TOKEN_EXPIRED_MESSAGE, response.status);
+    const detail = await readApiErrorDetail(response);
+
+    if (isAuthSessionError(detail)) {
+      handleSessionExpired(options);
+      throw new ApiRequestError(TOKEN_EXPIRED_MESSAGE, response.status);
+    }
+
+    throw new ApiRequestError(detail || API_ERROR_MESSAGE, response.status);
   }
 
   return response;
@@ -204,7 +296,8 @@ export async function validateAuthSession(returnTo?: string) {
 
 export async function postChatMessage<T = unknown>(
   message: string,
-  sessionId = "demo-session"
+  sessionId = "demo-session",
+  signal?: AbortSignal
 ): Promise<T> {
   const response = await apiFetch(
     `${API_BASE_URL}/chat`,
@@ -217,6 +310,7 @@ export async function postChatMessage<T = unknown>(
         message,
         session_id: sessionId,
       }),
+      signal,
     },
     {
       draftToPreserve: message,

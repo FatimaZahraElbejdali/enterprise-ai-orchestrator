@@ -396,6 +396,199 @@ def remember_chat_result(session_id: str, result):
     )
 
 
+SHORT_CONTEXTUAL_FOLLOWUP_TERMS = {
+    "why",
+    "pourquoi",
+    "how",
+    "comment",
+    "explain",
+    "explique",
+    "details",
+    "detail",
+    "more",
+    "plus",
+    "plus de details",
+    "et apres",
+    "continue",
+}
+
+LOADING_OR_STUCK_STATUSES = {
+    "loading",
+    "in_progress",
+    "pending",
+    "timeout",
+    "timed_out",
+    "cancelled",
+    "canceled",
+}
+
+FAILED_CONTEXT_STATUSES = {
+    "failed",
+    "error",
+    "not_found",
+    "unsupported",
+    "blocked",
+    "access_denied",
+    "department_access_denied",
+}
+
+
+def _normalize_followup_cue(message: str) -> str:
+    normalized = unicodedata.normalize("NFKD", message or "")
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    ascii_text = ascii_text.lower().replace("’", "'")
+    ascii_text = re.sub(r"[^a-z0-9' ]+", " ", ascii_text)
+    return " ".join(ascii_text.split())
+
+
+def is_short_contextual_followup(message: str) -> bool:
+    normalized = _normalize_followup_cue(message)
+
+    if not normalized:
+        return False
+
+    tokens = normalized.split()
+
+    if len(tokens) > 4:
+        return False
+
+    if normalized in SHORT_CONTEXTUAL_FOLLOWUP_TERMS:
+        return True
+
+    return set(tokens).issubset(SHORT_CONTEXTUAL_FOLLOWUP_TERMS)
+
+
+def _has_usable_followup_context(memory_context: dict) -> bool:
+    if not isinstance(memory_context, dict):
+        return False
+
+    return any(
+        memory_context.get(key)
+        for key in [
+            "last_response_summary",
+            "last_model",
+            "last_business_object",
+            "last_action",
+            "last_product_name",
+            "last_document_name",
+            "last_document_id",
+        ]
+    )
+
+
+def _describe_followup_context(memory_context: dict) -> str:
+    parts = []
+
+    if memory_context.get("last_business_object"):
+        parts.append(str(memory_context["last_business_object"]))
+
+    if memory_context.get("last_product_name"):
+        parts.append(f"produit {memory_context['last_product_name']}")
+
+    if memory_context.get("last_document_name"):
+        parts.append(f"document {memory_context['last_document_name']}")
+
+    if memory_context.get("last_model") and not parts:
+        parts.append(f"modèle Odoo {memory_context['last_model']}")
+
+    if memory_context.get("last_action"):
+        parts.append(f"action {memory_context['last_action']}")
+
+    return ", ".join(parts)
+
+
+def build_short_followup_response(message: str, memory_context: dict) -> dict | None:
+    if not is_short_contextual_followup(message):
+        return None
+
+    status = str(memory_context.get("last_status") or "").lower()
+    summary = memory_context.get("last_response_summary")
+    context_label = _describe_followup_context(memory_context)
+    has_context = _has_usable_followup_context(memory_context)
+    has_stuck_context = status in LOADING_OR_STUCK_STATUSES
+
+    base_result = {
+        "intent": "contextual_followup",
+        "request_type": "conversation_followup",
+        "domain": "knowledge",
+        "target_system": "orchestrator",
+        "agent": "knowledge_agent",
+        "selected_agent": "knowledge_agent",
+        "capability": "knowledge.general_answer",
+        "execution_mode": "contextual_followup",
+        "action": "answer_contextual_followup",
+        "risk_level": "low",
+        "risk": "low",
+        "requires_approval": False,
+        "approval_required": False,
+        "tool_used": "conversation_context",
+        "memory_context_used": has_context or has_stuck_context,
+        "pending_context_type": "short_followup",
+        "skip_pending_context_storage": True,
+    }
+
+    if has_stuck_context:
+        base_result.update({
+            "status": "needs_clarification",
+            "message": "La demande précédente semble encore en cours ou bloquée. Vous pouvez réessayer ou lancer une nouvelle conversation.",
+        })
+        return base_result
+
+    if not has_context:
+        base_result.update({
+            "status": "needs_clarification",
+            "message": "Pouvez-vous préciser à quoi fait référence votre question ?",
+        })
+        return base_result
+
+    if status in FAILED_CONTEXT_STATUSES:
+        explanation = "La demande précédente n’a pas abouti."
+
+        if summary:
+            explanation = f"{explanation} Dernier message : {summary}"
+
+        base_result.update({
+            "status": "completed",
+            "message": explanation,
+        })
+        return base_result
+
+    if memory_context.get("last_agent") == "odoo" or memory_context.get("last_model"):
+        detail = (
+            f"Votre question semble faire référence à la dernière demande Odoo"
+            f" ({context_label})."
+            if context_label
+            else "Votre question semble faire référence à la dernière demande Odoo."
+        )
+
+        if summary:
+            detail = f"{detail} Résultat précédent : {summary}"
+
+        base_result.update({
+            "status": "completed",
+            "domain": "odoo",
+            "target_system": "odoo",
+            "agent": "odoo_agent",
+            "selected_agent": "odoo_agent",
+            "capability": "odoo.generic_read",
+            "message": f"{detail} Je peux relancer la recherche, afficher les détails disponibles ou préciser un champ particulier.",
+            "resolved_from_previous_model": memory_context.get("last_model"),
+            "resolved_business_object": memory_context.get("last_business_object"),
+        })
+        return base_result
+
+    response = "Vous faites référence à ma réponse précédente."
+
+    if summary:
+        response = f"{response} Résultat précédent : {summary}"
+
+    base_result.update({
+        "status": "completed",
+        "message": response,
+    })
+    return base_result
+
+
 def user_permission_context(current_user: dict):
     return {
         "email": current_user.get("email"),
@@ -1050,7 +1243,10 @@ def attach_context_metadata(
         pending_context.get("pending_context_cleared") is True
         or pending_context.get("cleared_pending_context") is True
     )
-    result["memory_context_used"] = memory_followup_context.get("memory_context_used") is True
+    result["memory_context_used"] = (
+        memory_followup_context.get("memory_context_used") is True
+        or result.get("memory_context_used") is True
+    )
 
     for key in (
         "pending_context_type",
@@ -2539,7 +2735,7 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
             attach_context_metadata(result, pending_context, memory_followup_context)
 
         if pending_context.get("pending_context_used") and isinstance(result, dict):
-            if result_needs_clarification(result):
+            if result_needs_clarification(result) and not result.get("skip_pending_context_storage"):
                 store_pending_clarification(
                     session_id,
                     original_message,
@@ -2555,7 +2751,11 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
         elif pending_context.get("cleared_pending_context") and isinstance(result, dict):
             result["cleared_pending_context"] = True
             result["pending_context_cleared"] = True
-        elif isinstance(result, dict) and result_needs_clarification(result):
+        elif (
+            isinstance(result, dict)
+            and result_needs_clarification(result)
+            and not result.get("skip_pending_context_storage")
+        ):
             store_pending_clarification(
                 session_id,
                 original_message,
@@ -2577,6 +2777,11 @@ def _authenticated_chat(request: ChatRequest, current_user: dict):
 
         remember_chat_result(session_id, result)
         return result
+
+    short_followup_result = build_short_followup_response(message, memory_context)
+
+    if short_followup_result:
+        return finish_chat_result(short_followup_result)
 
     if (
         contextual_resolution.get("confidence") == "low"

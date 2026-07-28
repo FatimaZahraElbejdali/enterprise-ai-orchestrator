@@ -8,6 +8,7 @@ import {
   AuthUser,
   BACKEND_UNREACHABLE_MESSAGE,
   approveApproval,
+  clearStoredChatHistory,
   clearSavedChatDraft,
   clearAuth,
   consumeSavedChatDraft,
@@ -15,8 +16,10 @@ import {
   getRoleLabel,
   getStoredUser,
   hasAnyPermission,
+  loadStoredChatHistory,
   postChatMessage,
   requireAuth,
+  saveStoredChatHistory,
   saveChatDraft,
   rejectApproval,
   validateAuthSession,
@@ -26,6 +29,10 @@ type LooseRecord = Record<string, unknown>;
 
 const SHOW_TECHNICAL_DETAILS =
   process.env.NEXT_PUBLIC_CHAT_DEBUG === "true";
+const CHAT_REQUEST_TIMEOUT_MS = 55000;
+const CHAT_TIMEOUT_MESSAGE =
+  "La réponse a pris trop de temps. Veuillez réessayer.";
+const CHAT_CANCELLED_MESSAGE = "Demande annulée. Vous pouvez réessayer.";
 
 const SUGGESTED_PROMPTS = [
   "Quel est le stock de BACO CLEAN ?",
@@ -147,18 +154,31 @@ type ChatMessage = {
   error?: string;
 };
 
+function isAbortError(error: unknown) {
+  return (
+    error instanceof DOMException && error.name === "AbortError"
+  ) || (
+    error instanceof Error && error.name === "AbortError"
+  );
+}
+
 export default function ChatPage() {
+  const [currentUser] = useState<AuthUser | null>(() => getStoredUser());
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>(() =>
+    loadStoredChatHistory<ChatMessage>(getStoredUser())
+  );
   const [error, setError] = useState("");
   const [approvalActionLoading, setApprovalActionLoading] = useState<
     "approve" | "reject" | null
   >(null);
   const [approvalActionMessage, setApprovalActionMessage] = useState("");
   const [approvalActionError, setApprovalActionError] = useState("");
-  const [currentUser] = useState<AuthUser | null>(() => getStoredUser());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const activeRequestRef = useRef<AbortController | null>(null);
+  const manualAbortRef = useRef(false);
+  const clearingConversationRef = useRef(false);
 
   useEffect(() => {
     if (!requireAuth()) return;
@@ -179,9 +199,50 @@ export default function ChatPage() {
     }
   }, [message]);
 
+  useEffect(() => {
+    saveStoredChatHistory(messages, currentUser);
+  }, [currentUser, messages]);
+
   function handleLogout() {
+    cancelActiveRequest({ silent: true });
     clearAuth();
     window.location.href = "/login";
+  }
+
+  function cancelActiveRequest(options: { silent?: boolean } = {}) {
+    if (!activeRequestRef.current) return;
+
+    manualAbortRef.current = true;
+    clearingConversationRef.current = Boolean(options.silent);
+    activeRequestRef.current.abort();
+  }
+
+  function handleNewConversation() {
+    if (
+      messages.length > 0 &&
+      !window.confirm("Effacer la conversation actuelle ?")
+    ) {
+      return;
+    }
+
+    clearingConversationRef.current = true;
+    cancelActiveRequest({ silent: true });
+    clearStoredChatHistory(currentUser);
+    clearSavedChatDraft();
+    setMessages([]);
+    setMessage("");
+    setError("");
+    setLoading(false);
+    setApprovalActionMessage("");
+    setApprovalActionError("");
+  }
+
+  function persistChatMessages(
+    nextMessages: ChatMessage[],
+    user: AuthUser | null
+  ) {
+    saveStoredChatHistory(nextMessages, user);
+    return nextMessages;
   }
 
   async function submitMessage(rawMessage: string) {
@@ -191,15 +252,24 @@ export default function ChatPage() {
 
     const userMessageId = createMessageId("user");
     const assistantMessageId = createMessageId("assistant");
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, CHAT_REQUEST_TIMEOUT_MS);
 
+    activeRequestRef.current = controller;
+    manualAbortRef.current = false;
+    clearingConversationRef.current = false;
     setLoading(true);
     setError("");
     setApprovalActionLoading(null);
     setApprovalActionMessage("");
     setApprovalActionError("");
     setMessage("");
-    setMessages((current) => [
-      ...current,
+    const pendingMessages: ChatMessage[] = [
+      ...messages,
       {
         id: userMessageId,
         role: "user",
@@ -210,41 +280,69 @@ export default function ChatPage() {
         role: "assistant",
         loading: true,
       },
-    ]);
+    ];
+    setMessages(pendingMessages);
+    saveStoredChatHistory(pendingMessages, currentUser);
 
     try {
-      const data = await postChatMessage<ChatResponse>(cleanMessage);
+      const data = await postChatMessage<ChatResponse>(
+        cleanMessage,
+        "demo-session",
+        controller.signal
+      );
       setMessages((current) =>
-        current.map((item) =>
-          item.id === assistantMessageId
-            ? {
-                id: assistantMessageId,
-                role: "assistant",
-                response: data,
-              }
-            : item
+        persistChatMessages(
+          current.map((item) =>
+            item.id === assistantMessageId
+              ? {
+                  id: assistantMessageId,
+                  role: "assistant",
+                  response: data,
+                }
+              : item
+          ),
+          currentUser
         )
       );
     } catch (err) {
-      const errorMessage =
-        err instanceof TypeError
-          ? BACKEND_UNREACHABLE_MESSAGE
-          : err instanceof Error
-            ? err.message
-            : API_ERROR_MESSAGE;
+      const requestWasAborted = isAbortError(err) || controller.signal.aborted;
+      const shouldSuppressAbort = requestWasAborted && clearingConversationRef.current;
+      const errorMessage = timedOut
+        ? CHAT_TIMEOUT_MESSAGE
+        : requestWasAborted && manualAbortRef.current
+          ? CHAT_CANCELLED_MESSAGE
+          : err instanceof TypeError
+            ? BACKEND_UNREACHABLE_MESSAGE
+            : err instanceof Error
+              ? err.message
+              : API_ERROR_MESSAGE;
+
+      if (shouldSuppressAbort) {
+        return;
+      }
+
       setError(errorMessage);
       setMessages((current) =>
-        current.map((item) =>
-          item.id === assistantMessageId
-            ? {
-                id: assistantMessageId,
-                role: "assistant",
-                error: errorMessage,
-              }
-            : item
+        persistChatMessages(
+          current.map((item) =>
+            item.id === assistantMessageId
+              ? {
+                  id: assistantMessageId,
+                  role: "assistant",
+                  error: errorMessage,
+                }
+              : item
+          ),
+          currentUser
         )
       );
     } finally {
+      window.clearTimeout(timeoutId);
+      if (activeRequestRef.current === controller) {
+        activeRequestRef.current = null;
+      }
+      manualAbortRef.current = false;
+      clearingConversationRef.current = false;
       setLoading(false);
     }
   }
@@ -258,6 +356,8 @@ export default function ChatPage() {
     if (event.key !== "Enter" || event.shiftKey) return;
 
     event.preventDefault();
+    if (loading) return;
+
     void submitMessage(message);
   }
 
@@ -333,6 +433,15 @@ export default function ChatPage() {
         { label: latestAssistantModel, tone: "neutral" },
         { label: "Contrôle actif", tone: "success" },
       ]}
+      actions={
+        <button
+          className="newConversationButton"
+          type="button"
+          onClick={handleNewConversation}
+        >
+          Nouvelle conversation
+        </button>
+      }
       contentClassName="chat-shell"
     >
         <section className="chatViewport" aria-live="polite">
@@ -426,6 +535,15 @@ export default function ChatPage() {
             >
               {loading ? "..." : "➤"}
             </button>
+            {loading && (
+              <button
+                className="cancelButton"
+                type="button"
+                onClick={() => cancelActiveRequest()}
+              >
+                Arrêter
+              </button>
+            )}
           </form>
         </section>
 
@@ -1960,6 +2078,32 @@ export default function ChatPage() {
           box-shadow: none;
         }
 
+        .newConversationButton,
+        .cancelButton {
+          border: 1px solid #cfd8e6;
+          border-radius: 10px;
+          background: #ffffff;
+          color: #123f8c;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        .newConversationButton {
+          padding: 9px 12px;
+        }
+
+        .cancelButton {
+          height: 42px;
+          padding: 0 14px;
+          flex: 0 0 auto;
+        }
+
+        .newConversationButton:hover,
+        .cancelButton:hover {
+          border-color: #123f8c;
+          background: #eef4ff;
+        }
+
         @media (max-width: 720px) {
           .chatViewport {
             padding-bottom: 14px;
@@ -1974,6 +2118,7 @@ export default function ChatPage() {
             padding-top: 10px;
             padding-bottom: 12px;
           }
+
         }
       `}</style>
     </AppShell>

@@ -1,4 +1,8 @@
 import hashlib
+import base64
+import hmac
+import json
+import os
 import secrets
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -17,6 +21,10 @@ INVALID_CREDENTIALS_MESSAGE = "Identifiants incorrects."
 ACCESS_DENIED_MESSAGE = "Accès refusé : votre rôle ne permet pas d’effectuer cette action."
 
 DEMO_PASSWORD_SALT = "enterprise-ai-orchestrator-demo"
+DEMO_SESSION_SECRET = os.getenv(
+    "DEMO_SESSION_SECRET",
+    "enterprise-ai-orchestrator-demo-session-secret",
+)
 SESSION_TTL_HOURS = 8
 
 ROLE_LABELS = {
@@ -143,6 +151,80 @@ def _serialize_user(user: DemoUser) -> dict:
     }
 
 
+def _base64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _base64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(f"{value}{padding}".encode("ascii"))
+
+
+def _sign_session_payload(payload: dict) -> str:
+    encoded_payload = _base64url_encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    signature = hmac.new(
+        DEMO_SESSION_SECRET.encode("utf-8"),
+        encoded_payload.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return f"demo.{encoded_payload}.{_base64url_encode(signature)}"
+
+
+def _load_signed_session(token: str) -> dict | None:
+    try:
+        prefix, encoded_payload, encoded_signature = token.split(".", 2)
+    except ValueError:
+        return None
+
+    if prefix != "demo":
+        return None
+
+    expected_signature = hmac.new(
+        DEMO_SESSION_SECRET.encode("utf-8"),
+        encoded_payload.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+
+    try:
+        received_signature = _base64url_decode(encoded_signature)
+    except Exception:
+        return None
+
+    if not hmac.compare_digest(expected_signature, received_signature):
+        return None
+
+    try:
+        payload = json.loads(_base64url_decode(encoded_payload).decode("utf-8"))
+    except Exception:
+        return None
+
+    email = str(payload.get("email") or "").strip().lower()
+    expires_at_raw = payload.get("exp")
+
+    if not email or not isinstance(expires_at_raw, str):
+        return None
+
+    user = DEMO_USERS.get(email)
+
+    if not user:
+        return None
+
+    try:
+        expires_at = datetime.fromisoformat(expires_at_raw)
+    except ValueError:
+        return None
+
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    return {
+        "user": _serialize_user(user),
+        "expires_at": expires_at,
+    }
+
+
 def authenticate_demo_user(email: str, password: str) -> dict | None:
     normalized_email = (email or "").strip().lower()
     user = DEMO_USERS.get(normalized_email)
@@ -153,11 +235,16 @@ def authenticate_demo_user(email: str, password: str) -> dict | None:
     if not secrets.compare_digest(user.password_hash, _hash_password(password or "")):
         return None
 
-    token = secrets.token_urlsafe(32)
     serialized_user = _serialize_user(user)
+    expires_at = _expires_at()
+    token = _sign_session_payload({
+        "email": user.email,
+        "exp": expires_at.isoformat(),
+        "nonce": secrets.token_urlsafe(12),
+    })
     _sessions[token] = {
         "user": serialized_user,
-        "expires_at": _expires_at(),
+        "expires_at": expires_at,
     }
 
     return {
@@ -184,7 +271,7 @@ def get_current_user(
     if scheme.lower() != "bearer" or not token:
         _auth_error(INVALID_SESSION_MESSAGE, status.HTTP_401_UNAUTHORIZED)
 
-    session = _sessions.get(token)
+    session = _sessions.get(token) or _load_signed_session(token)
 
     if not session:
         _auth_error(INVALID_SESSION_MESSAGE, status.HTTP_401_UNAUTHORIZED)

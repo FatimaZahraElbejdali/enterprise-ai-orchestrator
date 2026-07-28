@@ -416,6 +416,12 @@ ODOO_DOCUMENT_SEARCH_PATTERNS = [
 
 def is_odoo_document_request(message: str) -> bool:
     text = (message or "").lower().replace("’", "'")
+    reference_like = bool(
+        re.search(r"\b(?=[A-Z0-9/.-]*\d)[A-Z]{1,8}[-/][A-Z0-9][A-Z0-9/.-]{3,}\b", message or "")
+    )
+
+    if reference_like and re.search(r"\bdocument\b|\br[ée]f[ée]rence\b|\breference\b", text):
+        return True
 
     return any(
         re.search(pattern, text, re.IGNORECASE)

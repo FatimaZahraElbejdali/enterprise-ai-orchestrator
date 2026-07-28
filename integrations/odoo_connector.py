@@ -602,6 +602,7 @@ class OdooConnector:
             "virtual_available",
             "uom_id",
             "list_price",
+            "currency_id",
             "sale_ok",
             "active",
         ]
@@ -621,6 +622,7 @@ class OdooConnector:
                 else ""
             ),
             "list_price": product.get("list_price"),
+            "currency": self._m2o_name(product.get("currency_id")) or "MAD",
             "qty_available": product.get("qty_available"),
             "virtual_available": product.get("virtual_available"),
             "sale_ok": bool(product.get("sale_ok")),
@@ -1102,6 +1104,7 @@ class OdooConnector:
                 "stock_quantity": 42,
                 "forecast_quantity": 42,
                 "sale_price": 1.0,
+                "currency": "MAD",
                 "unit": "Unité(s)",
                 "warehouse": "Mock Warehouse",
                 "found": True,
@@ -1139,6 +1142,7 @@ class OdooConnector:
                 "stock_quantity": product.get("qty_available"),
                 "forecast_quantity": product.get("virtual_available"),
                 "sale_price": product.get("list_price"),
+                "currency": self._m2o_name(product.get("currency_id")) or "MAD",
                 "sale_ok": product.get("sale_ok"),
                 "active": product.get("active"),
                 "unit": product.get("uom_id") or "-",
@@ -2086,6 +2090,29 @@ class OdooConnector:
             order_parts.append(f"{field_name} {direction}")
 
         return ", ".join(order_parts[:3]) or None
+
+    def _validate_dynamic_sort(self, model_name: str, sort: list | None):
+        if not sort:
+            return None
+
+        order_parts = []
+        for item in sort[:3]:
+            if isinstance(item, dict):
+                field_name = item.get("field")
+                direction = item.get("direction") or "asc"
+            elif isinstance(item, str):
+                tokens = item.split()
+                field_name = tokens[0] if tokens else None
+                direction = tokens[1] if len(tokens) > 1 else "asc"
+            else:
+                continue
+
+            if not field_name:
+                continue
+
+            order_parts.append(f"{field_name} {direction}")
+
+        return self._validate_agent_order(model_name, ", ".join(order_parts))
 
     def _validate_agent_group_by(self, model_name: str, group_by: list[str] | None):
         if not isinstance(group_by, list) or len(group_by) != 1:
@@ -3103,6 +3130,7 @@ class OdooConnector:
         business_scope_domain = executable["business_scope_domain"]
         query_domain = executable["query_domain"]
         validated_filters = executable["validated_filters"]
+        order = self._validate_dynamic_sort(model_name, plan.sort)
 
         try:
             if plan.operation == "aggregate":
@@ -3162,6 +3190,15 @@ class OdooConnector:
                     "message": "Odoo records counted.",
                 }
             else:
+                search_kwargs = {
+                    "fields": fields,
+                    "limit": plan.limit,
+                    "context": {"active_test": False},
+                }
+
+                if order:
+                    search_kwargs["order"] = order
+
                 raw_records = models.execute_kw(
                     self.database,
                     self.uid,
@@ -3169,11 +3206,7 @@ class OdooConnector:
                     model_name,
                     "search_read",
                     [domain],
-                    {
-                        "fields": fields,
-                        "limit": plan.limit,
-                        "context": {"active_test": False},
-                    },
+                    search_kwargs,
                 )
         except Exception as error:
             return {
@@ -3213,6 +3246,7 @@ class OdooConnector:
             "query_domain": query_domain,
             "validated_filters": validated_filters,
             "search_domain": domain,
+            "order": order,
             "records": records,
             "record_count": len(records),
             "message": "Odoo records read safely.",
@@ -3258,6 +3292,7 @@ class OdooConnector:
                 "qty_available",
                 "virtual_available",
                 "list_price",
+                "currency_id",
             ],
             "product.template": [
                 "id",
@@ -3269,6 +3304,7 @@ class OdooConnector:
                 "virtual_available",
                 "list_price",
                 "standard_price",
+                "currency_id",
             ],
             "res.partner": [
                 "id",
@@ -3320,6 +3356,7 @@ class OdooConnector:
                 "forecast_quantity": record.get("virtual_available"),
                 "price": record.get("list_price"),
                 "standard_price": record.get("standard_price"),
+                "currency": self._m2o_name(record.get("currency_id")) or "MAD",
             }
 
         if model_name == "res.partner":

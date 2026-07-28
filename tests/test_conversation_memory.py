@@ -1147,6 +1147,177 @@ def test_sensitive_followup_does_not_use_odoo_result_memory(monkeypatch):
     assert odoo_calls == []
 
 
+def test_short_followup_without_context_asks_clarification_not_unsupported(monkeypatch):
+    memory = ConversationMemory()
+
+    monkeypatch.setattr(app_module, "conversation_memory", memory)
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda message, **kwargs: {
+            "intent": "unsupported_capability",
+            "request_type": "enterprise_action",
+            "domain": "unknown",
+            "selected_agent": "orchestrator",
+            "capability": "unsupported_capability",
+            "action": "unsupported_capability",
+            "risk_level": "low",
+            "requires_approval": False,
+        },
+    )
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/chat",
+        json={"message": "why", "session_id": "short-followup-empty"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "clarification_required"
+    assert data["response"] == "Pouvez-vous préciser à quoi fait référence votre question ?"
+    assert data["technical"]["intent"] == "contextual_followup"
+    assert data["technical"]["memory_context_used"] is False
+    assert data["technical"].get("capability") != "unsupported_capability"
+    assert memory.get_pending_clarification("short-followup-empty") == {}
+
+
+def test_short_followup_after_odoo_request_uses_context_not_unsupported(monkeypatch):
+    memory = ConversationMemory()
+    memory.update_from_result("short-followup-odoo", _contact_count_result())
+
+    monkeypatch.setattr(app_module, "conversation_memory", memory)
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda message, **kwargs: {
+            "intent": "unsupported_capability",
+            "request_type": "enterprise_action",
+            "domain": "unknown",
+            "selected_agent": "orchestrator",
+            "capability": "unsupported_capability",
+            "action": "unsupported_capability",
+            "risk_level": "low",
+            "requires_approval": False,
+        },
+    )
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/chat",
+        json={"message": "why", "session_id": "short-followup-odoo"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert "dernière demande Odoo" in data["response"]
+    assert "14256 contacts" in data["response"]
+    assert "Action non disponible" not in data["response"]
+    assert data["technical"]["agent"] == "odoo_agent"
+    assert data["technical"]["memory_context_used"] is True
+    assert data["technical"]["resolved_from_previous_model"] == "res.partner"
+
+
+def test_short_followup_after_failed_request_explains_failure(monkeypatch):
+    memory = ConversationMemory()
+    memory.update_from_result(
+        "short-followup-failed",
+        {
+            "intent": "odoo_product_stock",
+            "agent": "odoo_agent",
+            "status": "not_found",
+            "message": "Produit introuvable dans Odoo.",
+            "target_system": "odoo",
+            "requires_approval": False,
+        },
+    )
+
+    monkeypatch.setattr(app_module, "conversation_memory", memory)
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda message, **kwargs: {
+            "intent": "unsupported_capability",
+            "request_type": "enterprise_action",
+            "domain": "unknown",
+            "selected_agent": "orchestrator",
+            "capability": "unsupported_capability",
+            "action": "unsupported_capability",
+            "risk_level": "low",
+            "requires_approval": False,
+        },
+    )
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/chat",
+        json={"message": "pourquoi", "session_id": "short-followup-failed"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert "n’a pas abouti" in data["response"]
+    assert "Produit introuvable" in data["response"]
+    assert "Action non disponible" not in data["response"]
+
+
+def test_short_followup_after_stuck_request_reports_recovery(monkeypatch):
+    memory = ConversationMemory()
+    memory.update_from_result(
+        "short-followup-loading",
+        {
+            "intent": "odoo_product_stock",
+            "agent": "odoo_agent",
+            "status": "loading",
+            "message": "Recherche Odoo en cours.",
+            "target_system": "odoo",
+            "requires_approval": False,
+        },
+    )
+
+    monkeypatch.setattr(app_module, "conversation_memory", memory)
+    monkeypatch.setattr(
+        app_module,
+        "classify_message",
+        lambda message, **kwargs: {
+            "intent": "unsupported_capability",
+            "request_type": "enterprise_action",
+            "domain": "unknown",
+            "selected_agent": "orchestrator",
+            "capability": "unsupported_capability",
+            "action": "unsupported_capability",
+            "risk_level": "low",
+            "requires_approval": False,
+        },
+    )
+    monkeypatch.setattr(app_module, "log_request", lambda data: None)
+
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/chat",
+        json={"message": "why", "session_id": "short-followup-loading"},
+        headers=auth_headers("admin@company.local"),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "clarification_required"
+    assert (
+        data["response"]
+        == "La demande précédente semble encore en cours ou bloquée. Vous pouvez réessayer ou lancer une nouvelle conversation."
+    )
+    assert data["technical"]["memory_context_used"] is True
+    assert memory.get_pending_clarification("short-followup-loading") == {}
+
+
 def test_pending_odoo_clarification_is_merged_into_next_reply(monkeypatch):
     memory = ConversationMemory()
     seen_odoo_messages = []

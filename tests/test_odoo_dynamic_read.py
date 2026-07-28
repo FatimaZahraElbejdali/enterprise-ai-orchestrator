@@ -4,6 +4,7 @@ import agents.odoo_agent as odoo_agent_module
 import app as app_module
 from app import app
 from integrations.odoo_connector import OdooConnector
+from orchestrator.odoo_business_catalog import build_odoo_catalog_read_plan
 from tests.auth_helpers import auth_headers
 from tests.semantic_helpers import make_semantic_request
 
@@ -388,6 +389,153 @@ def test_dynamic_read_resolves_selection_display_label_filter_to_technical_value
         }
     ]
     assert result["search_domain"] == domain
+
+
+def test_dynamic_read_applies_safe_recent_sort_for_sales_orders():
+    fake = FakeDynamicModels(
+        catalog=[{"model": "sale.order", "name": "Sales Order"}],
+        fields={
+            "sale.order": {
+                "name": {"string": "Order Reference", "type": "char"},
+                "partner_id": {"string": "Customer", "type": "many2one"},
+                "date_order": {"string": "Order Date", "type": "datetime"},
+                "state": {"string": "Status", "type": "selection"},
+                "amount_total": {"string": "Total", "type": "monetary"},
+                "currency_id": {"string": "Currency", "type": "many2one"},
+            },
+        },
+        records={
+            "sale.order": [
+                {
+                    "id": 10,
+                    "name": "SO001",
+                    "partner_id": [7, "Client A"],
+                    "date_order": "2026-07-22 10:00:00",
+                    "state": "sale",
+                    "amount_total": 1000.0,
+                    "currency_id": [1, "MAD"],
+                },
+            ],
+        },
+    )
+    connector = dynamic_connector(fake)
+
+    result = connector.dynamic_read({
+        "operation": "list",
+        "business_object": "sales_orders",
+        "model_hint": "sale.order",
+        "requested_fields": ["name", "partner_id", "date_order", "state", "amount_total", "currency_id"],
+        "filters": [],
+        "sort": [
+            {"field": "date_order", "direction": "desc"},
+            {"field": "id", "direction": "desc"},
+        ],
+    })
+
+    search_read = [
+        call
+        for call in fake.calls
+        if call[0] == "sale.order" and call[1] == "search_read"
+    ][0]
+
+    assert result["status"] == "completed"
+    assert result["search_domain"] == []
+    assert result["order"] == "date_order desc, id desc"
+    assert search_read[3]["order"] == "date_order desc, id desc"
+
+
+def test_dynamic_read_counts_customer_invoices_with_safe_domain():
+    fake = FakeDynamicModels(
+        catalog=[{"model": "account.move", "name": "Journal Entry"}],
+        fields={
+            "account.move": {
+                "name": {"string": "Number", "type": "char"},
+                "partner_id": {"string": "Customer", "type": "many2one"},
+                "invoice_date": {"string": "Invoice Date", "type": "date"},
+                "amount_total": {"string": "Total", "type": "monetary"},
+                "state": {"string": "Status", "type": "selection"},
+                "payment_state": {"string": "Payment Status", "type": "selection"},
+                "move_type": {"string": "Type", "type": "selection"},
+                "currency_id": {"string": "Currency", "type": "many2one"},
+            },
+        },
+        records={
+            "account.move": [
+                {
+                    "id": 1,
+                    "name": "INV001",
+                    "move_type": "out_invoice",
+                    "state": "posted",
+                    "invoice_date": "2026-05-15",
+                }
+            ],
+        },
+    )
+    connector = dynamic_connector(fake)
+
+    result = connector.dynamic_read(
+        build_odoo_catalog_read_plan(
+            "Combien de factures clients validées y a-t-il en mai 2026 ?"
+        )
+    )
+    search_count = [
+        call
+        for call in fake.calls
+        if call[0] == "account.move" and call[1] == "search_count"
+    ][0]
+    domain = search_count[2][0]
+
+    assert result["status"] == "completed"
+    assert result["model"] == "account.move"
+    assert result["record_count"] == 1
+    assert ["move_type", "=", "out_invoice"] in domain
+    assert ["state", "=", "posted"] in domain
+    assert ["invoice_date", ">=", "2026-05-01"] in domain
+    assert ["invoice_date", "<=", "2026-05-31"] in domain
+
+
+def test_dynamic_read_sale_order_reference_uses_query_domain():
+    fake = FakeDynamicModels(
+        catalog=[{"model": "sale.order", "name": "Sales Order"}],
+        fields={
+            "sale.order": {
+                "id": {"string": "ID", "type": "integer"},
+                "name": {"string": "Order Reference", "type": "char"},
+                "display_name": {"string": "Display Name", "type": "char"},
+                "partner_id": {"string": "Customer", "type": "many2one"},
+                "date_order": {"string": "Order Date", "type": "datetime"},
+                "state": {"string": "Status", "type": "selection"},
+                "amount_total": {"string": "Total", "type": "monetary"},
+                "currency_id": {"string": "Currency", "type": "many2one"},
+            },
+        },
+        records={
+            "sale.order": [
+                {
+                    "id": 1128,
+                    "name": "OL-BPP2601128",
+                    "partner_id": [7, "Client Atlas"],
+                    "date_order": "2026-07-22 10:00:00",
+                    "state": "sale",
+                }
+            ],
+        },
+    )
+    connector = dynamic_connector(fake)
+
+    result = connector.dynamic_read(
+        build_odoo_catalog_read_plan("Recherche la commande client OL-BPP2601128")
+    )
+    search_read = [
+        call
+        for call in fake.calls
+        if call[0] == "sale.order" and call[1] == "search_read"
+    ][0]
+    domain = search_read[2][0]
+
+    assert result["status"] == "completed"
+    assert result["model"] == "sale.order"
+    assert ["name", "ilike", "OL-BPP2601128"] in domain
 
 
 def test_dynamic_read_ignores_nonexistent_model_hint_and_discovers_safely():

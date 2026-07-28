@@ -108,6 +108,10 @@ CONTACT_TERMS = {"contact", "contacts", "partner", "partenaire", "res.partner"}
 SALE_ORDER_TERMS = {
     "commande client",
     "commandes client",
+    "commande du client",
+    "commandes du client",
+    "commande de client",
+    "commandes de client",
     "commande de vente",
     "commandes de vente",
     "devis",
@@ -302,6 +306,9 @@ def _product_stock(text: str, route: dict | None) -> bool:
     if contains_any(text, WRITE_TERMS):
         return False
 
+    if contains_any(text, {"above", "greater than", "superieur", "superieure", "supérieur", "supérieure", ">"}):
+        return False
+
     if contains_any(
         text,
         {"cherche", "contient", "contiennent", "existe", "existent", "liste", "search", "trouve"},
@@ -356,7 +363,12 @@ def _purchase_supplier_ranking(text: str, route: dict | None) -> bool:
 
 
 def _purchase_document_search(text: str, route: dict | None) -> bool:
-    reference_like = bool(re.search(r"\b[A-Z]{1,5}[-/][A-Z0-9][A-Z0-9/.-]{3,}\b", message_upper(text)))
+    reference_like = bool(
+        re.search(
+            r"\b(?=[A-Z0-9/.-]*\d)[A-Z]{1,5}[-/][A-Z0-9][A-Z0-9/.-]{3,}\b",
+            message_upper(text),
+        )
+    )
     return contains_any(text, PURCHASE_ORDER_TERMS) and (
         contains_any(text, {"cherche", "detail", "details", "document", "search", "trouve"})
         or reference_like
@@ -367,7 +379,10 @@ def _explicit_document_lookup(text: str) -> bool:
     if re.search(r"\bid\s+\d+\b", text):
         return True
 
-    if re.search(r"\b[A-Z]{1,8}[-/][A-Z0-9][A-Z0-9/.-]{3,}\b", message_upper(text)):
+    if re.search(
+        r"\b(?=[A-Z0-9/.-]*\d)[A-Z]{1,8}[-/][A-Z0-9][A-Z0-9/.-]{3,}\b",
+        message_upper(text),
+    ):
         return True
 
     return False
@@ -378,7 +393,11 @@ def _customer_invoice_list(text: str, route: dict | None) -> bool:
         return False
 
     plan = build_odoo_catalog_read_plan(text)
-    return bool(plan and plan.get("business_object") == "customer_invoices")
+    return bool(
+        plan
+        and plan.get("business_object") == "customer_invoices"
+        and plan.get("operation") != "count"
+    )
 
 
 def _catalog_odoo_read(text: str, route: dict | None) -> bool:
@@ -392,7 +411,11 @@ def _catalog_odoo_read(text: str, route: dict | None) -> bool:
     if not plan:
         return False
 
-    if plan.get("business_object") == "products":
+    if plan.get("business_object") == "products" and not any(
+        isinstance(item, dict)
+        and item.get("field") in {"qty_available", "virtual_available", "list_price"}
+        for item in plan.get("filters", [])
+    ):
         return False
 
     if plan.get("business_object") == "contacts" and contains_any(text, RANKING_TERMS):
@@ -457,7 +480,7 @@ def _unknown_odoo_write(text: str, route: dict | None) -> bool:
     ):
         return False
 
-    return contains_any(text, WRITE_TERMS)
+    return has_word(text, WRITE_TERMS)
 
 
 def _contact_parameters(message: str, route: dict | None) -> dict:
@@ -473,6 +496,18 @@ def _contact_parameters(message: str, route: dict | None) -> dict:
 
 def _sale_order_parameters(message: str, route: dict | None) -> dict:
     text = normalize_text(message)
+    plan = build_odoo_catalog_read_plan(message)
+    if plan and plan.get("business_object") == "sales_orders":
+        return {
+            **plan,
+            "operation": "count" if contains_any(text, {"combien", "count"}) else plan.get("operation") or "list",
+            "business_object": "commandes client",
+            "model": "sale.order",
+            "model_hint": "sale.order",
+            "requested_fields": ["name", "partner_id", "state", "date_order", "amount_total", "currency_id"],
+            "limit": plan.get("limit") or 10,
+        }
+
     return {
         "operation": "count" if contains_any(text, {"combien", "count"}) else "list",
         "business_object": "commandes client",

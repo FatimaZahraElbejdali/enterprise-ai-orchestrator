@@ -902,10 +902,19 @@ function formatValue(value?: string | number | null) {
   return String(value);
 }
 
+function formatMoney(value?: string | number | null) {
+  const formatted = formatValue(value);
+
+  if (formatted === "-") return formatted;
+  if (/\b(dh|mad|eur|usd)\b/i.test(formatted)) return formatted;
+
+  return `${formatted} DH`;
+}
+
 function formatExecutionResult(result: ExecutionResult) {
   const status = result.success ? "succès" : "échec";
-  const oldPrice = formatValue(result.old_price);
-  const newPrice = formatValue(result.new_price);
+  const oldPrice = formatMoney(result.old_price);
+  const newPrice = formatMoney(result.new_price);
   const message = result.message || "Aucun message retourné.";
 
   return `Statut : ${status}. Ancien prix : ${oldPrice}. Nouveau prix : ${newPrice}. ${cleanDisplayText(message)}`;

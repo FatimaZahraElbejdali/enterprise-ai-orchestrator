@@ -941,8 +941,8 @@ function technicalDetails(approval: Approval) {
     ["Ligne", result?.line_id],
     ["Champ", fieldLabel(result?.field || getMetadataString(metadata, "field_name"))],
     ["Valeur demandée", approval.requested_change || result?.requested_value],
-    ["Ancien prix", result?.old_price],
-    ["Nouveau prix", result?.new_price],
+    ["Ancien prix", formatMoney(result?.old_price)],
+    ["Nouveau prix", formatMoney(result?.new_price)],
     ["Ancienne valeur", result?.old_value],
     ["Nouvelle valeur", result?.new_value],
     ["Exécuté dans Odoo", approval.executed ? "Oui" : "Non"],
@@ -1054,11 +1054,20 @@ function formatValue(value?: unknown): string {
   return String(value);
 }
 
+function formatMoney(value?: unknown): string {
+  const formatted = formatValue(value);
+
+  if (formatted === "-") return formatted;
+  if (/\b(dh|mad|eur|usd)\b/i.test(formatted)) return formatted;
+
+  return `${formatted} DH`;
+}
+
 function formatExecutionResult(result: ExecutionResult): string {
   const status = result.success ? "succès" : "échec";
   const message = sanitizeText(String(result.message || "Aucun message retourné."));
-  const oldPrice = formatValue(result.old_price);
-  const newPrice = formatValue(result.new_price);
+  const oldPrice = formatMoney(result.old_price);
+  const newPrice = formatMoney(result.new_price);
   const oldValue = formatValue(result.old_value);
   const newValue = formatValue(result.new_value);
   const document = formatValue(result.document);
