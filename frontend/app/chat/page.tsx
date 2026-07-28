@@ -8,6 +8,7 @@ import {
   AuthUser,
   BACKEND_UNREACHABLE_MESSAGE,
   approveApproval,
+  clearSavedChatDraft,
   clearAuth,
   consumeSavedChatDraft,
   getDepartmentLabel,
@@ -16,6 +17,7 @@ import {
   hasAnyPermission,
   postChatMessage,
   requireAuth,
+  saveChatDraft,
   rejectApproval,
   validateAuthSession,
 } from "@/lib/api";
@@ -26,9 +28,9 @@ const SHOW_TECHNICAL_DETAILS =
   process.env.NEXT_PUBLIC_CHAT_DEBUG === "true";
 
 const SUGGESTED_PROMPTS = [
+  "Quel est le stock de BACO CLEAN ?",
+  "Donne-moi les factures clients validées de mai 2026",
   "Quels fournisseurs apparaissent le plus dans les bons de commande ?",
-  "Vérifie l’état des serveurs.",
-  "Explique le workflow de validation humaine.",
 ];
 
 type OdooStockResult = {
@@ -168,6 +170,14 @@ export default function ChatPage() {
 
     void validateAuthSession("/chat");
   }, []);
+
+  useEffect(() => {
+    if (message.trim()) {
+      saveChatDraft(message);
+    } else {
+      clearSavedChatDraft();
+    }
+  }, [message]);
 
   function handleLogout() {
     clearAuth();
@@ -402,7 +412,6 @@ export default function ChatPage() {
             <textarea
               id="message"
               value={message}
-              disabled={loading}
               onChange={(event) => setMessage(event.target.value)}
               onKeyDown={handleComposerKeyDown}
               placeholder="De quoi avez-vous besoin ?"

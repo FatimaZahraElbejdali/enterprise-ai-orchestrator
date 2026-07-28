@@ -32,11 +32,15 @@ BUSINESS_MODEL_CATALOG: tuple[OdooBusinessCatalogEntry, ...] = (
     OdooBusinessCatalogEntry(
         business_object="customer_invoices",
         keywords=(
+            "facture",
             "facture client",
+            "factures",
             "factures client",
             "factures clients",
             "facture de vente",
             "factures de vente",
+            "invoice",
+            "invoices",
             "customer invoice",
             "customer invoices",
             "sales invoice",
@@ -72,7 +76,12 @@ BUSINESS_MODEL_CATALOG: tuple[OdooBusinessCatalogEntry, ...] = (
                     "confirmees",
                     "confirme",
                     "confirmes",
+                    "comptabilisee",
+                    "comptabilisees",
+                    "comptabilise",
+                    "comptabilises",
                     "posted",
+                    "validated",
                 ),
             ),
             "draft": ("state", ("brouillon", "draft")),
@@ -120,7 +129,12 @@ BUSINESS_MODEL_CATALOG: tuple[OdooBusinessCatalogEntry, ...] = (
                     "confirmees",
                     "confirme",
                     "confirmes",
+                    "comptabilisee",
+                    "comptabilisees",
+                    "comptabilise",
+                    "comptabilises",
                     "posted",
+                    "validated",
                 ),
             ),
             "draft": ("state", ("brouillon", "draft")),
@@ -342,6 +356,8 @@ def _operation_for_message(message: str) -> str:
 
 def _limit_for_message(message: str, default: int = 10) -> int:
     text = normalize_business_text(message)
+    text = re.sub(r"\b(?:mois|month)\s+(?:de\s+)?\d{1,2}\b", " ", text)
+    text = re.sub(r"\b(?:19\d{2}|20\d{2})\b", " ", text)
     match = re.search(r"\b(\d{1,2})\b", text)
     if not match:
         return default

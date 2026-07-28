@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from agents.knowledge_agent import (
     is_general_information_question,
     is_internal_knowledge_question,
+    is_orchestrator_help_question,
 )
 from agents.server_agent import (
     extract_specific_server_reference,
@@ -1213,6 +1214,29 @@ def _is_project_orchestrator_explanation_message(message: str) -> bool:
     return has_orchestrator_subject and has_explanation_intent
 
 
+def _orchestrator_help_route(
+    message: str,
+    source: str = "system_help_router",
+    error=None,
+) -> dict:
+    return _route(
+        intent="orchestrator_help",
+        selected_agent="knowledge_agent",
+        action="orchestrator_help",
+        risk_level="low",
+        requires_approval=False,
+        confidence="high",
+        reason="System help question about the orchestrator application.",
+        source=source,
+        error=error,
+        capability="knowledge.general_answer",
+        request_type="general_knowledge",
+        domain="knowledge",
+        execution_mode="system_help",
+        parameters={"help_topic": message},
+    )
+
+
 def _knowledge_intent_for(message: str) -> str:
     text = _normalize_text(message)
 
@@ -1556,6 +1580,9 @@ def apply_backend_safety_overrides(message: str, route: dict | None = None) -> d
             "Request asks for a destructive or dangerous operation.",
         )
 
+    if is_orchestrator_help_question(message):
+        return _orchestrator_help_route(message)
+
     capability_route = (
         route_from_business_capability(message, route)
         if isinstance(route, dict)
@@ -1757,6 +1784,13 @@ def _classify_with_optional_provider(message: str):
 def _deterministic_fallback(message: str, error=None):
     text = _normalize_text(message)
 
+    if is_orchestrator_help_question(message):
+        return _orchestrator_help_route(
+            message,
+            source="local_knowledge_fallback",
+            error=error,
+        )
+
     if _is_odoo_access_issue(message):
         return _route(
             intent="odoo_access_issue",
@@ -1933,6 +1967,12 @@ def classify_message(
 
     if blocked_override:
         return blocked_override
+
+    if is_orchestrator_help_question(message):
+        return apply_backend_safety_overrides(
+            message,
+            _orchestrator_help_route(message),
+        )
 
     safe_general_route = _cheap_safe_general_route(message)
 

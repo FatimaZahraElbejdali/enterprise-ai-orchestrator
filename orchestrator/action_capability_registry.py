@@ -144,6 +144,10 @@ POSTED_STATUS_TERMS = {
     "confirmees",
     "confirme",
     "confirmes",
+    "comptabilisee",
+    "comptabilisees",
+    "comptabilise",
+    "comptabilises",
     "posted",
     "postee",
     "postees",
@@ -359,12 +363,28 @@ def _purchase_document_search(text: str, route: dict | None) -> bool:
     )
 
 
+def _explicit_document_lookup(text: str) -> bool:
+    if re.search(r"\bid\s+\d+\b", text):
+        return True
+
+    if re.search(r"\b[A-Z]{1,8}[-/][A-Z0-9][A-Z0-9/.-]{3,}\b", message_upper(text)):
+        return True
+
+    return False
+
+
 def _customer_invoice_list(text: str, route: dict | None) -> bool:
+    if _explicit_document_lookup(text):
+        return False
+
     plan = build_odoo_catalog_read_plan(text)
     return bool(plan and plan.get("business_object") == "customer_invoices")
 
 
 def _catalog_odoo_read(text: str, route: dict | None) -> bool:
+    if _explicit_document_lookup(text):
+        return False
+
     if not (_odoo_context(text, route) or build_odoo_catalog_read_plan(text)):
         return False
 

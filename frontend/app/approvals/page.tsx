@@ -85,8 +85,21 @@ type Approval = {
   metadata?: Record<string, unknown>;
 };
 
+type ApprovalFilter = "pending" | "approved" | "rejected" | "all";
+
+const approvalFilters: Array<{
+  key: ApprovalFilter;
+  label: string;
+}> = [
+  { key: "pending", label: "En attente" },
+  { key: "approved", label: "Approuvées" },
+  { key: "rejected", label: "Rejetées" },
+  { key: "all", label: "Toutes" },
+];
+
 export default function ApprovalsPage() {
   const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [activeFilter, setActiveFilter] = useState<ApprovalFilter>("pending");
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [currentUser] = useState<AuthUser | null>(() => getStoredUser());
@@ -176,6 +189,25 @@ export default function ApprovalsPage() {
     [approvals]
   );
 
+  const filteredApprovals = useMemo(() => {
+    const sortedApprovals = [...approvals].sort((left, right) => {
+      const leftRank = left.status === "pending" ? 0 : 1;
+      const rightRank = right.status === "pending" ? 0 : 1;
+
+      if (leftRank !== rightRank) return leftRank - rightRank;
+
+      return approvalTime(right) - approvalTime(left);
+    });
+
+    if (activeFilter === "all") return sortedApprovals;
+
+    return sortedApprovals.filter((item) => item.status === activeFilter);
+  }, [activeFilter, approvals]);
+
+  const activeFilterLabel =
+    approvalFilters.find((item) => item.key === activeFilter)?.label ||
+    "En attente";
+
   return (
     <AppShell
       active="approvals"
@@ -205,7 +237,26 @@ export default function ApprovalsPage() {
             <div>
               <p className="eyebrow">Actions sensibles</p>
               <h3>File de validation</h3>
+              <p className="panelSubtext">
+                Vue actuelle : {activeFilterLabel.toLowerCase()}
+              </p>
             </div>
+          </div>
+
+          <div className="approvalTabs" role="tablist" aria-label="Filtrer les demandes d’approbation">
+            {approvalFilters.map((filter) => (
+              <button
+                aria-selected={activeFilter === filter.key}
+                className={`approvalTab ${activeFilter === filter.key ? "active" : ""}`}
+                key={filter.key}
+                onClick={() => setActiveFilter(filter.key)}
+                role="tab"
+                type="button"
+              >
+                <span>{filter.label}</span>
+                <strong>{approvalFilterCount(filter.key, approvals)}</strong>
+              </button>
+            ))}
           </div>
 
           {loading && !accessDenied && <p className="emptyText">Chargement...</p>}
@@ -216,9 +267,15 @@ export default function ApprovalsPage() {
             </p>
           )}
 
+          {!loading && !accessDenied && approvals.length > 0 && filteredApprovals.length === 0 && (
+            <p className="emptyText">
+              Aucune demande dans cette vue.
+            </p>
+          )}
+
           {!loading &&
             !accessDenied &&
-            approvals.map((approval) => {
+            filteredApprovals.map((approval) => {
               const isPending = approval.status === "pending";
 
               return (
@@ -502,13 +559,67 @@ export default function ApprovalsPage() {
         }
 
         .panelHeader {
-          margin-bottom: 18px;
+          margin-bottom: 14px;
         }
 
         .panelHeader h3 {
           margin: 6px 0 0;
           color: #101827;
           font-size: 22px;
+        }
+
+        .panelSubtext {
+          margin: 6px 0 0;
+          color: #647084;
+          font-size: 13px;
+          font-weight: 700;
+        }
+
+        .approvalTabs {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin-bottom: 18px;
+          border-bottom: 1px solid #e5e7eb;
+          padding-bottom: 14px;
+        }
+
+        .approvalTab {
+          min-height: 36px;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          border: 1px solid #d9dee7;
+          background: #ffffff;
+          color: #475569;
+          border-radius: 999px;
+          padding: 0 13px;
+          font-size: 13px;
+          font-weight: 900;
+          cursor: pointer;
+        }
+
+        .approvalTab strong {
+          min-width: 22px;
+          height: 22px;
+          display: inline-grid;
+          place-items: center;
+          border-radius: 999px;
+          background: #f1f5f9;
+          color: #647084;
+          font-size: 12px;
+        }
+
+        .approvalTab:hover,
+        .approvalTab.active {
+          border-color: #123f8c;
+          color: #123f8c;
+          background: #f8fbff;
+        }
+
+        .approvalTab.active strong {
+          background: #123f8c;
+          color: #ffffff;
         }
 
         .emptyText {
@@ -747,6 +858,19 @@ function translateRisk(risk?: string) {
   if (risk === "high") return "Élevé";
   if (risk === "blocked") return "Bloqué";
   return "Moyen";
+}
+
+function approvalFilterCount(filter: ApprovalFilter, approvals: Approval[]) {
+  if (filter === "all") return approvals.length;
+
+  return approvals.filter((item) => item.status === filter).length;
+}
+
+function approvalTime(approval: Approval) {
+  const rawDate = approval.updated_at || approval.timestamp || "";
+  const value = Date.parse(rawDate);
+
+  return Number.isNaN(value) ? 0 : value;
 }
 
 function approvalSummary(approval: Approval) {

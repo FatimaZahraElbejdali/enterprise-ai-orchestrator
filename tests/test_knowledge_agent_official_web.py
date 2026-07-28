@@ -22,6 +22,27 @@ def official_result(text=None):
     }
 
 
+def test_orchestrator_help_answer_uses_local_system_help_not_website(monkeypatch):
+    def fail_if_retrieved(*args, **kwargs):
+        raise AssertionError("System help should not use website/RAG retrieval")
+
+    monkeypatch.setattr(knowledge_agent, "search_knowledge", fail_if_retrieved)
+
+    result = knowledge_agent.run(
+        "Explique le workflow de validation humaine.",
+        capability="knowledge.general_answer",
+        execution_mode="system_help",
+    )
+
+    assert result["status"] == "completed"
+    assert result["tool_used"] == "orchestrator_help"
+    assert result["sources"] == []
+    assert "L’utilisateur envoie une demande dans le chat" in result["message"]
+    assert "RBAC" in result["message"]
+    assert "page Validations" in result["message"]
+    assert "journaux d’audit" in result["message"]
+
+
 def test_company_question_can_use_official_web_context(monkeypatch):
     monkeypatch.setattr(
         knowledge_agent,

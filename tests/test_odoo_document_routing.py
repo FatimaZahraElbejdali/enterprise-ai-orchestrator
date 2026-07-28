@@ -95,6 +95,7 @@ def test_classifier_keeps_actual_knowledge_questions(monkeypatch):
         "explain_orchestrator",
         "explain_human_approval_benefits",
         "documentation_summary",
+        "orchestrator_help",
         "summarize_documentation",
         "summarize_server_documentation",
     }

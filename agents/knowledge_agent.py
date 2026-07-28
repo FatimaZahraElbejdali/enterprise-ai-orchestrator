@@ -335,6 +335,7 @@ FACTUAL_QUESTION_PATTERNS = [
     r"^(what's|whats)\b",
     r"^(c'?est quoi|c est quoi|c quoi)\b",
     r"^(qui|ou|quel|quelle|quels|quelles)\b",
+    r"^que\s+fait\b",
     r"\b(liste|list|affiche|show|donne|give|nom|name|adresse|address|contact)\b",
 ]
 
@@ -368,6 +369,81 @@ STATIC_PROJECT_ANSWERS = [
         ),
     ),
 ]
+
+SYSTEM_HELP_TOPICS = {
+    "approval": {
+        "validation",
+        "validations",
+        "approbation",
+        "approbations",
+        "approval",
+        "approvals",
+        "action sensible",
+        "actions sensibles",
+        "sensitive action",
+        "sensitive actions",
+    },
+    "audit": {
+        "audit",
+        "journal d audit",
+        "journaux d audit",
+        "audit log",
+        "audit logs",
+        "logs",
+    },
+    "agents": {
+        "agent",
+        "agents",
+        "agent odoo",
+        "agent serveur",
+        "agent support",
+        "agent connaissance",
+        "odoo agent",
+        "server agent",
+        "support agent",
+        "knowledge agent",
+        "choisit un agent",
+        "choisir un agent",
+        "routing",
+        "routeur",
+        "routage",
+    },
+    "orchestrator": {
+        "orchestrateur",
+        "orchestrator",
+        "orchestrateur ia",
+        "enterprise ai orchestrator",
+    },
+    "access_control": {
+        "rbac",
+        "controle d acces",
+        "contrôle d accès",
+        "droits",
+        "permission",
+        "permissions",
+        "role",
+        "roles",
+        "rôle",
+        "rôles",
+        "access control",
+    },
+}
+
+SYSTEM_HELP_INTENT_TERMS = {
+    "comment",
+    "explique",
+    "explain",
+    "fonctionne",
+    "fonctionnent",
+    "how",
+    "pourquoi",
+    "que fait",
+    "que se passe",
+    "quels",
+    "what does",
+    "what happens",
+    "why",
+}
 
 
 def _normalize_text(message: str):
@@ -452,6 +528,38 @@ def is_general_information_question(message: str):
         return False
 
     return _is_question_like(text) or is_internal_knowledge_question(message)
+
+
+def is_orchestrator_help_question(message: str):
+    text = _normalize_text(message)
+
+    if not text:
+        return False
+
+    if is_advice_or_opinion_question(message):
+        return False
+
+    has_help_intent = _is_question_like(text) or any(
+        term in text for term in SYSTEM_HELP_INTENT_TERMS
+    )
+
+    if not has_help_intent:
+        return False
+
+    return _system_help_topic(message) is not None
+
+
+def _system_help_topic(message: str) -> str | None:
+    text = _normalize_text(message)
+
+    if not text:
+        return None
+
+    for topic, terms in SYSTEM_HELP_TOPICS.items():
+        if any(term in text for term in terms):
+            return topic
+
+    return None
 
 
 def normalize_knowledge_query(message: str):
@@ -957,6 +1065,113 @@ def _response(
     }
 
 
+def _answer_orchestrator_help(
+    message: str,
+    knowledge_scopes: tuple[str, ...] = ("company_common",),
+    llm_project_env: str | None = None,
+):
+    topic = _system_help_topic(message) or "orchestrator"
+    text = _normalize_text(message)
+    english = bool(re.search(r"\b(what|how|why|explain|workflow|rbac)\b", text)) and not any(
+        term in text
+        for term in {
+            "comment",
+            "explique",
+            "fonctionne",
+            "validation humaine",
+            "journaux",
+            "controle",
+            "contrôle",
+            "approbation",
+        }
+    )
+
+    if english:
+        answers = {
+            "approval": (
+                "When a sensitive action is requested, the user sends the request in chat, "
+                "the orchestrator classifies it and selects the right agent, then checks RBAC "
+                "permissions and risk. Safe read-only actions can run directly. Sensitive Odoo "
+                "write actions, such as changing a price or updating data, are not executed "
+                "immediately: the backend creates an approval request, an authorized user "
+                "approves or rejects it, and approved actions are executed through the controlled "
+                "Odoo capability. The request, decision, user, status, and result are recorded "
+                "in the audit logs."
+            ),
+            "audit": (
+                "Audit logs record important operational events: approval requests and decisions, "
+                "RBAC denials, security blocks, Odoo write requests, unsupported Odoo-like actions, "
+                "and system or Odoo errors. Normal chat history stays in the chat session."
+            ),
+            "access_control": (
+                "RBAC decides whether the logged-in user can use a capability. The LLM may understand "
+                "the request, but permissions, risk policy, approvals, and registered backend tools "
+                "remain authoritative."
+            ),
+            "agents": (
+                "The orchestrator routes requests to specialized agents: Odoo for safe ERP reads and "
+                "approval-controlled writes, Server for configured diagnostics, Support for helpdesk "
+                "troubleshooting, Knowledge for general and company questions, and Security for blocked "
+                "or sensitive requests."
+            ),
+            "orchestrator": (
+                "The Enterprise AI Orchestrator is an internal AI console. It understands natural "
+                "language, selects the right agent, checks RBAC and risk, executes only registered safe "
+                "capabilities, requires approval for sensitive actions, and records important events."
+            ),
+        }
+    else:
+        answers = {
+            "approval": (
+                "Voici le workflow de validation humaine dans l’orchestrateur :\n"
+                "1. L’utilisateur envoie une demande dans le chat.\n"
+                "2. L’orchestrateur classe la demande et sélectionne le bon agent, par exemple l’agent Odoo.\n"
+                "3. Le système vérifie les permissions avec le RBAC et évalue le niveau de risque.\n"
+                "4. Les actions sûres en lecture seule, comme une vérification de stock ou une recherche de facture, peuvent être exécutées directement.\n"
+                "5. Les écritures Odoo sensibles, comme modifier un prix ou mettre à jour une donnée, ne sont pas exécutées immédiatement.\n"
+                "6. Le backend crée une demande dans la page Validations.\n"
+                "7. Un utilisateur autorisé peut approuver ou rejeter la demande.\n"
+                "8. Si elle est approuvée, le backend exécute l’action Odoo contrôlée.\n"
+                "9. La demande, la décision, l’utilisateur, le statut et le résultat sont enregistrés dans les journaux d’audit."
+            ),
+            "audit": (
+                "Les journaux d’audit servent à garder une trace des événements importants : validations demandées, décisions d’approbation ou de refus, accès refusés par le RBAC, actions bloquées par la sécurité, demandes d’écriture Odoo et erreurs système ou Odoo. Les échanges de chat ordinaires restent dans l’historique de conversation plutôt que de saturer l’audit."
+            ),
+            "access_control": (
+                "Le contrôle d’accès RBAC vérifie les droits du compte connecté avant l’exécution. L’IA peut comprendre la demande, mais elle ne décide pas seule : les permissions, la politique de risque, les validations humaines et les capacités backend enregistrées restent prioritaires."
+            ),
+            "agents": (
+                "L’orchestrateur choisit un agent selon le domaine de la demande : l’agent Odoo consulte les données ERP et prépare les écritures sensibles pour validation, l’agent Serveur exécute les diagnostics configurés, l’agent Support répond aux problèmes IT, l’agent Connaissance répond aux questions générales ou internes, et l’agent Sécurité bloque les demandes dangereuses."
+            ),
+            "orchestrator": (
+                "L’Enterprise AI Orchestrator est une console IA interne. Il comprend les demandes en langage naturel, sélectionne le bon agent, applique le RBAC, évalue le risque, exécute seulement des capacités backend sûres et enregistrées, exige une validation humaine pour les actions sensibles et journalise les événements importants."
+            ),
+        }
+
+    answer = answers.get(topic) or answers["orchestrator"]
+
+    response = _response(
+        answer=answer,
+        tool_used="orchestrator_help",
+        provider="local_policy",
+        model="orchestrator_help",
+        llm_success=True,
+        error=None,
+        context_used=False,
+        knowledge_scopes=knowledge_scopes,
+        llm_project_env=llm_project_env,
+        sources=[],
+        retrieval_query=None,
+    )
+    response["intent"] = "orchestrator_help"
+    response["parser_source"] = "system_help"
+    response["parsed_action"] = "orchestrator_help"
+    response["system_help_topic"] = topic
+    if isinstance(response.get("result"), dict):
+        response["result"]["system_help_topic"] = topic
+    return response
+
+
 def run(
     message: str,
     knowledge_scopes: tuple[str, ...] = ("company_common",),
@@ -966,6 +1181,16 @@ def run(
     execution_mode: str | None = None,
     semantic_request: dict | None = None,
 ):
+    if execution_mode == "system_help" or (
+        capability == "knowledge.general_answer"
+        and is_orchestrator_help_question(message)
+    ):
+        return _answer_orchestrator_help(
+            message,
+            knowledge_scopes=knowledge_scopes,
+            llm_project_env=llm_project_env,
+        )
+
     if capability == "knowledge.enterprise_answer" or execution_mode == "retrieval_grounded":
         retrieval = _find_repository_context(
             message,

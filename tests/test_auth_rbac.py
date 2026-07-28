@@ -616,7 +616,7 @@ def test_chat_odoo_connection_status_uses_odoo_status_capability(monkeypatch):
     assert "connecté" in data["response"]
 
 
-def test_orchestrator_role_explanation_uses_direct_knowledge_not_rag(monkeypatch):
+def test_orchestrator_role_explanation_uses_system_help_not_rag(monkeypatch):
     calls = []
 
     def fake_generate_response(prompt, system_prompt=None, **kwargs):
@@ -649,9 +649,12 @@ def test_orchestrator_role_explanation_uses_direct_knowledge_not_rag(monkeypatch
     assert data["status"] == "completed"
     assert data["technical"]["agent"] == "knowledge_agent"
     assert data["technical"]["capability"] == "knowledge.general_answer"
-    assert data["technical"]["execution_mode"] == "llm_direct"
+    assert data["technical"]["execution_mode"] == "system_help"
+    assert data["technical"]["tool_used"] == "orchestrator_help"
     assert data["sources"] == []
-    assert calls
+    assert "console ia interne" in data["response"].lower()
+    assert "validation humaine" in data["response"].lower()
+    assert not calls
 
 
 def test_odoo_manager_can_request_write_but_still_requires_approval(monkeypatch):

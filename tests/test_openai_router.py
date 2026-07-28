@@ -981,6 +981,68 @@ def test_classify_message_routes_company_topic_general_answer_to_retrieval(monke
     assert result["execution_mode"] == "retrieval_grounded"
 
 
+def test_orchestrator_help_questions_use_system_help_not_rag(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: {
+            "intent": "general_information_question",
+            "request_type": "enterprise_knowledge",
+            "domain": "knowledge",
+            "capability": "knowledge.enterprise_answer",
+            "execution_mode": "retrieval_grounded",
+            "agent": "knowledge_agent",
+            "selected_agent": "knowledge_agent",
+            "action": "enterprise_answer",
+            "target_system": "knowledge",
+            "risk_level": "low",
+            "requires_approval": False,
+            "topic": "orchestrator help",
+            "parameters": {},
+            "entities": {"knowledge_topic": "orchestrator help"},
+            "confidence": "high",
+            "reason": "Provider incorrectly selected retrieval.",
+            "classifier_source": "openai_structured",
+            "semantic_source": "openai_structured",
+        },
+    )
+
+    for message in [
+        "Explique le workflow de validation humaine.",
+        "Comment fonctionne la validation humaine ?",
+        "Explique les journaux d’audit.",
+        "Comment fonctionne le contrôle d’accès ?",
+        "Quels agents existent dans l’orchestrateur ?",
+        "Explain the human approval workflow.",
+    ]:
+        result = classify_message(message)
+
+        assert result["selected_agent"] == "knowledge_agent"
+        assert result["intent"] == "orchestrator_help"
+        assert result["capability"] == "knowledge.general_answer"
+        assert result["execution_mode"] == "system_help"
+        assert result["request_type"] == "general_knowledge"
+        assert result["requires_approval"] is False
+
+
+def test_company_information_questions_still_use_rag(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.classifier_router.classify_with_openai_router",
+        lambda *args, **kwargs: None,
+    )
+
+    for message in [
+        "Que fait Jamain Baco ?",
+        "Raconte-moi l’histoire du groupe Jamain Baco.",
+    ]:
+        result = classify_message(message)
+
+        assert result["selected_agent"] == "knowledge_agent"
+        assert result["capability"] == "knowledge.enterprise_answer"
+        assert result["execution_mode"] == "retrieval_grounded"
+        assert result["requires_approval"] is False
+
+
 def test_required_routes_fall_back_safely_when_openai_unavailable(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("LLM_ROUTER_PROVIDER", raising=False)
@@ -1003,6 +1065,7 @@ def test_required_routes_fall_back_safely_when_openai_unavailable(monkeypatch):
         assert result["selected_agent"] == selected_agent
         if result["classifier_source"] not in {
             "backend_safety_override",
+            "system_help_router",
             "local_knowledge_router",
             "local_odoo_read_rules",
         }:
@@ -1061,7 +1124,6 @@ def test_general_company_questions_use_limited_fallback_when_openai_unavailable(
     for message in [
         "what is jamain baco",
         "c’est quoi Jamain Baco ?",
-        "quels sont les agents disponibles ?",
     ]:
         result = classify_message(message)
 
@@ -1076,11 +1138,13 @@ def test_general_company_questions_use_limited_fallback_when_openai_unavailable(
     for message in [
         "what can this orchestrator do?",
         "comment fonctionne l’orchestrateur ?",
+        "quels sont les agents disponibles ?",
     ]:
         orchestrator = classify_message(message)
 
         assert orchestrator["selected_agent"] == "knowledge_agent"
-        assert orchestrator["intent"] == "explain_orchestrator"
+        assert orchestrator["intent"] == "orchestrator_help"
+        assert orchestrator["execution_mode"] == "system_help"
         assert orchestrator["requires_approval"] is False
 
 
@@ -1146,7 +1210,8 @@ def test_manual_regression_prompts_keep_expected_routes(monkeypatch):
 
     assert orchestrator_role["selected_agent"] == "knowledge_agent"
     assert orchestrator_role["capability"] == "knowledge.general_answer"
-    assert orchestrator_role["execution_mode"] == "llm_direct"
+    assert orchestrator_role["intent"] == "orchestrator_help"
+    assert orchestrator_role["execution_mode"] == "system_help"
 
     assert product_details["selected_agent"] == "odoo_agent"
     assert product_details["capability"] == "odoo.product_stock"

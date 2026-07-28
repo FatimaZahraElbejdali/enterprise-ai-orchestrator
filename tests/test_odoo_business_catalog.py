@@ -39,6 +39,9 @@ def test_customer_invoice_equivalent_french_phrases_use_same_catalog_entry():
         "factures clients postées en mai 2026",
         "liste les factures de vente validées en mai 2026",
         "donne moi les factures clients du mois 5 2026",
+        "affiche les factures comptabilisées du mois de mai 2026",
+        "show posted customer invoices for May 2026",
+        "posted invoices for May 2026",
     ]
 
     for prompt in prompts:
@@ -46,6 +49,18 @@ def test_customer_invoice_equivalent_french_phrases_use_same_catalog_entry():
         assert plan["business_object"] == "customer_invoices"
         assert plan["model"] == "account.move"
         assert {"field": "move_type", "operator": "=", "value": "out_invoice"} in plan["filters"]
+        assert plan["limit"] == 10
+
+
+def test_generic_posted_invoice_prompt_builds_customer_invoice_filters():
+    plan = build_odoo_catalog_read_plan("affiche les factures comptabilisées du mois de mai 2026")
+
+    assert plan["business_object"] == "customer_invoices"
+    assert {"field": "move_type", "operator": "=", "value": "out_invoice"} in plan["filters"]
+    assert {"field": "state", "operator": "=", "value": "posted"} in plan["filters"]
+    assert {"field": "invoice_date", "operator": ">=", "value": "2026-05-01"} in plan["filters"]
+    assert {"field": "invoice_date", "operator": "<=", "value": "2026-05-31"} in plan["filters"]
+    assert plan["limit"] == 10
 
 
 def test_vendor_bill_and_order_catalog_entries_are_distinct():

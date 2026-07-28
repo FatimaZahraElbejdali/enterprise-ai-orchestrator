@@ -12,7 +12,7 @@ export type AuthUser = {
 
 export const ACCESS_DENIED_MESSAGE =
   "Accès refusé : votre rôle ne permet pas d’effectuer cette action.";
-export const TOKEN_EXPIRED_MESSAGE = "Votre session a expiré. Veuillez vous reconnecter.";
+export const TOKEN_EXPIRED_MESSAGE = "Session expirée, veuillez vous reconnecter.";
 export const API_ERROR_MESSAGE =
   "Une erreur est survenue lors du traitement de la demande.";
 export const BACKEND_UNREACHABLE_MESSAGE =
@@ -122,6 +122,12 @@ export function saveChatDraft(draft: string) {
   }
 }
 
+export function clearSavedChatDraft() {
+  if (typeof window === "undefined") return;
+
+  window.localStorage.removeItem(CHAT_DRAFT_KEY);
+}
+
 export function consumeSavedChatDraft() {
   if (typeof window === "undefined") return "";
 
@@ -135,7 +141,9 @@ export function handleSessionExpired(options: ApiFetchOptions = {}) {
 
   const returnTo = options.returnTo || currentPath();
 
-  if (options.draftToPreserve) {
+  const existingDraft = window.localStorage.getItem(CHAT_DRAFT_KEY) || "";
+
+  if (!existingDraft.trim() && options.draftToPreserve) {
     saveChatDraft(options.draftToPreserve);
   }
 

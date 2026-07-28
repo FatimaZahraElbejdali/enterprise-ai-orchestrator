@@ -1551,9 +1551,7 @@ def test_customer_invoice_listing_no_records_message_is_specific(monkeypatch):
     )
 
     assert result["status"] == "not_found"
-    assert "Aucune facture client validée" in result["message"]
-    assert "2026-05-01" in result["message"]
-    assert "2026-05-31" in result["message"]
+    assert result["message"] == "Aucune facture client validée trouvée pour mai 2026."
 
 
 def test_analytic_account_details_returns_safe_business_fields(monkeypatch):

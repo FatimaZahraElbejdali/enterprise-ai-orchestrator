@@ -145,6 +145,7 @@ ODOO_ACTION_SCHEMA = {
                     "supplier_ranking",
                     "customer_ranking",
                     "odoo_status",
+                    "list_customer_invoices",
                     "odoo_search_records",
                     "odoo_generic_read",
                     "odoo_get_record_details",
@@ -3764,9 +3765,63 @@ def _customer_invoice_period_text(filters: list) -> str:
             end_date = item.get("value")
 
     if start_date and end_date:
+        month_label = _whole_month_label(start_date, end_date)
+        if month_label:
+            return month_label
         return f"du {start_date} au {end_date}"
 
     return "sur la période demandée"
+
+
+def _whole_month_label(start_date: str, end_date: str) -> str | None:
+    month_names = {
+        1: "janvier",
+        2: "février",
+        3: "mars",
+        4: "avril",
+        5: "mai",
+        6: "juin",
+        7: "juillet",
+        8: "août",
+        9: "septembre",
+        10: "octobre",
+        11: "novembre",
+        12: "décembre",
+    }
+    start_match = re.fullmatch(r"(\d{4})-(\d{2})-01", str(start_date))
+    end_match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", str(end_date))
+
+    if not start_match or not end_match:
+        return None
+
+    year = int(start_match.group(1))
+    month = int(start_match.group(2))
+    end_year = int(end_match.group(1))
+    end_month = int(end_match.group(2))
+    end_day = int(end_match.group(3))
+
+    if year != end_year or month != end_month or month not in month_names:
+        return None
+
+    expected_last_day = {
+        1: 31,
+        2: 29 if (year % 400 == 0 or (year % 4 == 0 and year % 100 != 0)) else 28,
+        3: 31,
+        4: 30,
+        5: 31,
+        6: 30,
+        7: 31,
+        8: 31,
+        9: 30,
+        10: 31,
+        11: 30,
+        12: 31,
+    }[month]
+
+    if end_day != expected_last_day:
+        return None
+
+    return f"{month_names[month]} {year}"
 
 
 def _format_customer_invoice_summary(raw_result: dict, filters: list) -> str:
@@ -3781,7 +3836,7 @@ def _format_customer_invoice_summary(raw_result: dict, filters: list) -> str:
     period_text = _customer_invoice_period_text(filters)
 
     if not records:
-        return f"Aucune facture client{status_text} correspondant à {period_text} n’a été trouvée."
+        return f"Aucune facture client{status_text} trouvée pour {period_text}."
 
     title = "Factures clients validées" if posted_requested else "Factures clients"
     lines = [f"{title} trouvées {period_text}:"]

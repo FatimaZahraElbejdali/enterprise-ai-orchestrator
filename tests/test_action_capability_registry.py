@@ -221,6 +221,8 @@ def test_customer_invoice_listing_equivalent_french_phrasings():
         "factures clients postées en mai 2026",
         "liste les factures de vente validées en mai 2026",
         "donne moi les factures clients du mois de mai 2026",
+        "affiche les factures comptabilisées du mois de mai 2026",
+        "show posted customer invoices for May 2026",
     ]
 
     for prompt in prompts:
@@ -233,6 +235,7 @@ def test_customer_invoice_listing_equivalent_french_phrasings():
             approval_required=False,
         )
         assert route["parameters"]["model"] == "account.move"
+        assert route["parameters"]["limit"] == 10
 
 
 def test_employee_count_routes_to_odoo_catalog_read():
